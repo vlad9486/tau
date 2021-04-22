@@ -1,0 +1,17 @@
+[target.aarch64-unknown-none-softfloat]
+rustflags = [
+  "-Clink-arg=-Tkernel-aarch64.ld",
+  "-Clink-arg=-zmax-page-size=0x1000",
+  #"-Clinker-plugin-lto",
+  "-Ctarget-feature=-fp-armv8",
+  "-Ctarget-cpu=cortex-a53",
+]
+#runner = "qemu-system-aarch64 -M raspi3 -monitor stdio -display none -kernel"
+runner = "qemu-system-aarch64 -M raspi3 -serial null -serial stdio -display none -kernel"
+
+[target.aarch64-unknown-none]
+rustflags = [
+  "-Clink-arg=-zmax-page-size=0x1000",
+  "-Ctarget-feature=-fp-armv8",
+  "-Ctarget-cpu=cortex-a53",
+]

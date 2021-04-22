@@ -1,0 +1,46 @@
+{
+    "cSpell.words": [
+        // tau
+        "cando",
+
+        // common
+        "aarch",
+        "rodata",
+        "regs",
+        "gpio",
+        "intrinsics",
+        "uart",
+        "bitfields",
+        "mmio",
+        "NUMBITS",
+        "repr",
+        "softfloat",
+        "serror",
+
+        // asm
+        "adrp",
+        "nomem",
+        "nostack",
+        "noreturn",
+        "eret",
+
+        // registers
+        // execution level
+        "CNTHCTL",
+        "CNTVOFF",
+        "CTEN",
+        "MPIDR",
+        "PCEN",
+        "PCTEN",
+        "SPSR",
+        "VBAR",
+        // gpio
+        "GPFSEL",
+        "GPPUDCLK",
+        "PUDCLK",
+        "GPPUD",
+        "FSEL",
+        // uart
+        "CNTL",
+    ]
+}

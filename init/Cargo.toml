@@ -1,0 +1,13 @@
+[package]
+name = "tau-init"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+tau-hw = { path = "../hw", optional = true }
+
+tau-cpu = { path = "../cpu", optional = true }
+
+[features]
+default = ["rpi3"]
+rpi3 = ["tau-hw/rpi3", "tau-cpu/cortex-a"]

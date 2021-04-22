@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "cando",
+    "cando/macros",
+    "init",
+    "cpu",
+    "cpu/macros",
+    "cpu/regs",
+    "cpu/cortex-a",
+    "hw",
+    "hw/rpi3",
+]

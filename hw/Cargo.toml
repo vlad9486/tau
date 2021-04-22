@@ -1,0 +1,10 @@
+[package]
+name = "tau-hw"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+tau-rpi3 = { path = "rpi3", optional = true }
+
+[features]
+rpi3 = ["tau-rpi3"]

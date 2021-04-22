@@ -1,0 +1,11 @@
+[package]
+name = "cando"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+cando-macros = { path = "macros", optional = true }
+
+[features]
+default = ["macros"]
+macros = ["cando-macros"]

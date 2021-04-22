@@ -1,0 +1,7 @@
+[package]
+name = "tau-rpi3"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+tau-cpu = { path = "../../cpu", features = ["cortex-a", "macros"] }
