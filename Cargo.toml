@@ -1,0 +1,6 @@
+[workspace]
+members = ["supervisor", "system", "tau"]
+resolver = "3"
+
+[profile.release]
+lto = true
