@@ -6,7 +6,7 @@ use super::{
     vmem::{Window, Mapping},
     module::{ModuleTables, Invocation},
     scheduler::Thread,
-    llfree, vmem, sbi,
+    llfree, vmem, sbi, cpu,
 };
 
 pub struct Context {
@@ -64,7 +64,7 @@ pub unsafe fn init(
     unsafe { module.write_bytes(0, 1) };
 
     let module = unsafe { &*module };
-    module.invocations.init();
+    module.init();
 
     let elf_base = context.base_addr + (tau::loader::SYSTEM_OFFSET << 12);
     let data = (window as *mut Window).cast::<u8>().with_addr(elf_base);
@@ -135,15 +135,15 @@ pub unsafe fn init(
 
     let offset = deps_vaddr - header.p_vaddr as usize;
     for i in 0..deps_num {
-        let range = (offset + i * size_of::<tau::Dependency>())
-            ..(offset + (i + 1) * size_of::<tau::Dependency>());
+        let range = (offset + i * size_of::<tau::ModuleId>())
+            ..(offset + (i + 1) * size_of::<tau::ModuleId>());
         let Some(dep_repr) = data.get(range) else {
             return Err(InitError::Manifest);
         };
-        let tau::Dependency { name, slot, .. } = unsafe { *dep_repr.as_ptr().cast() };
+        let module_id = unsafe { *dep_repr.as_ptr().cast::<tau::ModuleId>() };
         // TODO: find the module and put in the table
-        // module.dependencies.put(slot, dependency);
-        let _ = (name, slot);
+        // module.insert_dependency(...);
+        let _ = module_id;
     }
 
     let sl = memoffset::offset_of!(tau::Manifest, mapped_regions);
@@ -168,15 +168,9 @@ pub unsafe fn init(
         )?;
     }
 
-    let satp = Window::current_root();
     let inv = unsafe {
         module
-            .invocations
-            .insert(Invocation {
-                satp,
-                sepc: 1,
-                sp: 0,
-            })
+            .insert_invocation(Invocation::Supervisor)
             .unwrap_unchecked()
     };
 
@@ -203,34 +197,30 @@ pub fn syscall(
 
     match tau::Call::decode(msg[0]) {
         Ok(tau::Call::Invoke { slot, share, arg }) => {
-            // TODO:
             write!(sbi::Console, "invoke: {slot}\r\n").unwrap_or_default();
 
-            let _ = (module.dependencies.get(slot), share, arg);
-            loop {
-                hint::spin_loop();
+            if let Some(dependency) = module.get_dependency(slot) {
+                // TODO:
+                // prepare address space of the dependency and invoke
+                let _ = (dependency, share, arg);
+            } else {
+                write!(sbi::Console, "no such dependency: {slot}\r\n").unwrap_or_default();
             }
         }
         Ok(tau::Call::Respond { inv, accept, code }) => {
             write!(
                 sbi::Console,
-                "respond inv={inv} accept={accept} code={code}\r\n"
+                "respond inv={inv}, accept={accept}, code={code}\r\n"
             )
             .unwrap_or_default();
 
-            if let Some(inv) = module.invocations.get(inv) {
-                if inv.sepc == 1 {
+            if let Some(inv) = module.remove_invocation(inv) {
+                match inv {
                     // special case, nowhere to return
-                    sbi::system_reset().unwrap_or_default();
+                    Invocation::Supervisor => sbi::system_reset(),
+                    // isn't it easy!
+                    Invocation::Regular { root } => cpu::csrw!("satp", root.0.get()),
                 }
-                unsafe {
-                    arch::asm! {
-                        "csrw satp, {satp}",
-                        satp = in(reg) inv.satp.0.get(),
-                        options(nomem, nostack)
-                    }
-                }
-                // TODO:
             } else {
                 write!(sbi::Console, "no such invocation: {inv}\r\n").unwrap_or_default();
                 loop {

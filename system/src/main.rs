@@ -24,7 +24,10 @@ static MANIFEST: tau::Manifest = tau::Manifest {
         name: *b"system\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
     },
     entry: main,
-    dependencies: &[],
+    dependencies: &[tau::ModuleId {
+        version: (0, 1),
+        name: *b"some other module\0\0\0",
+    }],
     mapped_regions: &[tau::MappedRegion::stack(0x10000)],
 };
 

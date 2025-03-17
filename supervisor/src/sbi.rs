@@ -1,4 +1,4 @@
-use core::fmt;
+use core::{fmt, hint};
 
 use super::asm;
 
@@ -46,9 +46,11 @@ pub fn set_timer(time: usize) -> Result<usize, SbiError> {
 #[inline(always)]
 pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<usize, SbiError> {
     SbiError::from_code(unsafe {
-        asm::sbi(u32::from_be_bytes(*b"\0HSM"), 0, [
-            hart_id, start_addr, opaque,
-        ])
+        asm::sbi(
+            u32::from_be_bytes(*b"\0HSM"),
+            0,
+            [hart_id, start_addr, opaque],
+        )
     })
 }
 
@@ -58,8 +60,11 @@ pub fn hart_stop() -> Result<usize, SbiError> {
 }
 
 #[inline(always)]
-pub fn system_reset() -> Result<usize, SbiError> {
-    SbiError::from_code(unsafe { asm::sbi(u32::from_be_bytes(*b"SRST"), 0, [0, 0]) })
+pub fn system_reset() -> ! {
+    unsafe {
+        asm::sbi(u32::from_be_bytes(*b"SRST"), 0, [0, 0]);
+        hint::unreachable_unchecked()
+    };
 }
 
 pub struct Printer;

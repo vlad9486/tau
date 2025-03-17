@@ -4,29 +4,11 @@ use core::{fmt, num::NonZeroUsize};
 pub struct Manifest {
     pub this: ModuleId,
     pub entry: Entry,
-    pub dependencies: &'static [Dependency],
+    pub dependencies: &'static [ModuleId],
     pub mapped_regions: &'static [MappedRegion],
 }
 
 pub type Entry = extern "C" fn(usize, usize, usize, usize, usize, usize) -> !;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Dependency {
-    pub name: ModuleId,
-    pub slot: u16,
-    pub _hole: [u16; 3],
-}
-
-impl Dependency {
-    pub const fn new(name: ModuleId, slot: u16) -> Self {
-        Dependency {
-            name,
-            slot,
-            _hole: [0; 3],
-        }
-    }
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
