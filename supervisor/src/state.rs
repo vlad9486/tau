@@ -6,7 +6,7 @@ use super::{
     vmem::{Window, Mapping},
     module::{ModuleTables, Invocation},
     scheduler::Thread,
-    llfree, vmem,
+    llfree, vmem, sbi,
 };
 
 pub struct Context {
@@ -41,7 +41,6 @@ pub enum InitError {
 /// # Safety
 /// `module` must be external static
 pub unsafe fn init(
-    hart_id: usize,
     window: &mut Window,
     thread: &mut Thread,
     module: *mut ModuleTables,
@@ -60,7 +59,7 @@ pub unsafe fn init(
     };
 
     window
-        .map(asid, mapping, || context.page(thread.hart))
+        .map(asid, mapping, || context.page(thread.hart_id()))
         .map_err(|_| tau::AllocError::OutOfMemory)?;
     unsafe { module.write_bytes(0, 1) };
 
@@ -107,7 +106,7 @@ pub unsafe fn init(
                 flags,
             };
 
-            window.map(0, mapping, || context.page(hart_id))?;
+            window.map(0, mapping, || context.page(thread.hart_id()))?;
         }
     }
 
@@ -175,7 +174,7 @@ pub unsafe fn init(
             .invocations
             .insert(Invocation {
                 satp,
-                sepc: context.base_addr,
+                sepc: 1,
                 sp: 0,
             })
             .unwrap_unchecked()
@@ -200,22 +199,48 @@ pub fn syscall(
     context: &Context,
     mut msg: [usize; 6],
 ) -> [usize; 6] {
+    use core::fmt::Write;
+
     match tau::Call::decode(msg[0]) {
         Ok(tau::Call::Invoke { slot, share, arg }) => {
             // TODO:
+            write!(sbi::Console, "invoke: {slot}\r\n").unwrap_or_default();
+
             let _ = (module.dependencies.get(slot), share, arg);
             loop {
                 hint::spin_loop();
             }
         }
         Ok(tau::Call::Respond { inv, accept, code }) => {
-            // TODO: find an invocation and return
-            let _ = (module.invocations.get(inv), accept, code);
-            loop {
-                hint::spin_loop();
+            write!(
+                sbi::Console,
+                "respond inv={inv} accept={accept} code={code}\r\n"
+            )
+            .unwrap_or_default();
+
+            if let Some(inv) = module.invocations.get(inv) {
+                if inv.sepc == 1 {
+                    // special case, nowhere to return
+                    sbi::system_reset().unwrap_or_default();
+                }
+                unsafe {
+                    arch::asm! {
+                        "csrw satp, {satp}",
+                        satp = in(reg) inv.satp.0.get(),
+                        options(nomem, nostack)
+                    }
+                }
+                // TODO:
+            } else {
+                write!(sbi::Console, "no such invocation: {inv}\r\n").unwrap_or_default();
+                loop {
+                    hint::spin_loop();
+                }
             }
         }
         Ok(tau::Call::Spawn { entry }) => {
+            write!(sbi::Console, "spawn: {entry:016x}\r\n").unwrap_or_default();
+
             // TODO:
             let _ = entry;
             loop {
@@ -223,12 +248,16 @@ pub fn syscall(
             }
         }
         Ok(tau::Call::Exit) => {
+            write!(sbi::Console, "exit\r\n").unwrap_or_default();
+
             // TODO:
             loop {
                 hint::spin_loop();
             }
         }
         Ok(tau::Call::Join { thread_id }) => {
+            write!(sbi::Console, "join {thread_id}\r\n").unwrap_or_default();
+
             // TODO:
             let _ = thread_id;
             loop {
@@ -248,11 +277,16 @@ pub fn syscall(
                 Err(err) => err as usize,
             };
         }
-        Ok(tau::Call::Unmap) => {}
+        Ok(tau::Call::Unmap) => {
+            // TODO:
+        }
         Ok(tau::Call::Wait) => wait(),
-        Err(_) => loop {
-            hint::spin_loop();
-        },
+        Err(a0) => {
+            write!(sbi::Console, "cannot decode {a0:016x}\r\n").unwrap_or_default();
+            loop {
+                hint::spin_loop();
+            }
+        }
     }
 
     msg
@@ -276,7 +310,7 @@ pub fn alloc_pages(
 
     let asid = Window::current_root().asid();
     window
-        .map(asid, mapping, || context.page(thread.hart))
+        .map(asid, mapping, || context.page(thread.hart_id()))
         .map_err(|_| tau::AllocError::OutOfMemory)
 }
 

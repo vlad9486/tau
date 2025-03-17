@@ -156,15 +156,22 @@ extern "C" fn main(
     plic.enable(context_id, &uart_int);
     plic_tc.set_threshold(InterruptPriority::_0);
 
-    loop {
+    'main: loop {
         tau::Ubi::wait();
         if let Some(int) = plic_tc.next() {
-            if int == uart_int {
+            let is_uart = int == uart_int;
+            plic_tc.complete(int);
+            if is_uart {
                 while let Some(c) = uart.rx() {
                     uart.tx(c);
+                    if c == b'\r' {
+                        uart.tx(b'\n');
+                        break 'main;
+                    }
                 }
             }
-            plic_tc.complete(int);
         }
     }
+
+    tau::Ubi::respond(inv.inv, 0, [])
 }

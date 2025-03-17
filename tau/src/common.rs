@@ -172,8 +172,8 @@ impl Call {
         } else {
             let flag = ((a0 & 0b0010) >> 1) != 0;
             let discriminant = (a0 & 0b1100) >> 2;
-            let arg = ((a0 & 0xfff0) >> 4) as u16;
-            let id = ((a0 & 0xffff0000) >> 16) as u16;
+            let id = ((a0 & 0xfff0) >> 4) as u16;
+            let arg = ((a0 & 0xffff0000) >> 16) as u16;
             match discriminant {
                 0b00 => {
                     let slot = id;
@@ -186,7 +186,7 @@ impl Call {
                     let code = arg;
                     Ok(Self::Respond { inv, accept, code })
                 }
-                0b10 => match arg {
+                0b10 => match id {
                     0 => Ok(Self::Exit),
                     1 => {
                         let thread_id = id;

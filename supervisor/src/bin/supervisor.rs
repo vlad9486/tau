@@ -79,8 +79,9 @@ extern "C" fn init(
         };
     }
     let context = unsafe { (*__CONTEXT.get()).assume_init_ref() };
+    thread.set_hart_id(hart_id);
 
-    match unsafe { state::init(hart_id, window, thread, module, context) } {
+    match unsafe { state::init(window, thread, module, context) } {
         Ok((satp, sepc, inv)) => unsafe {
             arch::asm! {
                 "li t0, 0x100",

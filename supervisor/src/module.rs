@@ -91,9 +91,9 @@ pub struct Dependency {
 }
 
 #[repr(C)]
-pub struct DependencyEntry {
-    pub stem: AtomicUsize,
-    pub sepc: AtomicUsize,
+struct DependencyEntry {
+    stem: AtomicUsize,
+    sepc: AtomicUsize,
 }
 
 #[repr(C)]

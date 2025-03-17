@@ -1,11 +1,18 @@
-use super::vmem;
-
 #[repr(C)]
 pub struct Thread {
     pub registers: [usize; 64],
     pub sepc: usize,
-    pub satp: Option<vmem::Root>,
-    pub hart: usize,
+}
+
+impl Thread {
+    // use zero register place to store hart id
+    pub fn set_hart_id(&mut self, hart_id: usize) {
+        self.registers[0] = hart_id;
+    }
+
+    pub fn hart_id(&self) -> usize {
+        self.registers[0]
+    }
 }
 
 #[repr(C)]
