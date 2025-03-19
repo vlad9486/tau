@@ -11,6 +11,9 @@ pub use self::plic::{Plic, PlicThresholdClaim, InterruptPriority, InterruptNumbe
 mod uart;
 pub use self::uart::{UartIo, UartPrinter, Uart};
 
+mod sdio_platform;
+use self::sdio_platform::Device as Sdio;
+
 #[cfg(not(test))]
 #[panic_handler]
 fn panic_handler(_info: &core::panic::PanicInfo) -> ! {
@@ -128,16 +131,6 @@ extern "C" fn main(
     };
     let addr = ((addr_hi.to_be() as usize) << 32) + (addr_lo.to_be() as usize);
 
-    // let Some(sdio_config) = dtb.iter().find_map(|(props, path)| {
-    //     (path[1] == "soc" && path[2].starts_with("sdio0@")).then_some(props)
-    // }) else {
-    //     tau::Ubi::respond(invocation_id, 0, [1]);
-    // };
-    // let Some(status) = sdio_config.find_str(|name| name == "status") else {
-    //     tau::Ubi::respond(invocation_id, 0, [1]);
-    // };
-    // writeln!(uart_printer, "status: {status}\r").unwrap_or_default();
-
     tau::Ubi::map(NonZeroUsize::new(addr), 0x0200_0000, 3).unwrap_or_default();
     let plic = unsafe { &*(0x0200_0000 as *mut Plic) };
 
@@ -148,16 +141,40 @@ extern "C" fn main(
         .sum::<usize>()
         - 1;
     let context_addr = addr + 0x0020_0000 + context_id * 0x1000;
-    tau::Ubi::map(NonZeroUsize::new(context_addr), 0x0220_0000, 1).unwrap_or_default();
-    let plic_tc = unsafe { &*(0x0220_0000 as *mut PlicThresholdClaim) };
+    tau::Ubi::map(NonZeroUsize::new(context_addr), 0x0200_3000, 1).unwrap_or_default();
+    let plic_tc = unsafe { &*(0x0200_3000 as *mut PlicThresholdClaim) };
 
     // setup plic
     {
         // should do only once
         plic.set_priority(&uart_int, InterruptPriority::_1);
+        plic.set_priority(&InterruptNumber::new(75), InterruptPriority::_1);
     }
     plic.enable(context_id, &uart_int);
+    plic.enable(context_id, &InterruptNumber::new(75));
     plic_tc.set_threshold(InterruptPriority::_0);
+
+    if let Some(sdio_config) = dtb.iter().find_map(|(props, path)| {
+        (path[1] == "soc" && path[2].starts_with("sdio1@")).then_some(props)
+    }) {
+        let status = sdio_config
+            .find_str(|name| name == "status")
+            .unwrap_or("unknown");
+        writeln!(uart_printer, "sdio status: {status}\r").unwrap_or_default();
+        let str = sdio_config
+            .find_str(|name| name == "compatible")
+            .unwrap_or("unknown");
+        writeln!(uart_printer, "sdio compatible: {str}\r").unwrap_or_default();
+
+        let Some([addr_hi, addr_lo, _, _]) = sdio_config.find_int(|name| name == "reg") else {
+            tau::Ubi::respond(inv.inv, 1, []);
+        };
+        let addr = ((addr_hi.to_be() as usize) << 32) + (addr_lo.to_be() as usize);
+        writeln!(uart_printer, "sdio addr: {addr:016x}\r").unwrap_or_default();
+        tau::Ubi::map(NonZeroUsize::new(addr), 0x0201_0000, 1).unwrap_or_default();
+        let dev = unsafe { &*(0x0201_0000 as *const Sdio) };
+        dev.init(&mut uart_printer, plic_tc);
+    }
 
     'main: loop {
         tau::Ubi::wait();
