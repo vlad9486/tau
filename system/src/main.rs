@@ -173,7 +173,8 @@ extern "C" fn main(
         writeln!(uart_printer, "sdio addr: {addr:016x}\r").unwrap_or_default();
         tau::Ubi::map(NonZeroUsize::new(addr), 0x0201_0000, 1).unwrap_or_default();
         let dev = unsafe { &*(0x0201_0000 as *const Sdio) };
-        dev.init(&mut uart_printer, plic_tc);
+        let rca = dev.init(&mut uart_printer, plic_tc);
+        dev.test(&mut uart_printer, plic_tc, rca);
     }
 
     'main: loop {

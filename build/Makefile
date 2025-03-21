@@ -99,4 +99,4 @@ target/vf2/tau.img: target/tau target/vf2/opensbi target/vf2/$(VF2_DT).dtb board
 
 install-vf2: target/vf2/tau.img
 	dd if=target/vf2/tau.img of=/dev/sda2 && sync
-	picocom /dev/ttyUSB0 -b 115200
+	# picocom /dev/ttyUSB0 -b 115200
