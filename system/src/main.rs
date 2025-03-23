@@ -5,6 +5,8 @@
 
 mod register;
 
+pub mod asm;
+
 pub mod driver;
 use self::driver::Runtime;
 
