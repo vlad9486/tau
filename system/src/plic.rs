@@ -23,6 +23,12 @@ pub struct PlicThresholdClaim {
 #[repr(transparent)]
 pub struct InterruptId(NonZeroU32);
 
+impl InterruptId {
+    pub fn belongs(&self, set: &[u32]) -> bool {
+        set.contains(&self.0.get().to_be())
+    }
+}
+
 impl InterruptNumber {
     #[inline(always)]
     pub const fn new(value: u32) -> Self {

@@ -19,6 +19,8 @@
         "UART",
         "virt",
         "visionfive",
+        "TXDR", // tx data ready
+        "RXDR", // rx data ready
         // RISC-V asm
         "addi",
         "andi",
@@ -69,10 +71,15 @@
         "noreturn",
         "RUSTFLAGS",
         "thiserror",
+        "bitflags",
         // riscv
         "opensbi",
         "SRST",
         "DBCN",
         "asid",
+        // hardware
+        "dwmmc",
+        "sdmmc",
+        "DMAC",
     ]
 }

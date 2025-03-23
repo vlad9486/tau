@@ -5,14 +5,20 @@
 
 mod register;
 
+pub mod driver;
+use self::driver::Runtime;
+
 mod plic;
 pub use self::plic::{Plic, PlicThresholdClaim, InterruptPriority, InterruptNumber};
 
 mod uart;
 pub use self::uart::{UartIo, UartPrinter, Uart};
 
-mod sdio_platform;
-use self::sdio_platform::Device as Sdio;
+mod dwmmc;
+
+use core::cell::UnsafeCell;
+use core::pin::pin;
+use core::task::{Context, Poll};
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -43,7 +49,7 @@ extern "C" fn main(
     _: usize,
     _: usize,
 ) -> ! {
-    use core::{num::NonZeroUsize, slice, fmt::Write};
+    use core::{num::NonZeroUsize, slice};
 
     let Ok(inv) = tau::Inv::decode(a0) else {
         tau::Ubi::exit([1]);
@@ -117,9 +123,6 @@ extern "C" fn main(
         tau::Ubi::respond(inv.inv, 1, []);
     };
 
-    let mut uart_printer = UartPrinter(uart);
-    writeln!(uart_printer, "invocation {inv}\r").unwrap_or_default();
-
     let Some(plic_config) = dtb.iter().find_map(|(props, path)| {
         (path[1] == "soc" && path[2].starts_with("plic")).then_some(props)
     }) else {
@@ -148,49 +151,83 @@ extern "C" fn main(
     {
         // should do only once
         plic.set_priority(&uart_int, InterruptPriority::_1);
-        plic.set_priority(&InterruptNumber::new(75), InterruptPriority::_1);
     }
     plic.enable(context_id, &uart_int);
-    plic.enable(context_id, &InterruptNumber::new(75));
     plic_tc.set_threshold(InterruptPriority::_0);
 
-    if let Some(sdio_config) = dtb.iter().find_map(|(props, path)| {
+    #[pin_project::pin_project]
+    struct Drivers<'a, Dwmmc> {
+        #[pin]
+        dwmmc: Option<Dwmmc>,
+        dwmmc_int: &'a [u32],
+    }
+
+    let interrupt = UnsafeCell::new(None);
+    let runtime = Runtime {
+        plic_claim: plic_tc,
+        uart,
+        interrupt: &interrupt,
+    };
+
+    let mut drivers = Drivers {
+        dwmmc: None,
+        dwmmc_int: &[],
+    };
+    if let Some(config) = dtb.iter().find_map(|(props, path)| {
         (path[1] == "soc" && path[2].starts_with("sdio1@")).then_some(props)
     }) {
-        let status = sdio_config
-            .find_str(|name| name == "status")
-            .unwrap_or("unknown");
-        writeln!(uart_printer, "sdio status: {status}\r").unwrap_or_default();
-        let str = sdio_config
-            .find_str(|name| name == "compatible")
-            .unwrap_or("unknown");
-        writeln!(uart_printer, "sdio compatible: {str}\r").unwrap_or_default();
+        let int = config.find_int(|name| name == "interrupts");
+        drivers.dwmmc = Some(dwmmc::run(runtime, config, 0x0201_0000));
 
-        let Some([addr_hi, addr_lo, _, _]) = sdio_config.find_int(|name| name == "reg") else {
-            tau::Ubi::respond(inv.inv, 1, []);
-        };
-        let addr = ((addr_hi.to_be() as usize) << 32) + (addr_lo.to_be() as usize);
-        writeln!(uart_printer, "sdio addr: {addr:016x}\r").unwrap_or_default();
-        tau::Ubi::map(NonZeroUsize::new(addr), 0x0201_0000, 1).unwrap_or_default();
-        let dev = unsafe { &*(0x0201_0000 as *const Sdio) };
-        let rca = dev.init(&mut uart_printer, plic_tc);
-        dev.test(&mut uart_printer, plic_tc, rca);
+        if let Some(int) = int {
+            drivers.dwmmc_int = int;
+            for int in int {
+                let int = int.to_be();
+                plic.set_priority(&InterruptNumber::new(int), InterruptPriority::_1);
+                plic.enable(context_id, &InterruptNumber::new(int));
+            }
+        }
+    }
+
+    let waker = noop_waker::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    let drivers = pin!(drivers);
+    let mut drivers = drivers.project();
+    if let Some(fut) = drivers.dwmmc.as_mut().as_pin_mut() {
+        let _ = fut.poll(&mut cx);
     }
 
     'main: loop {
         tau::Ubi::wait();
         if let Some(int) = plic_tc.next() {
             let is_uart = int == uart_int;
-            plic_tc.complete(int);
             if is_uart {
                 while let Some(c) = uart.rx() {
                     uart.tx(c);
                     if c == b'\r' {
                         uart.tx(b'\n');
+                        plic_tc.complete(int);
                         break 'main;
                     }
                 }
+            } else {
+                if int.belongs(&*drivers.dwmmc_int) {
+                    if let Some(fut) = drivers.dwmmc.as_mut().as_pin_mut() {
+                        unsafe {
+                            interrupt.get().write(Some(int));
+                        }
+                        if let Poll::Ready(res) = fut.poll(&mut cx) {
+                            drivers.dwmmc.set(None);
+                            if let Err(err) = res {
+                                runtime.error(format_args!("{err}"));
+                            }
+                        }
+                        continue;
+                    }
+                }
             }
+            plic_tc.complete(int);
         }
     }
 

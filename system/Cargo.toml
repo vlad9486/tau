@@ -5,3 +5,7 @@ edition = "2024"
 
 [dependencies]
 tau = { path = "../tau" }
+pin-project = { version = "1.1" }
+noop-waker = { version = "0.1.0" }
+bitflags = { version = "2.9" }
+thiserror-no-std = { version = "2.0" }
