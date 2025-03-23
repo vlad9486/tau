@@ -2,6 +2,8 @@ use core::{fmt, ops::Index, slice, str};
 
 use thiserror_no_std::Error;
 
+use super::dbg;
+
 pub struct Dtb<'a> {
     dt: &'a [u32],
     str: &'a [u8],
@@ -266,7 +268,7 @@ impl<'a> Iterator for DtbIter<'a> {
 }
 
 impl<'a> DtbProps<'a> {
-    pub fn find_str<P>(&self, predicate: P) -> Option<&str>
+    pub fn find_str<P>(&self, predicate: P) -> Option<&'a str>
     where
         P: Fn(&str) -> bool,
     {
@@ -275,7 +277,7 @@ impl<'a> DtbProps<'a> {
             .map(|s| s.trim_end_matches('\0'))
     }
 
-    pub fn find_int<P>(&self, predicate: P) -> Option<&[u32]>
+    pub fn find_int<P>(&self, predicate: P) -> Option<&'a [u32]>
     where
         P: Fn(&str) -> bool,
     {
@@ -286,7 +288,7 @@ impl<'a> DtbProps<'a> {
         })
     }
 
-    fn find<P>(&self, predicate: P) -> Option<&[u8]>
+    fn find<P>(&self, predicate: P) -> Option<&'a [u8]>
     where
         P: Fn(&str) -> bool,
     {
@@ -322,7 +324,7 @@ impl<'a> DtbProps<'a> {
                     }
                 }
                 NOP => cursor += 1,
-                a => crate::dbg([a as usize, 0xdeadbeef]),
+                a => dbg::dbg([a as usize, 0xdeadbeef]),
             }
         }
     }

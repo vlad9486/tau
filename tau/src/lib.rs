@@ -4,8 +4,7 @@
 
 pub mod tester;
 
-mod dbg;
-pub use self::dbg::dbg;
+pub mod dbg;
 
 mod common;
 pub use self::common::*;
@@ -16,4 +15,4 @@ mod ubi;
 pub use self::ubi::{Ubi, FreeError, AllocError};
 
 mod dtb;
-pub use self::dtb::Dtb;
+pub use self::dtb::{Dtb, DtbProps};

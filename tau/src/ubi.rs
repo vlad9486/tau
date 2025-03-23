@@ -1,6 +1,9 @@
 use core::{hint, num::NonZeroUsize};
 
-use super::common::{Call, Entry};
+use super::{
+    common::{Call, Entry},
+    dbg,
+};
 
 #[inline(always)]
 fn ubi<const I: usize, const O: usize>(call: Call, arg: [usize; I]) -> (usize, [usize; O]) {
@@ -52,7 +55,7 @@ fn ubi<const I: usize, const O: usize>(call: Call, arg: [usize; I]) -> (usize, [
                 options(nostack),
             )
         },
-        _ => crate::dbg([I, O, 0xdeadbeef]),
+        _ => dbg::dbg([I, O, 0xdeadbeef]),
     }
 
     (r0, output)

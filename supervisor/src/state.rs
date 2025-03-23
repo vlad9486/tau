@@ -339,5 +339,5 @@ fn wait() {
 #[inline(always)]
 pub fn exception(cause: isize) {
     let _ = cause;
-    tau::dbg([0xdeadbeef]);
+    tau::dbg::dbg([0xdeadbeef]);
 }

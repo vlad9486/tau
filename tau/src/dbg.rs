@@ -1,3 +1,16 @@
+#[inline(never)]
+pub fn read_time() -> usize {
+    let v: usize;
+    unsafe {
+        core::arch::asm!(
+            "csrr {0}, time",
+            out(reg) v,
+            options(nomem, nostack)
+        );
+    }
+    v
+}
+
 #[inline(always)]
 pub fn dbg<const I: usize>(arg: [usize; I]) -> ! {
     use core::arch::asm;
