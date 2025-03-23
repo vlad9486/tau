@@ -1,4 +1,4 @@
-use core::{ffi, fmt};
+use core::{ffi, fmt, hint};
 
 use super::register::Register;
 
@@ -41,7 +41,9 @@ where
     #[inline(always)]
     fn set_line_control(&self, v: u8) {
         if UART_STATUS {
-            while self.uart_status.read().into() & 0b00000001 != 0 {}
+            while self.uart_status.read().into() & 0b00000001 != 0 {
+                hint::spin_loop();
+            }
         }
         self.line_control.write(v);
     }
@@ -83,7 +85,9 @@ where
 
     #[inline(always)]
     fn tx(&self, b: u8) {
-        while self.line_status.read().into() & 0b00100000 == 0 {}
+        while self.line_status.read().into() & 0b00100000 == 0 {
+            hint::spin_loop();
+        }
         self.transmit_holding.write(b);
     }
 }

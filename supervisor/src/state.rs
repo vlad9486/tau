@@ -217,7 +217,10 @@ pub fn syscall(
             if let Some(inv) = module.remove_invocation(inv) {
                 match inv {
                     // special case, nowhere to return
-                    Invocation::Supervisor => sbi::system_reset(),
+                    Invocation::Supervisor => loop {
+                        sbi::hart_stop().unwrap_or_default();
+                        hint::spin_loop();
+                    },
                     // isn't it easy!
                     Invocation::Regular { root } => cpu::csrw!("satp", root.0.get()),
                 }
@@ -338,6 +341,19 @@ fn wait() {
 
 #[inline(always)]
 pub fn exception(cause: isize) {
-    let _ = cause;
-    tau::dbg::dbg([0xdeadbeef]);
+    use core::fmt::Write;
+
+    if cause >= 0 {
+        let sepc = cpu::csrr!("sepc");
+        let stval = cpu::csrr!("stval");
+
+        write!(
+            sbi::Console,
+            "\r\n\nexception: cause={cause} sepc=0x{sepc:016x} stval=0x{stval:016x}\r\n",
+        )
+        .unwrap_or_default();
+        tau::dbg::dbg([0xdeadbeef]);
+    } else {
+        sbi::Printer.ch(*b"SU: miss interrupt\r\n");
+    }
 }

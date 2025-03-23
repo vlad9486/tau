@@ -5,7 +5,8 @@ use super::{
     dbg,
 };
 
-#[inline(always)]
+// TODO: investigate it
+#[inline(never)]
 fn ubi<const I: usize, const O: usize>(call: Call, arg: [usize; I]) -> (usize, [usize; O]) {
     use core::arch;
 
@@ -119,7 +120,7 @@ impl Ubi {
         }
     }
 
-    pub fn free_pages(&self, virtual_addr: usize, number_of_pages: usize) -> Result<(), FreeError> {
+    pub fn unmap(virtual_addr: usize, number_of_pages: usize) -> Result<(), FreeError> {
         let (r0, []) = ubi(Call::Unmap, [virtual_addr, number_of_pages]);
         if let Some(code) = NonZeroUsize::new(r0) {
             Err(unsafe { FreeError::decode(code) })

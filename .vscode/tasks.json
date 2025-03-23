@@ -16,6 +16,11 @@
                 "kind": "build",
                 "isDefault": true
             },
+            "presentation": {
+                "reveal": "silent",
+                "revealProblems": "onProblem",
+                "close": true
+            },
             "problemMatcher": []
         }
     ]

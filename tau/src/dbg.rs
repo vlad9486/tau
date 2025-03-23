@@ -1,4 +1,4 @@
-#[inline(never)]
+#[inline(always)]
 pub fn read_time() -> usize {
     let v: usize;
     unsafe {

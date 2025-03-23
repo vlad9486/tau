@@ -98,5 +98,5 @@ target/vf2/tau.img: target/tau target/vf2/opensbi target/vf2/$(VF2_DT).dtb board
 	cd target/vf2 && mkimage -f ../../board/vf2/$(VF2_ITS) tau.img
 
 install-vf2: target/vf2/tau.img
-	dd if=target/vf2/tau.img of=/dev/sda2 && sync
+	dd if=target/vf2/tau.img of=/dev/sda2 || sudo dd if=target/vf2/tau.img of=/dev/disk4s2 && sync
 	# picocom /dev/ttyUSB0 -b 115200
