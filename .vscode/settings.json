@@ -8,6 +8,7 @@
         "vmem",
         "llfree",
         "memoffset",
+        "nanos",
         "nographic",
         "NVRAM",
         "Optane",
@@ -19,8 +20,6 @@
         "UART",
         "virt",
         "visionfive",
-        "TXDR", // tx data ready
-        "RXDR", // rx data ready
         // RISC-V asm
         "addi",
         "andi",
@@ -78,8 +77,24 @@
         "DBCN",
         "asid",
         // hardware
-        "dwmmc",
-        "sdmmc",
-        "DMAC",
+        "TXDR", // tx data ready
+        "RXDR", // rx data ready
+        // sdio
+        "pwren",
+        "clkdiv",
+        "clksrc",
+        "clkena",
+        "ctype",
+        "blksiz",
+        "bytcnt",
+        "intmask",
+        "cmdarg",
+        "mintsts",
+        "rintsts",
+        "dmac",
+        "ACMD",
+        "SDMMC",
+        "SDCLK",
+        "Idmac",
     ]
 }

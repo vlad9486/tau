@@ -157,7 +157,7 @@ impl<'a> Dtb<'a> {
         Ok((Dtb { dt, str }, DtbRsv(rsv)))
     }
 
-    pub fn iter<'b>(&'b self) -> DtbIter<'b> {
+    pub fn iter(&self) -> DtbIter<'a> {
         DtbIter {
             inner: Dtb {
                 dt: self.dt,

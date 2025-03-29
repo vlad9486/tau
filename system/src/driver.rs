@@ -2,27 +2,52 @@ use core::{
     cell::UnsafeCell,
     fmt::{self, Write as _},
     future, hint,
-    task::Poll,
+    num::NonZeroUsize,
+    pin::Pin,
+    task::{Context, Poll},
 };
 
 use thiserror_no_std::Error;
 
-use super::{
-    plic::{PlicThresholdClaim, InterruptId},
-    uart::{UartIo, UartPrinter},
-};
+use super::plic::{Plic, PlicThresholdClaim, InterruptId, InterruptNumber, InterruptPriority};
+use super::{uart, sdio};
 
-#[derive(Clone, Copy)]
-pub struct Runtime<'a> {
-    pub plic_claim: &'a PlicThresholdClaim,
-    pub uart: &'a dyn UartIo,
-    pub interrupt: &'a UnsafeCell<Option<tau::Event<InterruptId>>>,
+pub struct Runtime {
+    plic: &'static PlicThresholdClaim,
+    event: UnsafeCell<Option<tau::Event<InterruptId>>>,
+    shared: UnsafeCell<Shared>,
 }
 
-impl Runtime<'_> {
+#[derive(Default)]
+pub struct Shared {
+    pub uart_buffer: uart::Buffer,
+    pub terminate: bool,
+}
+
+impl Runtime {
+    pub fn new(plic: &'static PlicThresholdClaim) -> Self {
+        Runtime {
+            plic,
+            event: UnsafeCell::new(None),
+            shared: UnsafeCell::new(Shared::default()),
+        }
+    }
+}
+
+impl Runtime {
+    fn put(&self, event: tau::Event<InterruptId>) {
+        unsafe {
+            self.event.get().write(Some(event));
+        }
+    }
+
+    fn take(&self) -> Option<tau::Event<InterruptId>> {
+        unsafe { &mut *self.event.get() }.take()
+    }
+
     pub async fn wait(&self) -> tau::Event<InterruptId> {
         future::poll_fn(|_cx| {
-            if let Some(event) = unsafe { &mut *self.interrupt.get() }.take() {
+            if let Some(event) = self.take() {
                 Poll::Ready(event)
             } else {
                 Poll::Pending
@@ -32,29 +57,32 @@ impl Runtime<'_> {
     }
 
     pub fn complete_interrupt(&self, id: InterruptId) {
-        self.plic_claim.complete(id);
+        self.plic.complete(id);
     }
 
     pub fn error(&self, args: fmt::Arguments<'_>) {
         let time = tau::dbg::read_time();
-        let secs = time / 4_000_000;
+        let secs = time / 4_000_000; // TODO: take the constant from DTS
         let nanos = (time % 4_000_000) * 250;
-        write!(
-            UartPrinter(self.uart),
-            "ERROR {secs:03}.{nanos:09} {args}\r\n"
-        )
-        .unwrap_or_default();
+        let printer = &mut self.shared_mut().uart_buffer;
+        write!(printer, "ERROR {secs:03}.{nanos:09} {args}\r\n").unwrap_or_default();
     }
 
     pub fn info(&self, args: fmt::Arguments<'_>) {
         let time = tau::dbg::read_time();
         let secs = time / 4_000_000;
         let nanos = (time % 4_000_000) * 250;
-        write!(
-            UartPrinter(self.uart),
-            "INFO {secs:03}.{nanos:09} {args}\r\n"
-        )
-        .unwrap_or_default();
+        let printer = &mut self.shared_mut().uart_buffer;
+        write!(printer, "INFO {secs:03}.{nanos:09} {args}\r\n").unwrap_or_default();
+    }
+
+    pub fn shared(&self) -> &Shared {
+        unsafe { &*self.shared.get() }
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    pub fn shared_mut(&self) -> &mut Shared {
+        unsafe { &mut *self.shared.get() }
     }
 }
 
@@ -72,4 +100,145 @@ pub fn spin(mut timeout: u32, cond: impl Fn() -> bool) -> Result<(), Timeout> {
     }
 
     Ok(())
+}
+
+#[pin_project::pin_project]
+struct Driver<'dtb, Fut> {
+    #[pin]
+    fut: Fut,
+    int: &'dtb [u32],
+}
+
+impl<'dtb, Fut> Driver<'dtb, Fut> {
+    pub fn parse_dtb<F>(
+        config: tau::DtbProps<'dtb>,
+        plic: &Plic,
+        context_id: usize,
+        factory: F,
+    ) -> Self
+    where
+        F: FnOnce(tau::DtbProps<'dtb>) -> Fut,
+    {
+        let int = config.find_int(|name| name == "interrupts").unwrap_or(&[]);
+        for num in int {
+            let num = InterruptNumber::new(num.to_be());
+            plic.set_priority(&num, InterruptPriority::_1);
+            plic.enable(context_id, &num);
+        }
+        Driver {
+            int,
+            fut: factory(config),
+        }
+    }
+}
+
+#[pin_project::pin_project]
+#[derive(Default)]
+pub struct Drivers<'dtb, Sdio, Uart> {
+    #[pin]
+    uart: Option<Driver<'dtb, Uart>>,
+    #[pin]
+    sdio: Option<Driver<'dtb, Sdio>>,
+}
+
+pub fn drivers<'dtb>(
+    dtb: tau::Dtb<'dtb>,
+    rt: &Runtime,
+    plic: &Plic,
+    context_id: usize,
+    uart_v_addr: usize,
+    sdio_v_addr: usize,
+) -> Drivers<'dtb, impl Future<Output = ()>, impl Future<Output = ()>> {
+    let uart = dtb
+        .iter()
+        .find(|(_, path)| (path[1] == "soc" && path[2].starts_with("serial@")))
+        .map(|(config, _)| {
+            Driver::parse_dtb(config, plic, context_id, |config| {
+                uart::run(rt, config, uart_v_addr)
+            })
+        });
+    let sdio = dtb
+        .iter()
+        .find(|(_, path)| (path[1] == "soc" && path[2].starts_with("sdio1@")))
+        .map(|(config, _)| {
+            Driver::parse_dtb(config, plic, context_id, |config| {
+                sdio::run(rt, config, sdio_v_addr)
+            })
+        });
+    Drivers { uart, sdio }
+}
+
+fn poll_match<Fut>(
+    mut dri: Pin<&mut Option<Driver<'_, Fut>>>,
+    num: u32,
+    cx: &mut Context<'_>,
+) -> Option<()>
+where
+    Fut: Future<Output = ()>,
+{
+    let mut dr = dri.as_mut().as_pin_mut()?;
+    if (*dr.int)
+        .contains(&num)
+        .then(|| dr.as_mut().project().fut.poll(cx).is_ready())?
+    {
+        dri.set(None);
+    }
+    Some(())
+}
+
+fn poll_al<Fut>(mut dri: Pin<&mut Option<Driver<'_, Fut>>>, cx: &mut Context<'_>)
+where
+    Fut: Future<Output = ()>,
+{
+    if let Some(mut dr) = dri.as_mut().as_pin_mut() {
+        if dr.as_mut().project().fut.poll(cx).is_ready() {
+            dri.set(None);
+        }
+    }
+}
+
+impl<'dtb, Sdio, Uart> Drivers<'dtb, Sdio, Uart>
+where
+    Sdio: Future<Output = ()>,
+    Uart: Future<Output = ()>,
+{
+    pub fn run(self: Pin<&mut Self>, rt: &Runtime) {
+        let waker = noop_waker::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut this = self.project();
+        poll_al(this.uart.as_mut(), &mut cx);
+        poll_al(this.sdio.as_mut(), &mut cx);
+
+        while !rt.shared().terminate {
+            // TODO: proper time wheel
+            let deadline = tau::dbg::read_time().wrapping_add(0x10000);
+            let mut event = Some(tau::Ubi::wait(NonZeroUsize::new(deadline)));
+
+            while let Some(event) = tau::event_with(&mut event, rt.plic.next()) {
+                match &event {
+                    tau::Event::Signal { .. } => continue,
+                    tau::Event::Interrupt(int) => {
+                        let num = int.as_ref().get().to_be();
+                        rt.put(event);
+                        poll_match(this.sdio.as_mut(), num, &mut cx)
+                            .or_else(|| poll_match(this.uart.as_mut(), num, &mut cx));
+                    }
+                    tau::Event::Timeout => {
+                        rt.put(event);
+                        poll_al(this.sdio.as_mut(), &mut cx);
+                    }
+                }
+
+                if let Some(tau::Event::Interrupt(int)) = rt.take() {
+                    rt.plic.complete(int);
+                }
+            }
+
+            if !rt.shared().uart_buffer.is_empty() {
+                rt.put(tau::Event::Signal { inv: 0, arg: 0 });
+                poll_al(this.uart.as_mut(), &mut cx);
+            }
+        }
+    }
 }
