@@ -16,14 +16,14 @@ use super::{
 pub struct Runtime<'a> {
     pub plic_claim: &'a PlicThresholdClaim,
     pub uart: &'a dyn UartIo,
-    pub interrupt: &'a UnsafeCell<Option<InterruptId>>,
+    pub interrupt: &'a UnsafeCell<Option<tau::Event<InterruptId>>>,
 }
 
 impl Runtime<'_> {
-    pub async fn wait_interrupt(&self) -> InterruptId {
+    pub async fn wait(&self) -> tau::Event<InterruptId> {
         future::poll_fn(|_cx| {
-            if let Some(id) = unsafe { &mut *self.interrupt.get() }.take() {
-                Poll::Ready(id)
+            if let Some(event) = unsafe { &mut *self.interrupt.get() }.take() {
+                Poll::Ready(event)
             } else {
                 Poll::Pending
             }
@@ -37,12 +37,24 @@ impl Runtime<'_> {
 
     pub fn error(&self, args: fmt::Arguments<'_>) {
         let time = tau::dbg::read_time();
-        write!(UartPrinter(self.uart), "ERROR {time:010} {args}\r\n").unwrap_or_default();
+        let secs = time / 4_000_000;
+        let nanos = (time % 4_000_000) * 250;
+        write!(
+            UartPrinter(self.uart),
+            "ERROR {secs:03}.{nanos:09} {args}\r\n"
+        )
+        .unwrap_or_default();
     }
 
     pub fn info(&self, args: fmt::Arguments<'_>) {
         let time = tau::dbg::read_time();
-        write!(UartPrinter(self.uart), "INFO {time:010} {args}\r\n").unwrap_or_default();
+        let secs = time / 4_000_000;
+        let nanos = (time % 4_000_000) * 250;
+        write!(
+            UartPrinter(self.uart),
+            "INFO {secs:03}.{nanos:09} {args}\r\n"
+        )
+        .unwrap_or_default();
     }
 }
 

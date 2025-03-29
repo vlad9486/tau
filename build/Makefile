@@ -63,7 +63,7 @@ clean-qemu:
 
 target/qemu/opensbi:
 	mkdir -p target/qemu && cd target/qemu && \
-		git clone https://github.com/riscv-software-src/opensbi.git
+		git clone https://github.com/riscv-software-src/opensbi.git --depth 1
 
 target/qemu/qemu-virt.dtb: board/qemu/qemu-virt.dts
 	dtc -I dts -O dtb -o target/qemu/qemu-virt.dtb board/qemu/qemu-virt.dts
@@ -80,13 +80,19 @@ run-qemu: target/qemu/tau.elf target/qemu/qemu-virt.dtb
 
 # Vision Five 2
 
+# StarFive recommends this OpenSBI revision in their main repo as submodule:
+# https://github.com/starfive-tech/VisionFive2
+# Do not use master — timer interrupts may not be delegated correctly!
+VF2_OPENSBI_REVISION := d5e88252154dc08ddb13f326a3d765a051215fab
+
 clean-vf2:
 	rm -Rf target/vf2/*.{dtb,img} || true
 	cd target/vf2/opensbi && make distclean clean
 
 target/vf2/opensbi:
 	mkdir -p target/vf2 && cd target/vf2 && \
-		git clone https://github.com/starfive-tech/opensbi.git
+		git clone https://github.com/starfive-tech/opensbi.git --depth 1
+		cd opensbi && git checkout $(VF2_OPENSBI_REVISION)
 
 target/vf2/$(VF2_DT).dtb: board/vf2/$(VF2_DT).dts
 	dtc -I dts -O dtb -o target/vf2/$(VF2_DT).dtb board/vf2/$(VF2_DT).dts

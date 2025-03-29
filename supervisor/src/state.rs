@@ -273,7 +273,35 @@ pub fn syscall(
         Ok(tau::Call::Unmap) => {
             // TODO:
         }
-        Ok(tau::Call::Wait) => wait(),
+        Ok(tau::Call::Wait) => {
+            if msg[1] != 0 {
+                sbi::set_timer(msg[1]).unwrap_or_default();
+            }
+            let cause = wait();
+            if cause == (1 << 63) + 5 {
+                // sbi::Printer.ch(*b"SU: timer\r\n");
+                msg[0] = tau::Event::Timeout.encode();
+            } else if cause == (1 << 63) + 9 {
+                // sbi::Printer.ch(*b"SU: interrupt\r\n");
+                msg[0] = tau::Event::Interrupt(()).encode();
+            } else if cause == (1 << 63) + 1 {
+                // sbi::Printer.ch(*b"SU: software interrupt\r\n");
+                // TODO:
+                let event = tau::Event::Signal { inv: 0, arg: 0 };
+                msg[0] = event.encode();
+            } else if cause & (1 << 63) != 0 {
+                sbi::Printer.ch(*b"SU: unexpected interrupt\r\n");
+                msg[0] = tau::Event::Interrupt(()).encode();
+            } else {
+                let lo = (cause % 10) as u8 + b'0';
+                let hi = ((cause / 10) % 10) as u8 + b'0';
+                sbi::Printer
+                    .ch(*b"SU: exception: ")
+                    .ch([lo, hi])
+                    .ch(*b"\r\n");
+                tau::dbg::dbg([0xdeadbeef]);
+            }
+        }
         Err(a0) => {
             write!(sbi::Console, "cannot decode {a0:016x}\r\n").unwrap_or_default();
             loop {
@@ -307,8 +335,8 @@ pub fn alloc_pages(
         .map_err(|_| tau::AllocError::OutOfMemory)
 }
 
-fn wait() {
-    use core::arch;
+fn wait() -> usize {
+    let v;
 
     unsafe {
         arch::asm! {
@@ -334,9 +362,13 @@ fn wait() {
             "csrrc t0, sie, t1",
             "csrw sepc, t2",
             "csrw stvec, t3",
-            options(nomem, nostack)
+            "csrr {0}, scause",
+            options(nomem, nostack),
+            out(reg) v
         }
     }
+
+    v
 }
 
 #[inline(always)]
@@ -349,7 +381,7 @@ pub fn exception(cause: isize) {
 
         write!(
             sbi::Console,
-            "\r\n\nexception: cause={cause} sepc=0x{sepc:016x} stval=0x{stval:016x}\r\n",
+            "\r\n\nSU: exception: cause={cause} sepc=0x{sepc:016x} stval=0x{stval:016x}\r\n",
         )
         .unwrap_or_default();
         tau::dbg::dbg([0xdeadbeef]);

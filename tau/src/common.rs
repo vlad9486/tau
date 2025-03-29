@@ -73,6 +73,48 @@ impl Inv {
     }
 }
 
+#[must_use]
+#[derive(Clone, Debug)]
+pub enum Event<Id = ()> {
+    Interrupt(Id),
+    Timeout,
+    Signal { inv: u16, arg: u16 },
+}
+
+impl Event {
+    pub const fn encode(self) -> usize {
+        match self {
+            Self::Interrupt(()) => 0,
+            Self::Timeout => 1,
+            Self::Signal { inv, arg } => {
+                ((arg as usize) << 16) + (((inv & 0xfff) as usize) << 4) + 2
+            }
+        }
+    }
+
+    pub const fn decode(a0: usize) -> Result<Self, usize> {
+        let inv = ((a0 & 0xfff0) >> 4) as u16;
+        let arg = ((a0 & 0xffff0000) >> 16) as u16;
+        match a0 & 0b1111 {
+            0 => Ok(Self::Interrupt(())),
+            1 => Ok(Self::Timeout),
+            2 => Ok(Self::Signal { inv, arg }),
+            _ => Err(a0),
+        }
+    }
+}
+
+pub fn event_with<T>(event: &mut Option<Event>, id: Option<T>) -> Option<Event<T>> {
+    if let Some(id) = id {
+        return Some(Event::Interrupt(id));
+    }
+    match event.take() {
+        Some(Event::Timeout) => Some(Event::Timeout),
+        Some(Event::Signal { inv, arg }) => Some(Event::Signal { inv, arg }),
+        _ => None,
+    }
+}
+
 /// The interface of the supervisor
 pub enum Call {
     /// Invokes a module by spawning an invocation at its entry point

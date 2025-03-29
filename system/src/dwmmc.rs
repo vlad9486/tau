@@ -4,9 +4,8 @@ use thiserror_no_std::Error;
 
 use tau::DtbProps;
 
-use crate::asm;
-
 use super::{
+    asm,
     register::Register,
     driver::{self, Timeout, Runtime},
 };
@@ -122,12 +121,17 @@ bitflags::bitflags! {
 
 impl Reg {
     async fn init(&self, rt: Runtime<'_>) -> Result<u32, DriverError> {
-        rt.info(format_args!("init"));
-
+        rt.info(format_args!("off"));
         self.pwren.write(0u32);
-        asm::pause(16);
+        for _ in 0..13 {
+            self.wait_timeout(rt).await;
+        }
+        rt.info(format_args!("on"));
         self.pwren.write(1u32);
-        asm::pause(16);
+        for _ in 0..13 {
+            self.wait_timeout(rt).await;
+        }
+        rt.info(format_args!("ready"));
         let ctrl_reset = Ctrl::RESET_CONTROLLER | Ctrl::FIFO_RESET | Ctrl::DMA_RESET;
         self.ctrl.write(ctrl_reset);
         driver::spin(CTRL_RESET_TO, || !self.ctrl.read().intersects(ctrl_reset))
@@ -144,7 +148,7 @@ impl Reg {
         self.ctype.write(0u32);
 
         self.send_cmd::<0>(rt, 0, CmdFl::empty()).await;
-        asm::pause(1);
+        self.wait_timeout(rt).await;
         self.timeout.write(u32::MAX);
         self.fifo_threshold
             .write(self.fifo_threshold.read() | ((2u32 << 28) | (15 << 16) | 16));
@@ -153,6 +157,7 @@ impl Reg {
             .await;
 
         // TODO: timeout
+        self.wait_timeout(rt).await;
         loop {
             // CMD55: Prefix for ACMD
             self.send_cmd::<55>(rt, 0, CmdFl::RESP_EXP).await;
@@ -164,6 +169,8 @@ impl Reg {
                 }
 
                 break;
+            } else {
+                self.wait_timeout(rt).await;
             }
         }
 
@@ -267,7 +274,7 @@ impl Reg {
             if (r >> 9) & 0b1111 == 4 {
                 break;
             }
-            asm::pause(1);
+            self.wait_timeout(rt).await;
         }
 
         let IdmacDesc {
@@ -311,9 +318,18 @@ impl Reg {
         }
     }
 
+    async fn wait_timeout(&self, rt: Runtime<'_>) {
+        // TODO: fix this, don't drop interrupt
+        if let tau::Event::Interrupt(id) = rt.wait().await {
+            rt.complete_interrupt(id);
+        }
+    }
+
     async fn wait(&self, rt: Runtime<'_>) -> u32 {
         loop {
-            let id = rt.wait_interrupt().await;
+            let tau::Event::Interrupt(id) = rt.wait().await else {
+                continue;
+            };
             let int = self.mintsts.read();
             let dma_status = self.i_dmac_status.read();
             if int != 0 || dma_status != 0 {

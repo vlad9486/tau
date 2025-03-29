@@ -200,24 +200,19 @@ extern "C" fn main(
         let _ = fut.poll(&mut cx);
     }
 
+    // TODO: For now it is messy, fix it later
     'main: loop {
-        tau::Ubi::wait();
-        if let Some(int) = plic_tc.next() {
-            let is_uart = int == uart_int;
-            if is_uart {
-                while let Some(c) = uart.rx() {
-                    uart.tx(c);
-                    if c == b'\r' {
-                        uart.tx(b'\n');
-                        plic_tc.complete(int);
-                        break 'main;
-                    }
-                }
-            } else {
-                if int.belongs(&*drivers.dwmmc_int) {
+        let mut event = Some(tau::Ubi::wait(NonZeroUsize::new(
+            tau::dbg::read_time().wrapping_add(0x10000),
+        )));
+        while let Some(event) = tau::event_with(&mut event, plic_tc.next()) {
+            let int = match &event {
+                tau::Event::Signal { .. } => continue,
+                tau::Event::Interrupt(int) => int,
+                tau::Event::Timeout => {
                     if let Some(fut) = drivers.dwmmc.as_mut().as_pin_mut() {
                         unsafe {
-                            interrupt.get().write(Some(int));
+                            interrupt.get().write(Some(event));
                         }
                         if let Poll::Ready(res) = fut.poll(&mut cx) {
                             drivers.dwmmc.set(None);
@@ -225,11 +220,49 @@ extern "C" fn main(
                                 runtime.error(format_args!("{err}"));
                             }
                         }
-                        continue;
+                    }
+                    continue;
+                }
+            };
+            let is_uart = int.eq(&uart_int);
+            if is_uart {
+                while let Some(c) = uart.rx() {
+                    uart.tx(c);
+                    if c == b'\r' {
+                        uart.tx(b'\n');
+                        if let tau::Event::Interrupt(int) = event {
+                            plic_tc.complete(int);
+                        }
+                        break 'main;
                     }
                 }
+                if let tau::Event::Interrupt(int) = event {
+                    plic_tc.complete(int);
+                }
+            } else if int.belongs(&*drivers.dwmmc_int) {
+                if let Some(fut) = drivers.dwmmc.as_mut().as_pin_mut() {
+                    unsafe {
+                        interrupt.get().write(Some(event));
+                    }
+                    if let Poll::Ready(res) = fut.poll(&mut cx) {
+                        drivers.dwmmc.set(None);
+                        if let Err(err) = res {
+                            runtime.error(format_args!("dwmmc: {err}"));
+                        } else {
+                            runtime.info(format_args!("dwmmc done"));
+                        }
+                    }
+                } else {
+                    if let tau::Event::Interrupt(int) = event {
+                        plic_tc.complete(int);
+                    }
+                }
+            } else {
+                if let tau::Event::Interrupt(int) = event {
+                    plic_tc.complete(int);
+                }
+                break 'main;
             }
-            plic_tc.complete(int);
         }
     }
 

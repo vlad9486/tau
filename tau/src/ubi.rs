@@ -1,7 +1,7 @@
 use core::{hint, num::NonZeroUsize};
 
 use super::{
-    common::{Call, Entry},
+    common::{Call, Entry, Event},
     dbg,
 };
 
@@ -129,8 +129,11 @@ impl Ubi {
         }
     }
 
-    pub fn wait() {
-        let (_, []) = ubi(Call::Wait, []);
+    pub fn wait(deadline: Option<NonZeroUsize>) -> Event {
+        let t = deadline.map(NonZeroUsize::get).unwrap_or_default();
+        let (a0, []) = ubi(Call::Wait, [t]);
+        // supervisor will not send invalid value
+        unsafe { Event::decode(a0).unwrap_unchecked() }
     }
 }
 
