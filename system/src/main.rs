@@ -5,18 +5,13 @@
 
 mod register;
 
-pub mod asm;
-
-pub mod driver;
-use self::driver::Runtime;
-
+mod asm;
+mod driver;
 mod plic;
-pub use self::plic::{Plic, PlicThresholdClaim, InterruptPriority, InterruptNumber};
 
+mod shell;
 mod uart;
 mod sdio;
-
-use core::pin;
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -40,11 +35,10 @@ static MANIFEST: tau::Manifest = tau::Manifest {
 
 // TODO: proper heap
 const DTB_ADDR: usize = 0x0100_0000;
-const PLIC_ADDR: usize = 0x0200_0000;
-const PLIC_CONTEXTS_ADDR: usize = 0x0200_3000;
-
-const UART_ADDR: usize = 0x0210_0000;
-const SDIO_ADDR: usize = 0x0210_1000;
+const PLIC_ADDR: usize = 0x0110_0000;
+const PLIC_CONTEXTS_ADDR: usize = 0x0110_3000;
+const UART_ADDR: usize = 0x0120_0000;
+const SDIO_ADDR: usize = 0x0120_1000;
 
 #[cold]
 extern "C" fn main(
@@ -55,7 +49,7 @@ extern "C" fn main(
     _: usize,
     _: usize,
 ) -> ! {
-    use core::{num::NonZeroUsize, slice};
+    use core::{num::NonZeroUsize, slice, pin};
 
     let Ok(inv) = tau::Inv::decode(a0) else {
         tau::Ubi::exit([1]);
@@ -106,7 +100,7 @@ extern "C" fn main(
     let addr = ((addr_hi.to_be() as usize) << 32) + (addr_lo.to_be() as usize);
 
     tau::Ubi::map(NonZeroUsize::new(addr), PLIC_ADDR, 3).unwrap_or_default();
-    let plic = unsafe { &*(PLIC_ADDR as *mut Plic) };
+    let plic = unsafe { &*(PLIC_ADDR as *mut plic::Plic) };
 
     let context_id = cpus
         .iter()
@@ -116,10 +110,10 @@ extern "C" fn main(
         - 1;
     let context_addr = addr + 0x0020_0000 + context_id * 0x1000;
     tau::Ubi::map(NonZeroUsize::new(context_addr), PLIC_CONTEXTS_ADDR, 1).unwrap_or_default();
-    let plic_tc = unsafe { &*(PLIC_CONTEXTS_ADDR as *mut PlicThresholdClaim) };
-    plic_tc.set_threshold(InterruptPriority::_0);
+    let plic_tc = unsafe { &*(PLIC_CONTEXTS_ADDR as *mut plic::PlicThresholdClaim) };
+    plic_tc.set_threshold(plic::InterruptPriority::_0);
 
-    let rt = Runtime::new(plic_tc);
+    let rt = driver::Runtime::new(plic_tc, driver::LogLevel::Debug);
     let drivers = driver::drivers(dtb, &rt, plic, context_id, UART_ADDR, SDIO_ADDR);
     pin::pin!(drivers).run(&rt);
 

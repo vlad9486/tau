@@ -10,26 +10,37 @@ use core::{
 use thiserror_no_std::Error;
 
 use super::plic::{Plic, PlicThresholdClaim, InterruptId, InterruptNumber, InterruptPriority};
-use super::{uart, sdio};
+use super::{shell, uart, sdio};
 
 pub struct Runtime {
     plic: &'static PlicThresholdClaim,
     event: UnsafeCell<Option<tau::Event<InterruptId>>>,
     shared: UnsafeCell<Shared>,
+    log_level: LogLevel,
 }
 
 #[derive(Default)]
 pub struct Shared {
     pub uart_buffer: uart::Buffer,
     pub terminate: bool,
+    pub sdio_task: sdio::Task,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy)]
+pub enum LogLevel {
+    Error = 0,
+    Info = 2,
+    Debug = 3,
 }
 
 impl Runtime {
-    pub fn new(plic: &'static PlicThresholdClaim) -> Self {
+    pub fn new(plic: &'static PlicThresholdClaim, log_level: LogLevel) -> Self {
         Runtime {
             plic,
             event: UnsafeCell::new(None),
             shared: UnsafeCell::new(Shared::default()),
+            log_level,
         }
     }
 }
@@ -61,19 +72,33 @@ impl Runtime {
     }
 
     pub fn error(&self, args: fmt::Arguments<'_>) {
-        let time = tau::dbg::read_time();
-        let secs = time / 4_000_000; // TODO: take the constant from DTS
-        let nanos = (time % 4_000_000) * 250;
-        let printer = &mut self.shared_mut().uart_buffer;
-        write!(printer, "ERROR {secs:03}.{nanos:09} {args}\r\n").unwrap_or_default();
+        self.log::<{ LogLevel::Error as u8 }>(args);
     }
 
     pub fn info(&self, args: fmt::Arguments<'_>) {
+        self.log::<{ LogLevel::Info as u8 }>(args);
+    }
+
+    pub fn debug(&self, args: fmt::Arguments<'_>) {
+        self.log::<{ LogLevel::Debug as u8 }>(args);
+    }
+
+    fn log<const LEVEL: u8>(&self, args: fmt::Arguments<'_>) {
+        if LEVEL > self.log_level as u8 {
+            return;
+        }
         let time = tau::dbg::read_time();
         let secs = time / 4_000_000;
         let nanos = (time % 4_000_000) * 250;
         let printer = &mut self.shared_mut().uart_buffer;
-        write!(printer, "INFO {secs:03}.{nanos:09} {args}\r\n").unwrap_or_default();
+        let level = match LEVEL {
+            0 => "error",
+            1 => "warn",
+            2 => "info",
+            3 => "debug",
+            _ => "none",
+        };
+        write!(printer, "{level} {secs:03}.{nanos:09} {args}\r\n").unwrap_or_default();
     }
 
     pub fn shared(&self) -> &Shared {
@@ -134,7 +159,9 @@ impl<'dtb, Fut> Driver<'dtb, Fut> {
 
 #[pin_project::pin_project]
 #[derive(Default)]
-pub struct Drivers<'dtb, Sdio, Uart> {
+pub struct Drivers<'dtb, Shell, Sdio, Uart> {
+    #[pin]
+    shell: Shell,
     #[pin]
     uart: Option<Driver<'dtb, Uart>>,
     #[pin]
@@ -148,7 +175,8 @@ pub fn drivers<'dtb>(
     context_id: usize,
     uart_v_addr: usize,
     sdio_v_addr: usize,
-) -> Drivers<'dtb, impl Future<Output = ()>, impl Future<Output = ()>> {
+) -> Drivers<'dtb, impl Future<Output = ()>, impl Future<Output = ()>, impl Future<Output = ()>> {
+    let shell = shell::run(rt);
     let uart = dtb
         .iter()
         .find(|(_, path)| (path[1] == "soc" && path[2].starts_with("serial@")))
@@ -165,7 +193,7 @@ pub fn drivers<'dtb>(
                 sdio::run(rt, config, sdio_v_addr)
             })
         });
-    Drivers { uart, sdio }
+    Drivers { shell, uart, sdio }
 }
 
 fn poll_match<Fut>(
@@ -197,8 +225,9 @@ where
     }
 }
 
-impl<'dtb, Sdio, Uart> Drivers<'dtb, Sdio, Uart>
+impl<'dtb, Shell, Sdio, Uart> Drivers<'dtb, Shell, Sdio, Uart>
 where
+    Shell: Future<Output = ()>,
     Sdio: Future<Output = ()>,
     Uart: Future<Output = ()>,
 {
@@ -238,6 +267,10 @@ where
             if !rt.shared().uart_buffer.is_empty() {
                 rt.put(tau::Event::Signal { inv: 0, arg: 0 });
                 poll_al(this.uart.as_mut(), &mut cx);
+            }
+            if !matches!(rt.shared().sdio_task, sdio::Task::Idle) {
+                rt.put(tau::Event::Signal { inv: 0, arg: 0 });
+                poll_al(this.sdio.as_mut(), &mut cx);
             }
         }
     }

@@ -92,6 +92,7 @@ impl PlicThresholdClaim {
 }
 
 impl Plic {
+    #[allow(dead_code)]
     #[inline(always)]
     pub fn is_pending(&self, id: &InterruptNumber) -> bool {
         self.pending_bit[id.hi()].read() & (1 << id.lo()) != 0

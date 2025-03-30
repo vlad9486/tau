@@ -40,7 +40,7 @@ pub async fn run(rt: &Runtime, config: tau::DtbProps<'_>, v_addr: usize) {
 
         let buf = &mut rt.shared_mut().uart_buffer;
         while !buf.is_empty() {
-            let b = buf.buf[buf.cons & 0xfff];
+            let b = buf.buf[buf.cons % Buffer::SIZE];
             if uart.tx(b) {
                 buf.cons += 1;
             } else {
@@ -74,7 +74,7 @@ where
     const UART0_CLOCK_FREQ: u32 = 24_000_000;
 
     #[inline(always)]
-    pub fn init(&self, baud_rate: u32) -> &Self {
+    fn init(&self, baud_rate: u32) -> &Self {
         self.set_line_control(0b10000011);
         {
             let divisor = Self::UART0_CLOCK_FREQ / (16 * baud_rate);
@@ -155,7 +155,7 @@ impl Default for Buffer {
 }
 
 impl Buffer {
-    const SIZE: usize = 0x1000;
+    const SIZE: usize = 0x4000;
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0

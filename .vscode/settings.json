@@ -5,6 +5,7 @@
         "bitfield",
         "bitfields",
         "cpus",
+        "diskutil",
         "vmem",
         "llfree",
         "memoffset",

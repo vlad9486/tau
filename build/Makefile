@@ -87,11 +87,11 @@ VF2_OPENSBI_REVISION := d5e88252154dc08ddb13f326a3d765a051215fab
 
 clean-vf2:
 	rm -Rf target/vf2/*.{dtb,img} || true
-	cd target/vf2/opensbi && make distclean clean
+	cd target/vf2/opensbi && make CC=clang LLVM=1 LD=ld.lld distclean clean
 
 target/vf2/opensbi:
 	mkdir -p target/vf2 && cd target/vf2 && \
-		git clone https://github.com/starfive-tech/opensbi.git --depth 1
+		git clone https://github.com/starfive-tech/opensbi.git && \
 		cd opensbi && git checkout $(VF2_OPENSBI_REVISION)
 
 target/vf2/$(VF2_DT).dtb: board/vf2/$(VF2_DT).dts
@@ -104,5 +104,5 @@ target/vf2/tau.img: target/tau target/vf2/opensbi target/vf2/$(VF2_DT).dtb board
 	cd target/vf2 && mkimage -f ../../board/vf2/$(VF2_ITS) tau.img
 
 install-vf2: target/vf2/tau.img
-	dd if=target/vf2/tau.img of=/dev/sda2 || sudo dd if=target/vf2/tau.img of=/dev/disk4s2 && sync
+	dd if=target/vf2/tau.img of=/dev/sda2 && sync || (sudo dd if=target/vf2/tau.img of=/dev/disk4s2 && diskutil unmountDisk /dev/disk4)
 	# picocom /dev/ttyUSB0 -b 115200
