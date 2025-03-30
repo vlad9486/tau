@@ -1,4 +1,4 @@
-use core::{mem, num::NonZeroUsize};
+use core::{num::NonZeroUsize, time::Duration};
 
 use thiserror_no_std::Error;
 
@@ -6,97 +6,273 @@ use super::{
     asm,
     register::Register,
     plic::InterruptId,
-    driver::{self, Timeout, Runtime},
+    driver::{self, Timeout, DriverState, Shared},
 };
 
-pub async fn run(rt: &Runtime, config: tau::DtbProps<'_>, v_addr: usize) {
-    match inner(rt, config, v_addr).await {
-        Ok(()) => rt.info(format_args!("sdio: done")),
-        Err(err) => rt.error(format_args!("sdio: {err}")),
-    }
+pub struct State {
+    reg: &'static Reg,
+    inner: StateInner,
+    fifo_depth: u16,
+    rca: u32,
+    dma_virt: usize,
+    dma_phys: u32,
+    error: Option<DriverError>,
 }
 
-#[derive(Default)]
+enum StateInner {
+    Off,
+    On,
+    Init(StateInit),
+    Ready { task: Option<Task> },
+}
+
+enum StateInit {
+    Setup,
+    Cmd {
+        code: u32,
+        acmd41_attempt: u32,
+        acmd41_sleep: bool,
+    },
+}
+
 pub enum Task {
-    #[default]
-    Idle,
+    Read {
+        page: u32,
+        phys: u32,
+    },
     #[allow(dead_code)]
-    Read { page: u32, phys: u32, cnt: u16 },
-    #[allow(dead_code)]
-    Write { page: u32, phys: u32, cnt: u16 },
+    Write {
+        page: u32,
+        phys: u32,
+    },
 }
 
 #[derive(Debug, Error)]
-enum DriverError {
-    #[error("dts missing register address")]
-    DtsMissingReg,
+pub enum DriverError {
     #[error("control reset {0}")]
     Control(Timeout),
     #[error("clock setup {0}")]
     Clock(Timeout),
-    #[error("init timeout")]
-    InitTimeout,
+    #[error("cmd failed {0}")]
+    CmdFailed(u32),
 }
 
-async fn inner(rt: &Runtime, config: tau::DtbProps<'_>, v_addr: usize) -> Result<(), DriverError> {
-    let Some([addr_hi, addr_lo, size_hi, size_lo]) = config.find_int(|name| name == "reg") else {
-        return Err(DriverError::DtsMissingReg);
-    };
-    let addr = ((addr_hi.to_be() as usize) << 32) + (addr_lo.to_be() as usize);
-    let size = ((size_hi.to_be() as usize) << 32) + (size_lo.to_be() as usize);
-    tau::Ubi::map(NonZeroUsize::new(addr), v_addr, size.div_ceil(0x1000)).unwrap_or_default();
-    let reg = unsafe { &*(v_addr as *const Reg) };
-    let _rca = reg.init(rt).await?;
-    // reg.test(rt, v_addr + size).await;
+impl State {
+    const RESET_DELAY: Duration = Duration::from_millis(200);
+    const ACMD_41_DELAY: Duration = Duration::from_millis(5);
 
-    // TODO: allocator for DMA
-    let dma_virt = v_addr + size;
-    tau::Ubi::map(NonZeroUsize::new(0x7000_0000), dma_virt, 1).unwrap_or_default();
-    let dma_phys = 0x7000_0000_u32;
+    fn cmd<const CMD: u32>(&mut self, shared: &mut Shared, flags: CmdFl, arg: u32) {
+        let reg = self.reg;
 
-    // {
-    //     let page_phys = 0x7000_1000;
-    //     let page_virt = dma_virt + 0x1000;
-    //     tau::Ubi::map(NonZeroUsize::new(0x7000_1000), page_virt, 1).unwrap_or_default();
-    //     let page = page_virt as *mut [u8; 0x1000];
-
-    //     unsafe { page.write_volatile([0x10; 0x1000]) };
-    //     reg.data(rt, dma_virt, dma_phys, 0x700, page_phys, true)
-    //         .await;
-
-    //     let dma_data = unsafe { page.read_volatile() };
-    //     for chunk in dma_data.chunks(0x10) {
-    //         let &[a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] = chunk else {
-    //             break;
-    //         };
-    //         rt.info(format_args!("{a:02x}{b:02x}{c:02x}{d:02x}{e:02x}{f:02x}{g:02x}{h:02x}{i:02x}{j:02x}{k:02x}{l:02x}{m:02x}{n:02x}{o:02x}{p:02x}"));
-    //     }
-    // }
-    loop {
-        // TODO: queue
-        match rt.wait().await {
-            tau::Event::Interrupt(id) => drop(reg.complete_interrupt(rt, id)),
-            tau::Event::Timeout => {}
-            tau::Event::Signal { .. } => match mem::take(&mut rt.shared_mut().sdio_task) {
-                Task::Idle => {}
-                Task::Read { page, phys, cnt } => {
-                    rt.info(format_args!("read: page={page}, phys={phys}, cnt={cnt}"));
-                    for i in 0..cnt {
-                        let phys = phys + (i as u32) * 0x1000;
-                        let page = page + (i as u32);
-                        reg.data(rt, dma_virt, dma_phys, page, phys, false).await;
-                    }
-                }
-                Task::Write { page, phys, cnt } => {
-                    rt.info(format_args!("write: page={page}, phys={phys}, cnt={cnt}"));
-                    for i in 0..cnt {
-                        let phys = phys + (i as u32) * 0x1000;
-                        let page = page + (i as u32);
-                        reg.data(rt, dma_virt, dma_phys, page, phys, true).await;
-                    }
-                }
-            },
+        reg.cmdarg.write(arg);
+        asm::fence();
+        reg.cmd.write(1 << 31 | 1 << 29 | CMD | flags.bits());
+        shared
+            .uart_buffer
+            .write(format_args!("sdio: CMD{CMD} arg={arg:08x} flags={flags:?}"));
+        if let StateInner::Init(StateInit::Cmd { code, .. }) = &mut self.inner {
+            *code = CMD;
+        } else if !matches!(&self.inner, StateInner::Ready { .. }) {
+            self.inner = StateInner::Init(StateInit::Cmd {
+                code: CMD,
+                acmd41_attempt: INIT_TO,
+                acmd41_sleep: false,
+            });
         }
+    }
+
+    fn setup_dma(&mut self, phys: u32) {
+        let reg = self.reg;
+
+        reg.bytcnt.write(0x1000_u32);
+        unsafe {
+            // control bits
+            // buffer size
+            // buffer address (physical)
+            // next descriptor address (physical)
+            (self.dma_virt as *mut [u32; 8]).write_volatile([
+                0b1000_0000_0000_0000_0000_0000_0001_1010,
+                0x800,
+                phys,
+                self.dma_phys + 0x10,
+                0b1000_0000_0000_0000_0000_0000_0001_0100,
+                0x800,
+                phys + 0x800,
+                0,
+            ]);
+            asm::fence();
+        }
+        reg.desc_base.write(self.dma_phys);
+        reg.bus_mod.write(reg.bus_mod.read() | (1 << 1) | (1 << 7));
+    }
+}
+
+impl State {
+    pub fn new(config: tau::DtbProps<'_>, v_addr: usize) -> Option<Self> {
+        let Some(&[fifo_depth]) = config.find_int(|name| name == "fifo-depth") else {
+            return None;
+        };
+        let fifo_depth = fifo_depth.to_be() as u16;
+        let Some([addr_hi, addr_lo, size_hi, size_lo]) = config.find_int(|name| name == "reg")
+        else {
+            return None;
+        };
+        let addr = ((addr_hi.to_be() as usize) << 32) + (addr_lo.to_be() as usize);
+        let size = ((size_hi.to_be() as usize) << 32) + (size_lo.to_be() as usize);
+        tau::Ubi::map(NonZeroUsize::new(addr), v_addr, size.div_ceil(0x1000)).unwrap_or_default();
+        let reg = unsafe { &*(v_addr as *const Reg) };
+
+        // TODO: allocator for DMA
+        let dma_virt = v_addr + size;
+        tau::Ubi::map(NonZeroUsize::new(0x7000_0000), dma_virt, 1).unwrap_or_default();
+
+        Some(State {
+            reg,
+            inner: StateInner::Off,
+            fifo_depth,
+            rca: 0,
+            dma_virt,
+            dma_phys: 0x7000_0000_u32,
+            error: None,
+        })
+    }
+}
+
+impl DriverState for State {
+    fn handle(&mut self, shared: &mut Shared, event: &tau::Event<InterruptId>) {
+        if self.error.is_none() {
+            if let Err(err) = self.handle_inner(shared, event) {
+                self.error = Some(err);
+            }
+        }
+    }
+}
+
+impl State {
+    fn handle_inner(
+        &mut self,
+        shared: &mut Shared,
+        _event: &tau::Event<InterruptId>,
+    ) -> Result<(), DriverError> {
+        let reg = self.reg;
+        let int_bits = reg.mintsts.read();
+        let int = Interrupt::from_bits_truncate(int_bits);
+        let dma_status = reg.i_dmac_status.read();
+        // shared
+        //     .uart_buffer
+        //     .write(format_args!("{int:?} {dma_status:08x}"));
+        if int_bits != 0 {
+            reg.rintsts.write(int_bits);
+        }
+        if dma_status != 0 {
+            reg.i_dmac_status.write(dma_status & 0x3ff);
+        }
+
+        if int.contains(Interrupt::DTO) {
+            if let StateInner::Ready { task } = &mut self.inner {
+                shared.sdio_done = task.take();
+            }
+        }
+
+        match &mut self.inner {
+            StateInner::Off => {
+                shared.uart_buffer.write(format_args!("sdio: off..."));
+                reg.pwren.write(0u32);
+                self.inner = StateInner::On;
+                shared.sleep(Self::RESET_DELAY);
+                return Ok(());
+            }
+            StateInner::On => {
+                shared.uart_buffer.write(format_args!("sdio: on..."));
+                reg.pwren.write(1u32);
+                self.inner = StateInner::Init(StateInit::Setup);
+                shared.sleep(Self::RESET_DELAY);
+                return Ok(());
+            }
+            StateInner::Init(StateInit::Setup) => {
+                shared.uart_buffer.write(format_args!("sdio: init"));
+                reg.init(self.fifo_depth)?;
+                self.cmd::<0>(shared, CmdFl::empty(), 0);
+            }
+            StateInner::Init(StateInit::Cmd {
+                code,
+                acmd41_attempt,
+                acmd41_sleep,
+            }) => {
+                if *acmd41_sleep {
+                    *acmd41_sleep = false;
+                    self.cmd::<55>(shared, CmdFl::RESP_EXP, 0);
+                    return Ok(());
+                }
+
+                if int.contains(Interrupt::ERR) {
+                    return Err(DriverError::CmdFailed(*code));
+                } else if !int.contains(Interrupt::DONE) {
+                    return Ok(());
+                }
+
+                match *code {
+                    0 => self.cmd::<8>(shared, CmdFl::RESP_EXP | CmdFl::RESP_CRC, 0x1aa),
+                    8 => self.cmd::<55>(shared, CmdFl::RESP_EXP, 0),
+                    55 => self.cmd::<41>(shared, CmdFl::RESP_EXP, 0xc0ff8000),
+                    41 => {
+                        let r = reg.resp0.read();
+                        shared
+                            .uart_buffer
+                            .write(format_args!("sdio: CMD41 resp={r:08x}"));
+                        if r & (1 << 31) != 0 {
+                            self.cmd::<2>(shared, CmdFl::RESP_EXP | CmdFl::RESP_LONG_EXP, 0);
+                        } else {
+                            *acmd41_attempt -= 1;
+                            return if *acmd41_attempt == 0 {
+                                Err(DriverError::Control(Timeout))
+                            } else {
+                                *acmd41_sleep = true;
+                                shared.sleep(Self::ACMD_41_DELAY);
+                                return Ok(());
+                            };
+                        }
+                    }
+                    2 => self.cmd::<3>(shared, CmdFl::RESP_EXP, 0),
+                    3 => {
+                        self.rca = reg.resp0.read() & 0xffff0000;
+                        self.cmd::<7>(shared, CmdFl::RESP_EXP, self.rca);
+                    }
+                    7 => self.cmd::<13>(shared, CmdFl::RESP_EXP, self.rca),
+                    13 => {
+                        let r = reg.resp0.read();
+                        if (r >> 9) & 0b1111 == 4 {
+                            self.inner = StateInner::Ready { task: None };
+                            return self.handle_inner(shared, _event);
+                        } else {
+                            self.cmd::<13>(shared, CmdFl::RESP_EXP, self.rca);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            StateInner::Ready { task } => {
+                if task.is_none() {
+                    let flags =
+                        CmdFl::RESP_EXP | CmdFl::DATA_EXP | CmdFl::PREV_DATA | CmdFl::A_STOP;
+                    *task = shared.sdio_task.take();
+                    match *task {
+                        None => {}
+                        Some(Task::Read { page, phys }) => {
+                            self.setup_dma(phys);
+                            self.cmd::<MMC_READ_BLOCKS>(shared, flags, page * 8);
+                        }
+                        Some(Task::Write { page, phys }) => {
+                            self.setup_dma(phys);
+                            let flags = flags | CmdFl::DATA_WRITE;
+                            self.cmd::<MMC_WRITE_BLOCKS>(shared, flags, page * 8);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -111,15 +287,15 @@ struct Reg {
     ctype: Register<u32, u32>,
     blksiz: Register<u32, u32>,
     bytcnt: Register<u32, u32>,
-    intmask: Register<Interrupt, Interrupt>,
+    intmask: Register<(), Interrupt>,
     cmdarg: Register<u32, u32>,
     cmd: Register<u32, u32>,
     resp0: Register<u32, u32>,
     resp1: Register<u32, u32>,
     resp2: Register<u32, u32>,
     resp3: Register<u32, u32>,
-    mintsts: Register<u32, u32>,
-    rintsts: Register<u32, u32>,
+    mintsts: Register<u32, ()>,
+    rintsts: Register<(), u32>,
     status: Register<u32, u32>,
     fifo_threshold: Register<u32, u32>,
     _h0: [u32; 0xc],
@@ -140,6 +316,7 @@ const MMC_READ_BLOCKS: u32 = 18;
 const MMC_WRITE_BLOCKS: u32 = 25;
 
 bitflags::bitflags! {
+    #[derive(Debug)]
     struct CmdFl: u32 {
         const RESP_EXP = 1 << 6;
         const RESP_LONG_EXP = 1 << 7;
@@ -154,6 +331,7 @@ bitflags::bitflags! {
 }
 
 bitflags::bitflags! {
+    #[derive(Debug)]
     struct Interrupt: u32 {
         /// Card detected
         const CD = 1 << 0;
@@ -185,27 +363,15 @@ bitflags::bitflags! {
 }
 
 impl Reg {
-    async fn init(&self, rt: &Runtime) -> Result<u32, DriverError> {
-        rt.info(format_args!("off"));
-        self.pwren.write(0u32);
-        for _ in 0..13 {
-            self.sleep(rt).await;
-        }
-        rt.info(format_args!("on"));
-        self.pwren.write(1u32);
-        for _ in 0..13 {
-            self.sleep(rt).await;
-        }
-        rt.info(format_args!("ready"));
+    fn init(&self, fifo_depth: u16) -> Result<(), DriverError> {
         let ctrl_reset = Ctrl::RESET_CONTROLLER | Ctrl::FIFO_RESET | Ctrl::DMA_RESET;
         self.ctrl.write(ctrl_reset);
         driver::spin(CTRL_RESET_TO, || !self.ctrl.read().intersects(ctrl_reset))
             .map_err(DriverError::Control)?;
 
         self.rintsts.write(u32::MAX);
-        self.intmask.write(
-            Interrupt::ERR | Interrupt::DONE | Interrupt::ACD | Interrupt::DTO | Interrupt::CD,
-        );
+        self.intmask
+            .write(Interrupt::ERR | Interrupt::DONE | Interrupt::ACD | Interrupt::DTO);
         self.ctrl.write(
             self.ctrl.read() | Ctrl::ENABLE_INTERRUPTS | Ctrl::ENABLE_DMA | Ctrl::USE_INTERNAL_DMAC,
         );
@@ -220,51 +386,12 @@ impl Reg {
 
         self.init_clk()?;
         self.ctype.write(0u32);
-
-        self.send_cmd::<0>(rt, 0, CmdFl::empty()).await;
         self.timeout.write(u32::MAX);
+        let mid = ((fifo_depth & 0xfff) / 2) as u32;
         self.fifo_threshold
-            .write(self.fifo_threshold.read() | ((2u32 << 28) | (15 << 16) | 16));
+            .write((2u32 << 28) | ((mid - 1) << 16) | mid);
 
-        self.send_cmd::<8>(rt, 0x1aa, CmdFl::RESP_EXP | CmdFl::RESP_CRC)
-            .await;
-
-        let mut timeout = INIT_TO;
-        loop {
-            // CMD55: Prefix for ACMD
-            self.send_cmd::<55>(rt, 0, CmdFl::RESP_EXP).await;
-            // ACMD41: Card Initialization
-            self.send_cmd::<41>(rt, 0xc0ff8000, CmdFl::RESP_EXP).await;
-            let r = self.resp0.read();
-            if r & (1 << 31) != 0 {
-                if r & (1 << 24) != 0 {
-                    self.send_cmd::<11>(rt, 0, CmdFl::RESP_EXP).await;
-                }
-
-                break;
-            }
-            self.sleep(rt).await;
-            timeout -= 1;
-            if timeout == 0 {
-                return Err(DriverError::InitTimeout);
-            }
-        }
-
-        self.send_cmd::<2>(rt, 0, CmdFl::RESP_EXP | CmdFl::RESP_LONG_EXP)
-            .await;
-        self.send_cmd::<3>(rt, 0, CmdFl::RESP_EXP).await;
-        let rca = self.resp0.read() & 0xffff0000;
-        self.send_cmd::<7>(rt, rca, CmdFl::RESP_EXP).await;
-
-        loop {
-            self.send_cmd::<13>(rt, rca, CmdFl::RESP_EXP).await;
-            let r = self.resp0.read();
-            if (r >> 9) & 0b1111 == 4 {
-                break;
-            }
-        }
-
-        Ok(rca)
+        Ok(())
     }
 
     fn init_clk(&self) -> Result<(), DriverError> {
@@ -293,95 +420,5 @@ impl Reg {
             .map_err(DriverError::Clock)?;
 
         Ok(())
-    }
-
-    async fn data(
-        &self,
-        rt: &Runtime,
-        dma_virt: usize,
-        dma_phys: u32,
-        page_no: u32,
-        page_phys: u32,
-        write: bool,
-    ) {
-        self.bytcnt.write(0x1000_u32);
-        unsafe {
-            // control bits
-            // buffer size
-            // buffer address (physical)
-            // next descriptor address (physical)
-            (dma_virt as *mut [u32; 8]).write_volatile([
-                0b1000_0000_0000_0000_0000_0000_0001_1010,
-                0x800,
-                page_phys,
-                dma_phys + 0x10,
-                0b1000_0000_0000_0000_0000_0000_0001_0100,
-                0x800,
-                page_phys + 0x800,
-                0,
-            ]);
-            asm::fence();
-        }
-        self.desc_base.write(dma_phys);
-
-        self.bus_mod
-            .write(self.bus_mod.read() | (1 << 1) | (1 << 7));
-        let flags = CmdFl::RESP_EXP | CmdFl::DATA_EXP | CmdFl::PREV_DATA | CmdFl::A_STOP;
-        if write {
-            self.send_cmd::<MMC_WRITE_BLOCKS>(rt, page_no * 8, flags | CmdFl::DATA_WRITE)
-                .await;
-        } else {
-            self.send_cmd::<MMC_READ_BLOCKS>(rt, page_no * 8, flags)
-                .await;
-        }
-        while self.wait(rt).await & Interrupt::DTO.bits() == 0 {}
-    }
-
-    async fn send_cmd<const CMD: u32>(&self, rt: &Runtime, arg: u32, flags: CmdFl) {
-        self.cmdarg.write(arg);
-        asm::fence();
-        self.cmd.write(1 << 31 | 1 << 29 | CMD | flags.bits());
-        rt.info(format_args!("CMD{CMD} {flags:032b} {arg:08x}"));
-        self.wait(rt).await;
-    }
-
-    async fn sleep(&self, rt: &Runtime) {
-        // TODO: fix this, don't drop interrupt
-        loop {
-            let event = rt.wait().await;
-            if let tau::Event::Interrupt(id) = event {
-                self.complete_interrupt(rt, id);
-            } else if let tau::Event::Timeout = event {
-                break;
-            }
-        }
-    }
-
-    async fn wait(&self, rt: &Runtime) -> u32 {
-        loop {
-            if let tau::Event::Interrupt(id) = rt.wait().await {
-                let int = self.complete_interrupt(rt, id);
-                if int != 0 {
-                    return int;
-                }
-            }
-        }
-    }
-
-    fn complete_interrupt(&self, rt: &Runtime, id: InterruptId) -> u32 {
-        rt.complete_interrupt(id);
-        let int = self.mintsts.read();
-        let dma_status = self.i_dmac_status.read();
-        if int != 0 || dma_status != 0 {
-            if int != 0 {
-                self.rintsts.write(int);
-                rt.debug(format_args!("interrupt: {int:08x}"));
-            }
-            if dma_status != 0 {
-                self.i_dmac_status.write(dma_status & 0x3ff);
-                rt.debug(format_args!("dma status: {dma_status:08x}"));
-            }
-        }
-        int
     }
 }

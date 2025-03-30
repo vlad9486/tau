@@ -30,15 +30,15 @@ static MANIFEST: tau::Manifest = tau::Manifest {
         version: (0, 1),
         name: *b"some other module\0\0\0",
     }],
-    mapped_regions: &[tau::MappedRegion::stack(0x10000)],
+    mapped_regions: &[tau::MappedRegion::stack(0x20000)],
 };
 
 // TODO: proper heap
 const DTB_ADDR: usize = 0x0100_0000;
 const PLIC_ADDR: usize = 0x0110_0000;
 const PLIC_CONTEXTS_ADDR: usize = 0x0110_3000;
-const UART_ADDR: usize = 0x0120_0000;
-const SDIO_ADDR: usize = 0x0120_1000;
+const UART_ADDR: usize = 0x0110_4000;
+const SDIO_ADDR: usize = 0x0111_4000;
 
 #[cold]
 extern "C" fn main(
@@ -49,7 +49,7 @@ extern "C" fn main(
     _: usize,
     _: usize,
 ) -> ! {
-    use core::{num::NonZeroUsize, slice, pin};
+    use core::{num::NonZeroUsize, slice};
 
     let Ok(inv) = tau::Inv::decode(a0) else {
         tau::Ubi::exit([1]);
@@ -113,9 +113,8 @@ extern "C" fn main(
     let plic_tc = unsafe { &*(PLIC_CONTEXTS_ADDR as *mut plic::PlicThresholdClaim) };
     plic_tc.set_threshold(plic::InterruptPriority::_0);
 
-    let rt = driver::Runtime::new(plic_tc, driver::LogLevel::Debug);
-    let drivers = driver::drivers(dtb, &rt, plic, context_id, UART_ADDR, SDIO_ADDR);
-    pin::pin!(drivers).run(&rt);
+    let mut drivers = driver::drivers(dtb, plic, context_id, UART_ADDR, SDIO_ADDR);
+    drivers.run(plic_tc);
 
     tau::Ubi::respond(inv.inv, 0, [])
 }

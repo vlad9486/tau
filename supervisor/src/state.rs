@@ -279,6 +279,7 @@ pub fn syscall(
             }
             let cause = wait();
             if cause == (1 << 63) + 5 {
+                sbi::set_timer(usize::MAX).unwrap_or_default();
                 // sbi::Printer.ch(*b"SU: timer\r\n");
                 msg[0] = tau::Event::Timeout.encode();
             } else if cause == (1 << 63) + 9 {
