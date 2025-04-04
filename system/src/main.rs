@@ -2,6 +2,11 @@
 #![no_main]
 #![feature(custom_test_frameworks)]
 #![test_runner(tau::tester::test_runner)]
+#![feature(allocator_api)]
+#![feature(new_zeroed_alloc)]
+#![feature(maybe_uninit_slice)]
+
+extern crate alloc;
 
 mod register;
 
@@ -33,13 +38,6 @@ static MANIFEST: tau::Manifest = tau::Manifest {
     mapped_regions: &[tau::MappedRegion::stack(0x20000)],
 };
 
-// TODO: proper heap
-const DTB_ADDR: usize = 0x0100_0000;
-const PLIC_ADDR: usize = 0x0110_0000;
-const PLIC_CONTEXTS_ADDR: usize = 0x0110_3000;
-const UART_ADDR: usize = 0x0110_4000;
-const SDIO_ADDR: usize = 0x0111_4000;
-
 #[cold]
 extern "C" fn main(
     a0: usize,
@@ -49,17 +47,18 @@ extern "C" fn main(
     _: usize,
     _: usize,
 ) -> ! {
-    use core::{num::NonZeroUsize, slice};
+    use alloc::boxed::Box;
 
     let Ok(inv) = tau::Inv::decode(a0) else {
         tau::Ubi::exit([1]);
     };
 
-    tau::Ubi::map(NonZeroUsize::new(info), DTB_ADDR, info_pages).unwrap_or_default();
+    let len = info_pages << 12;
+    let dtb_alloc = tau::Area::new(info, len);
     let raw = unsafe {
-        slice::from_raw_parts(DTB_ADDR as *mut u32, (info_pages << 12) / size_of::<u32>())
+        Box::<[u32], _>::new_uninit_slice_in(len / size_of::<u32>(), dtb_alloc).assume_init()
     };
-    let Ok((dtb, _)) = tau::Dtb::new(raw) else {
+    let Ok((dtb, _)) = tau::Dtb::new(&raw) else {
         tau::Ubi::respond(inv.inv, 1, []);
     };
 
@@ -88,6 +87,13 @@ extern "C" fn main(
         cpu.id = id as u16;
     }
 
+    let context_id = cpus
+        .iter()
+        .take(hart_id + 1)
+        .map(|cpu| usize::from(cpu.contexts))
+        .sum::<usize>()
+        - 1;
+
     let Some(plic_config) = dtb.iter().find_map(|(props, path)| {
         (path[1] == "soc" && path[2].starts_with("plic")).then_some(props)
     }) else {
@@ -99,22 +105,23 @@ extern "C" fn main(
     };
     let addr = ((addr_hi.to_be() as usize) << 32) + (addr_lo.to_be() as usize);
 
-    tau::Ubi::map(NonZeroUsize::new(addr), PLIC_ADDR, 3).unwrap_or_default();
-    let plic = unsafe { &*(PLIC_ADDR as *mut plic::Plic) };
+    let plic = unsafe {
+        Box::<plic::PlicPriority, _>::new_uninit_in(tau::Area::new(addr, 0x2000)).assume_init()
+    };
 
-    let context_id = cpus
-        .iter()
-        .take(hart_id + 1)
-        .map(|cpu| usize::from(cpu.contexts))
-        .sum::<usize>()
-        - 1;
-    let context_addr = addr + 0x0020_0000 + context_id * 0x1000;
-    tau::Ubi::map(NonZeroUsize::new(context_addr), PLIC_CONTEXTS_ADDR, 1).unwrap_or_default();
-    let plic_tc = unsafe { &*(PLIC_CONTEXTS_ADDR as *mut plic::PlicThresholdClaim) };
-    plic_tc.set_threshold(plic::InterruptPriority::_0);
+    let plic_e = unsafe {
+        let a = tau::Area::new(addr + plic::enable_offset(context_id), 0x1000);
+        Box::<plic::PlicEnable, _>::new_uninit_in(a).assume_init()
+    };
 
-    let mut drivers = driver::drivers(dtb, plic, context_id, UART_ADDR, SDIO_ADDR);
-    drivers.run(plic_tc);
+    let plic_ctx = unsafe {
+        let a = tau::Area::new(addr + plic::context_offset(context_id), 0x1000);
+        Box::<plic::PlicCtx, _>::new_uninit_in(a).assume_init()
+    };
+    plic_ctx.set_threshold(plic::InterruptPriority::_0);
+
+    let mut drivers = driver::drivers(dtb, &plic, &plic_e, context_id);
+    drivers.run(&plic_ctx);
 
     tau::Ubi::respond(inv.inv, 0, [])
 }

@@ -2,8 +2,9 @@ use core::{
     ffi,
     fmt::{self, Write as _},
     hint,
-    num::NonZeroUsize,
 };
+
+use alloc::boxed::Box;
 
 use super::{
     register::Register,
@@ -16,11 +17,10 @@ pub struct Config {
     pub size: usize,
     pub reg_io_width: u32,
     pub baud_rate: u32,
-    pub v_addr: usize,
 }
 
 impl Config {
-    pub fn parse(props: tau::DtbProps<'_>, baud_rate: u32, v_addr: usize) -> Option<Self> {
+    pub fn parse(props: tau::DtbProps<'_>, baud_rate: u32) -> Option<Self> {
         let Some([addr_hi, addr_lo, size_hi, size_lo]) = props.find_int(|name| name == "reg")
         else {
             return None;
@@ -39,13 +39,12 @@ impl Config {
             size,
             reg_io_width,
             baud_rate,
-            v_addr,
         })
     }
 }
 
 pub struct State {
-    reg: &'static dyn UartIo,
+    reg: Box<dyn UartIo, tau::Area>,
 }
 
 impl State {
@@ -55,14 +54,17 @@ impl State {
             size,
             reg_io_width,
             baud_rate,
-            v_addr,
         } = config;
-        tau::Ubi::map(NonZeroUsize::new(addr), v_addr, size.div_ceil(0x1000)).unwrap_or_default();
 
+        let a = tau::Area::new(addr, size);
         let reg = if reg_io_width == 1 {
-            unsafe { &*(v_addr as *mut Uart<true, u8>) }.init(baud_rate) as &dyn UartIo
+            let io = unsafe { Box::<Uart<true, u8>, _>::new_uninit_in(a).assume_init() };
+            io.init(baud_rate);
+            io as Box<dyn UartIo, tau::Area>
         } else if reg_io_width == 4 {
-            unsafe { &*(v_addr as *mut Uart<false, u32>) }.init(baud_rate) as &dyn UartIo
+            let io = unsafe { Box::<Uart<false, u32>, _>::new_uninit_in(a).assume_init() };
+            io.init(baud_rate);
+            io as Box<dyn UartIo, tau::Area>
         } else {
             unreachable!()
         };
@@ -73,7 +75,7 @@ impl State {
 
 impl DriverState for State {
     fn handle(&mut self, shared: &mut Shared, _event: &tau::Event<InterruptId>) {
-        let uart = self.reg;
+        let uart = &self.reg;
         let buf = &mut shared.uart_buffer;
 
         match uart.int_status() & 0b1111 {
@@ -144,7 +146,7 @@ where
     const UART0_CLOCK_FREQ: u32 = 24_000_000;
 
     #[inline(always)]
-    fn init(&self, baud_rate: u32) -> &Self {
+    fn init(&self, baud_rate: u32) {
         self.set_line_control(0b10000011);
         {
             let divisor = Self::UART0_CLOCK_FREQ / (16 * baud_rate);
@@ -156,7 +158,6 @@ where
 
         self.set_line_control(0b00000011);
         self.interrupt_enable.write(0b00000001);
-        self
     }
 
     #[inline(always)]

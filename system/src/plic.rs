@@ -6,15 +6,27 @@ use super::register::Register;
 pub struct InterruptNumber(NonZeroU32);
 
 #[repr(C, align(0x1000))]
-pub struct Plic {
+pub struct PlicPriority {
     priorities: [Register<u32, u32>; 0x400],
     pending_bit: [Register<u32, u32>; 0x20],
     _0: [u32; 0x3e0],
-    enable_bit: [[Register<u32, u32>; 0x20]; 0x3e00],
 }
 
-#[repr(C)]
-pub struct PlicThresholdClaim {
+pub const fn enable_offset(context_id: usize) -> usize {
+    0x2000 + (context_id / 0x20) * 0x1000
+}
+
+#[repr(C, align(0x1000))]
+pub struct PlicEnable {
+    enable_bit: [[Register<u32, u32>; 0x20]; 0x20], // 0x3e00 = 0x20 * 0x1f0
+}
+
+pub const fn context_offset(context_id: usize) -> usize {
+    0x0020_0000 + context_id * 0x1000
+}
+
+#[repr(C, align(0x1000))]
+pub struct PlicCtx {
     threshold: Register<InterruptPriority, InterruptPriority>,
     claim: Register<Option<InterruptId>, InterruptId>,
     _0: [u32; 0x3fe],
@@ -74,7 +86,7 @@ pub enum InterruptPriority {
     _7,
 }
 
-impl PlicThresholdClaim {
+impl PlicCtx {
     #[inline(always)]
     pub fn next(&self) -> Option<InterruptId> {
         self.claim.read()
@@ -91,7 +103,7 @@ impl PlicThresholdClaim {
     }
 }
 
-impl Plic {
+impl PlicPriority {
     #[allow(dead_code)]
     #[inline(always)]
     pub fn is_pending(&self, id: &InterruptNumber) -> bool {
@@ -99,20 +111,22 @@ impl Plic {
     }
 
     #[inline(always)]
+    pub fn set_priority(&self, id: &InterruptNumber, priority: InterruptPriority) {
+        if let Some(reg) = self.priorities.get(id.as_int() as usize) {
+            reg.write(priority as u32)
+        }
+    }
+}
+
+impl PlicEnable {
+    #[inline(always)]
     pub fn enable(&self, context_id: usize, id: &InterruptNumber) {
-        let Some(enable_bit) = self.enable_bit.get(context_id) else {
+        let Some(enable_bit) = self.enable_bit.get(context_id % 0x20) else {
             return;
         };
         let reg = &enable_bit[id.hi()];
         let mask = reg.read();
         let mask = mask | (1 << id.lo());
         reg.write(mask);
-    }
-
-    #[inline(always)]
-    pub fn set_priority(&self, id: &InterruptNumber, priority: InterruptPriority) {
-        if let Some(reg) = self.priorities.get(id.as_int() as usize) {
-            reg.write(priority as u32)
-        }
     }
 }

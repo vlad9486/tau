@@ -1,8 +1,10 @@
 use core::{hint, num::NonZeroUsize, time::Duration};
 
+use alloc::boxed::Box;
+
 use thiserror_no_std::Error;
 
-use super::plic::{Plic, PlicThresholdClaim, InterruptNumber, InterruptId, InterruptPriority};
+use super::plic::{PlicPriority, PlicEnable, PlicCtx, InterruptNumber, InterruptId, InterruptPriority};
 use super::{uart, sdio};
 
 pub trait DriverState
@@ -52,7 +54,8 @@ struct Driver<'dtb, Fut> {
 impl<'dtb, Fut> Driver<'dtb, Fut> {
     pub fn parse_dtb<F>(
         config: tau::DtbProps<'dtb>,
-        plic: &Plic,
+        plic: &PlicPriority,
+        plic_e: &PlicEnable,
         context_id: usize,
         factory: F,
     ) -> Option<Self>
@@ -63,7 +66,7 @@ impl<'dtb, Fut> Driver<'dtb, Fut> {
         for num in int {
             let num = InterruptNumber::new(num.to_be());
             plic.set_priority(&num, InterruptPriority::_1);
-            plic.enable(context_id, &num);
+            plic_e.enable(context_id, &num);
         }
         factory(config).map(|fut| Driver { int, fut })
     }
@@ -76,29 +79,24 @@ pub struct Drivers<'dtb, Uart, Sdio> {
 
 pub fn drivers<'dtb>(
     dtb: tau::Dtb<'dtb>,
-    plic: &Plic,
+    plic: &PlicPriority,
+    plic_e: &PlicEnable,
     context_id: usize,
-    uart_v_addr: usize,
-    sdio_v_addr: usize,
 ) -> Drivers<'dtb, impl DriverState, impl DriverState> {
     let uart = dtb
         .iter()
         .find(|(_, path)| (path[1] == "soc" && path[2].starts_with("serial@")))
         .and_then(|(config, _)| {
-            Driver::parse_dtb(config, plic, context_id, |config| {
-                Some(uart::State::new(uart::Config::parse(
-                    config,
-                    115200,
-                    uart_v_addr,
-                )?))
+            Driver::parse_dtb(config, plic, plic_e, context_id, |config| {
+                Some(uart::State::new(uart::Config::parse(config, 115200)?))
             })
         });
     let sdio = dtb
         .iter()
         .find(|(_, path)| (path[1] == "soc" && path[2].starts_with("sdio1@")))
         .and_then(|(config, _)| {
-            Driver::parse_dtb(config, plic, context_id, |config| {
-                sdio::State::new(config, sdio_v_addr)
+            Driver::parse_dtb(config, plic, plic_e, context_id, |config| {
+                sdio::State::new(config)
             })
         });
     Drivers { uart, sdio }
@@ -109,11 +107,10 @@ where
     Uart: DriverState,
     Sdio: DriverState,
 {
-    pub fn run(&mut self, plic: &'static PlicThresholdClaim) {
+    pub fn run(&mut self, plic: &PlicCtx) {
         let phys = 0x7000_1000;
-        let page = 0x0120_0000;
-        tau::Ubi::map(NonZeroUsize::new(phys as _), page, 1).unwrap_or_default();
-        // let page = page as *mut [u8; 0x1000];
+        let page =
+            Box::<[u8], _>::new_uninit_slice_in(0x1000, tau::Area::new(phys as usize, 0x1000));
 
         let mut shared = Shared {
             deadline: NonZeroUsize::new(tau::dbg::read_time() + 0x10000),
@@ -153,7 +150,7 @@ where
             }
 
             if shared.sdio_done.take().is_some() {
-                let dma_data = unsafe { (0x0120_0000 as *const [u8; 0x1000]).read_volatile() };
+                let dma_data = unsafe { page.assume_init_ref() };
                 for chunk in dma_data.chunks(0x10) {
                     let &[a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] = chunk else {
                         break;

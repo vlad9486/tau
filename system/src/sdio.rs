@@ -1,4 +1,6 @@
-use core::{num::NonZeroUsize, time::Duration};
+use core::time::Duration;
+
+use alloc::boxed::Box;
 
 use thiserror_no_std::Error;
 
@@ -10,11 +12,11 @@ use super::{
 };
 
 pub struct State {
-    reg: &'static Reg,
+    reg: Box<Reg, tau::Area>,
     inner: StateInner,
     fifo_depth: u16,
     rca: u32,
-    dma_virt: usize,
+    dma_desc: Box<[u32], tau::Area>,
     dma_phys: u32,
     error: Option<DriverError>,
 }
@@ -62,7 +64,7 @@ impl State {
     const ACMD_41_DELAY: Duration = Duration::from_millis(5);
 
     fn cmd<const CMD: u32>(&mut self, shared: &mut Shared, flags: CmdFl, arg: u32) {
-        let reg = self.reg;
+        let reg = &self.reg;
 
         reg.cmdarg.write(arg);
         asm::fence();
@@ -82,33 +84,31 @@ impl State {
     }
 
     fn setup_dma(&mut self, phys: u32) {
-        let reg = self.reg;
+        let reg = &self.reg;
 
         reg.bytcnt.write(0x1000_u32);
-        unsafe {
-            // control bits
-            // buffer size
-            // buffer address (physical)
-            // next descriptor address (physical)
-            (self.dma_virt as *mut [u32; 8]).write_volatile([
-                0b1000_0000_0000_0000_0000_0000_0001_1010,
-                0x800,
-                phys,
-                self.dma_phys + 0x10,
-                0b1000_0000_0000_0000_0000_0000_0001_0100,
-                0x800,
-                phys + 0x800,
-                0,
-            ]);
-            asm::fence();
-        }
+        // control bits
+        // buffer size
+        // buffer address (physical)
+        // next descriptor address (physical)
+        self.dma_desc[..8].clone_from_slice(&[
+            0b1000_0000_0000_0000_0000_0000_0001_1010,
+            0x800,
+            phys,
+            self.dma_phys + 0x10,
+            0b1000_0000_0000_0000_0000_0000_0001_0100,
+            0x800,
+            phys + 0x800,
+            0,
+        ]);
+        asm::fence();
         reg.desc_base.write(self.dma_phys);
         reg.bus_mod.write(reg.bus_mod.read() | (1 << 1) | (1 << 7));
     }
 }
 
 impl State {
-    pub fn new(config: tau::DtbProps<'_>, v_addr: usize) -> Option<Self> {
+    pub fn new(config: tau::DtbProps<'_>) -> Option<Self> {
         let Some(&[fifo_depth]) = config.find_int(|name| name == "fifo-depth") else {
             return None;
         };
@@ -119,19 +119,19 @@ impl State {
         };
         let addr = ((addr_hi.to_be() as usize) << 32) + (addr_lo.to_be() as usize);
         let size = ((size_hi.to_be() as usize) << 32) + (size_lo.to_be() as usize);
-        tau::Ubi::map(NonZeroUsize::new(addr), v_addr, size.div_ceil(0x1000)).unwrap_or_default();
-        let reg = unsafe { &*(v_addr as *const Reg) };
+        let a = tau::Area::new(addr, size);
+        let reg = unsafe { Box::<Reg, _>::new_uninit_in(a).assume_init() };
 
         // TODO: allocator for DMA
-        let dma_virt = v_addr + size;
-        tau::Ubi::map(NonZeroUsize::new(0x7000_0000), dma_virt, 1).unwrap_or_default();
+        let a = tau::Area::new(0x7000_0000, 0x1000);
+        let dma_desc = unsafe { Box::<[u32], _>::new_zeroed_slice_in(0x200, a).assume_init() };
 
         Some(State {
             reg,
             inner: StateInner::Off,
             fifo_depth,
             rca: 0,
-            dma_virt,
+            dma_desc,
             dma_phys: 0x7000_0000_u32,
             error: None,
         })
@@ -154,7 +154,7 @@ impl State {
         shared: &mut Shared,
         _event: &tau::Event<InterruptId>,
     ) -> Result<(), DriverError> {
-        let reg = self.reg;
+        let reg = &self.reg;
         let int_bits = reg.mintsts.read();
         let int = Interrupt::from_bits_truncate(int_bits);
         let dma_status = reg.i_dmac_status.read();
