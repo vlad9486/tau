@@ -17,6 +17,7 @@
         "plic",
         "sdio",
         "starfive",
+        "subsec",
         "syscall",
         "UART",
         "virt",

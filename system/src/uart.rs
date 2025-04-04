@@ -243,11 +243,10 @@ impl Buffer {
         self.pos.saturating_sub(self.cons)
     }
 
-    pub fn write(&mut self, args: fmt::Arguments<'_>) {
-        let time = tau::dbg::read_time();
-        let secs = time / 4_000_000;
-        let nanos = (time % 4_000_000) * 250;
-        write!(self, "{secs:03}.{nanos:09} {args}\r\n").unwrap_or_default();
+    pub fn write(&mut self, nanos: u128, args: fmt::Arguments<'_>) {
+        let secs = nanos / 1_000_000_000;
+        let subsec_nanos = nanos % 1_000_000_000;
+        write!(self, "{secs:03}.{subsec_nanos:09} {args}\r\n").unwrap_or_default();
     }
 }
 

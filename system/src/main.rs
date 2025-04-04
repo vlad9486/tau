@@ -10,11 +10,9 @@ extern crate alloc;
 
 mod register;
 
-mod asm;
 mod driver;
 mod plic;
 
-mod shell;
 mod uart;
 mod sdio;
 

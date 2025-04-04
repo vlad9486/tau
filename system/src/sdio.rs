@@ -5,7 +5,6 @@ use alloc::boxed::Box;
 use thiserror_no_std::Error;
 
 use super::{
-    asm,
     register::Register,
     plic::InterruptId,
     driver::{self, Timeout, DriverState, Shared},
@@ -67,11 +66,9 @@ impl State {
         let reg = &self.reg;
 
         reg.cmdarg.write(arg);
-        asm::fence();
+        tau::asm::fence();
         reg.cmd.write(1 << 31 | 1 << 29 | CMD | flags.bits());
-        shared
-            .uart_buffer
-            .write(format_args!("sdio: CMD{CMD} arg={arg:08x} flags={flags:?}"));
+        shared.write(format_args!("sdio: CMD{CMD} arg={arg:08x} flags={flags:?}"));
         if let StateInner::Init(StateInit::Cmd { code, .. }) = &mut self.inner {
             *code = CMD;
         } else if !matches!(&self.inner, StateInner::Ready { .. }) {
@@ -101,7 +98,7 @@ impl State {
             phys + 0x800,
             0,
         ]);
-        asm::fence();
+        tau::asm::fence();
         reg.desc_base.write(self.dma_phys);
         reg.bus_mod.write(reg.bus_mod.read() | (1 << 1) | (1 << 7));
     }
@@ -176,21 +173,21 @@ impl State {
 
         match &mut self.inner {
             StateInner::Off => {
-                shared.uart_buffer.write(format_args!("sdio: off..."));
+                shared.write(format_args!("sdio: off..."));
                 reg.pwren.write(0u32);
                 self.inner = StateInner::On;
                 shared.sleep(Self::RESET_DELAY);
                 return Ok(());
             }
             StateInner::On => {
-                shared.uart_buffer.write(format_args!("sdio: on..."));
+                shared.write(format_args!("sdio: on..."));
                 reg.pwren.write(1u32);
                 self.inner = StateInner::Init(StateInit::Setup);
                 shared.sleep(Self::RESET_DELAY);
                 return Ok(());
             }
             StateInner::Init(StateInit::Setup) => {
-                shared.uart_buffer.write(format_args!("sdio: init"));
+                shared.write(format_args!("sdio: init"));
                 reg.init(self.fifo_depth)?;
                 self.cmd::<0>(shared, CmdFl::empty(), 0);
             }
@@ -217,9 +214,7 @@ impl State {
                     55 => self.cmd::<41>(shared, CmdFl::RESP_EXP, 0xc0ff8000),
                     41 => {
                         let r = reg.resp0.read();
-                        shared
-                            .uart_buffer
-                            .write(format_args!("sdio: CMD41 resp={r:08x}"));
+                        shared.write(format_args!("sdio: CMD41 resp={r:08x}"));
                         if r & (1 << 31) != 0 {
                             self.cmd::<2>(shared, CmdFl::RESP_EXP | CmdFl::RESP_LONG_EXP, 0);
                         } else {

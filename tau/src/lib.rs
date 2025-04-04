@@ -5,7 +5,7 @@
 
 pub mod tester;
 
-pub mod dbg;
+pub mod asm;
 
 mod common;
 pub use self::common::*;

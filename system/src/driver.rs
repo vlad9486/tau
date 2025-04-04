@@ -1,4 +1,4 @@
-use core::{hint, num::NonZeroUsize, time::Duration};
+use core::{hint, fmt, num::NonZeroUsize, time::Duration};
 
 use alloc::boxed::Box;
 
@@ -14,19 +14,25 @@ where
     fn handle(&mut self, shared: &mut Shared, event: &tau::Event<InterruptId>);
 }
 
-#[derive(Default)]
 pub struct Shared {
     pub uart_buffer: uart::Buffer,
     pub sdio_task: Option<sdio::Task>,
     pub sdio_done: Option<sdio::Task>,
     pub terminate: bool,
     pub deadline: Option<NonZeroUsize>,
+    freq: u128,
 }
 
 impl Shared {
     pub fn sleep(&mut self, delay: Duration) {
-        let d = tau::dbg::read_time() + ((delay.as_nanos() / 250) as usize);
+        let tick = ((delay.as_nanos() * self.freq) / 1_000_000_000) as usize;
+        let d = tau::asm::read_time().wrapping_add(tick);
         self.deadline = NonZeroUsize::new(d);
+    }
+
+    pub fn write(&mut self, args: fmt::Arguments<'_>) {
+        let nanos = ((tau::asm::read_time() as u128) * 1_000_000_000) / self.freq;
+        self.uart_buffer.write(nanos, args);
     }
 }
 
@@ -108,15 +114,25 @@ where
     Sdio: DriverState,
 {
     pub fn run(&mut self, plic: &PlicCtx) {
+        // TODO: move in user task
+        // TODO: allocator for DMA
         let phys = 0x7000_1000;
         let page =
             Box::<[u8], _>::new_uninit_slice_in(0x1000, tau::Area::new(phys as usize, 0x1000));
 
         let mut shared = Shared {
-            deadline: NonZeroUsize::new(tau::dbg::read_time() + 0x10000),
+            uart_buffer: uart::Buffer::default(),
             sdio_task: Some(sdio::Task::Read { page: 0x400, phys }),
-            ..Default::default()
+            sdio_done: None,
+            terminate: false,
+            deadline: None,
+            // TODO: take from dts
+            freq: 4_000_000_u128,
         };
+        if let Some(st) = self.sdio.as_mut() {
+            st.fut.handle(&mut shared, &tau::Event::Timeout);
+        }
+
         while !(shared.terminate && shared.uart_buffer.is_empty()) {
             // TODO: proper time wheel
             let mut event = Some(tau::Ubi::wait(shared.deadline.take()));
@@ -149,13 +165,14 @@ where
                 }
             }
 
+            // TODO: move in user task
             if shared.sdio_done.take().is_some() {
                 let dma_data = unsafe { page.assume_init_ref() };
                 for chunk in dma_data.chunks(0x10) {
                     let &[a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] = chunk else {
                         break;
                     };
-                    shared.uart_buffer.write(format_args!(
+                    shared.write(format_args!(
                         "\
                         {a:02x} {b:02x} {c:02x} {d:02x} {e:02x} {f:02x} {g:02x} {h:02x} \
                         {i:02x} {j:02x} {k:02x} {l:02x} {m:02x} {n:02x} {o:02x} {p:02x}"

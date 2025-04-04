@@ -300,7 +300,7 @@ pub fn syscall(
                     .ch(*b"SU: exception: ")
                     .ch([lo, hi])
                     .ch(*b"\r\n");
-                tau::dbg::dbg([0xdeadbeef]);
+                tau::asm::dbg([0xdeadbeef]);
             }
         }
         Err(a0) => {
@@ -385,7 +385,7 @@ pub fn exception(cause: isize) {
             "\r\n\nSU: exception: cause={cause} sepc=0x{sepc:016x} stval=0x{stval:016x}\r\n",
         )
         .unwrap_or_default();
-        tau::dbg::dbg([0xdeadbeef]);
+        tau::asm::dbg([0xdeadbeef]);
     } else {
         sbi::Printer.ch(*b"SU: miss interrupt\r\n");
     }

@@ -2,7 +2,7 @@ use core::{fmt, ops::Index, slice, str};
 
 use thiserror_no_std::Error;
 
-use super::dbg;
+use super::asm;
 
 pub struct Dtb<'a> {
     dt: &'a [u32],
@@ -324,7 +324,7 @@ impl<'a> DtbProps<'a> {
                     }
                 }
                 NOP => cursor += 1,
-                a => dbg::dbg([a as usize, 0xdeadbeef]),
+                a => asm::dbg([a as usize, 0xdeadbeef]),
             }
         }
     }
