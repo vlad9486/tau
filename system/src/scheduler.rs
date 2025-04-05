@@ -14,7 +14,8 @@ where
 }
 
 pub struct Shared {
-    pub uart_buffer: uart::Buffer,
+    pub uart_out: uart::Buffer,
+    pub uart_in: uart::Buffer,
     pub sdio_task: Option<sdio::Task>,
     pub sdio_done: Option<sdio::Task>,
     pub terminate: bool,
@@ -42,7 +43,7 @@ impl Shared {
 
     pub fn write(&mut self, args: fmt::Arguments<'_>) {
         let nanos = ((tau::asm::read_time() as u128) * 1_000_000_000) / self.freq;
-        self.uart_buffer.write(nanos, args);
+        self.uart_out.write(nanos, args);
     }
 }
 
@@ -136,7 +137,8 @@ impl Tasks {
 
     pub fn run(&mut self, plic: &PlicCtx) {
         let shared = UnsafeCell::new(Shared {
-            uart_buffer: uart::Buffer::default(),
+            uart_out: uart::Buffer::default(),
+            uart_in: uart::Buffer::default(),
             sdio_task: None,
             sdio_done: None,
             terminate: false,
@@ -156,7 +158,7 @@ impl Tasks {
             driver.state.handle(shared, tau::Event::Timeout);
         }
 
-        while !(shared.terminate && shared.uart_buffer.is_empty()) {
+        while !(shared.terminate && shared.uart_out.is_empty()) {
             let deadline = shared
                 .deadline
                 .iter()
@@ -172,7 +174,7 @@ impl Tasks {
                         handle(&mut self.uart, shared, int);
                         handle(&mut self.sdio, shared, int);
 
-                        if shared.sdio_done.is_some() {
+                        if shared.sdio_done.is_some() || !shared.uart_in.is_empty() {
                             user.step();
                         }
                     }
@@ -207,7 +209,7 @@ impl Tasks {
                 }
             }
 
-            if !shared.uart_buffer.is_empty() {
+            if !shared.uart_out.is_empty() {
                 if let Some(driver) = self.uart.as_mut() {
                     driver.state.handle(shared, tau::Event::Timeout);
                 }

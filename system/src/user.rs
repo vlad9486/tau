@@ -1,6 +1,5 @@
 use core::{
     cell::UnsafeCell,
-    fmt::Write,
     future,
     pin::Pin,
     task::{Context, Poll},
@@ -32,11 +31,11 @@ impl<'a> State<'a> {
 async fn run(shared: &UnsafeCell<Shared>) {
     // TODO: allocator for DMA
     let phys = 0x7000_1000;
-    let page = Box::<[[u8; 16]], _>::new_uninit_slice_in(0x100, tau::Area::new(phys, 0x1000));
+    let page = Box::<[[u8; 0x10]; 0x100], _>::new_uninit_in(tau::Area::new(phys, 0x1000));
     read(shared, phys, 0x400).await;
 
     let dma_data = unsafe { page.assume_init() };
-    for chunk in &dma_data {
+    for chunk in dma_data.iter() {
         let [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] =
             unsafe { (chunk as *const [u8; 16]).read_volatile() };
         unsafe { &mut *shared.get() }.write(format_args!(
@@ -46,13 +45,34 @@ async fn run(shared: &UnsafeCell<Shared>) {
         ));
     }
 
+    let mut cmd = [0; 8];
     loop {
-        unsafe { &mut *shared.get() }
-            .uart_buffer
-            .write_char('C')
-            .unwrap_or_default();
-        sleep(shared, Duration::from_secs(1)).await;
+        read_uart(shared, &mut cmd).await;
+        unsafe { &mut *shared.get() }.uart_out.tx(cmd[0]);
+        if cmd[0] == b'q' {
+            unsafe { &mut *shared.get() }.terminate = true;
+            break;
+        } else if cmd[0] == b'u' {
+            // receive a file by y_modem
+            loop {
+                unsafe { &mut *shared.get() }.uart_out.tx(y_modem::CRC);
+                sleep(shared, Duration::from_secs(1)).await;
+                // TODO:
+            }
+        }
     }
+}
+
+async fn read_uart(shared: &UnsafeCell<Shared>, b: &mut [u8]) -> usize {
+    future::poll_fn(move |_| {
+        let buf = &mut unsafe { &mut *shared.get() }.uart_in;
+        if buf.is_empty() {
+            Poll::Pending
+        } else {
+            Poll::Ready(buf.rxs(b))
+        }
+    })
+    .await
 }
 
 async fn read(shared: &UnsafeCell<Shared>, phys: usize, block: u32) {
@@ -100,4 +120,15 @@ async fn sleep(shared: &UnsafeCell<Shared>, duration: Duration) {
         }
     })
     .await;
+}
+
+#[allow(dead_code)]
+mod y_modem {
+    pub const SOH: u8 = 0x01;
+    pub const STX: u8 = 0x02;
+    pub const EOT: u8 = 0x04;
+    pub const ACK: u8 = 0x06;
+    pub const NAK: u8 = 0x15;
+    pub const CAN: u8 = 0x18;
+    pub const CRC: u8 = 0x43;
 }

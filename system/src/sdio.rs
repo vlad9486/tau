@@ -147,9 +147,6 @@ impl State {
         let int_bits = reg.mintsts.read();
         let int = Interrupt::from_bits_truncate(int_bits);
         let dma_status = reg.i_dmac_status.read();
-        // shared
-        //     .uart_buffer
-        //     .write(format_args!("{int:?} {dma_status:08x}"));
         if int_bits != 0 {
             reg.rintsts.write(int_bits);
         }

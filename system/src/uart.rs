@@ -80,8 +80,6 @@ impl DriverState for State {
             return uart.init(baud_rate.get());
         }
 
-        let buf = &mut shared.uart_buffer;
-
         match uart.int_status() & 0b1111 {
             // modem status
             0b0000 => {
@@ -91,6 +89,7 @@ impl DriverState for State {
             0b0001 => {}
             // THR empty
             0b0010 => {
+                let buf = &mut shared.uart_out;
                 let mut rem = 16;
                 while !buf.is_empty() {
                     let b = buf.buf[buf.cons % Buffer::SIZE];
@@ -105,11 +104,7 @@ impl DriverState for State {
             // received data available
             0b0100 => {
                 while let Some(c) = uart.rx() {
-                    buf.write_fmt(format_args!("{c:02x} ")).unwrap_or_default();
-                    if c == b'\r' {
-                        buf.write_str("\r\n").unwrap_or_default();
-                        shared.terminate = true;
-                    }
+                    shared.uart_in.tx(c);
                 }
             }
             // receiver line status
@@ -127,7 +122,7 @@ impl DriverState for State {
             _ => unreachable!(),
         }
 
-        uart.tx_int(!buf.is_empty());
+        uart.tx_int(!shared.uart_out.is_empty());
     }
 }
 
@@ -250,27 +245,51 @@ impl Buffer {
         let subsec_nanos = nanos % 1_000_000_000;
         write!(self, "{secs:03}.{subsec_nanos:09} {args}\r\n").unwrap_or_default();
     }
+
+    pub fn tx(&mut self, b: u8) {
+        let i = self.pos;
+        self.buf[i % Self::SIZE] = b;
+        self.pos = i + 1;
+    }
+
+    pub fn rxs(&mut self, b: &mut [u8]) -> usize {
+        let cons = self.cons;
+        let end = (cons + b.len()).min(self.pos);
+        let read = end - cons;
+
+        if end / Self::SIZE == cons / Self::SIZE {
+            b[..read].clone_from_slice(&self.buf[(cons % Self::SIZE)..(end % Self::SIZE)]);
+        } else {
+            let mid = Self::SIZE - (cons % Self::SIZE);
+            b[..mid].clone_from_slice(&self.buf[(cons % Self::SIZE)..]);
+            b[mid..read].clone_from_slice(&self.buf[..(end % Self::SIZE)]);
+        }
+        self.cons = end;
+        read
+    }
+
+    pub fn txs(&mut self, b: &[u8]) {
+        let pos = self.pos;
+        let end = pos + b.len();
+        if end / Self::SIZE == pos / Self::SIZE {
+            self.buf[(pos % Self::SIZE)..(end % Self::SIZE)].clone_from_slice(b);
+        } else {
+            let mid = Self::SIZE - (pos % Self::SIZE);
+            self.buf[(pos % Self::SIZE)..].clone_from_slice(&b[..mid]);
+            self.buf[..(end % Self::SIZE)].clone_from_slice(&b[mid..]);
+        }
+        self.pos = end;
+    }
 }
 
 impl fmt::Write for Buffer {
     fn write_char(&mut self, c: char) -> fmt::Result {
-        let i = self.pos;
-        self.buf[i % Self::SIZE] = c as _;
-        self.pos = i + 1;
+        self.tx(c as _);
         Ok(())
     }
 
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let pos = self.pos;
-        let end = pos + s.len();
-        if end / Self::SIZE == pos / Self::SIZE {
-            self.buf[(pos % Self::SIZE)..(end % Self::SIZE)].clone_from_slice(s.as_bytes());
-        } else {
-            let mid = Self::SIZE - (pos % Self::SIZE);
-            self.buf[(pos % Self::SIZE)..].clone_from_slice(&s.as_bytes()[..mid]);
-            self.buf[..(end % Self::SIZE)].clone_from_slice(&s.as_bytes()[mid..]);
-        }
-        self.pos = end;
+        self.txs(s.as_bytes());
         Ok(())
     }
 }
