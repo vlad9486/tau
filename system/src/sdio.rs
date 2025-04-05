@@ -6,8 +6,7 @@ use thiserror_no_std::Error;
 
 use super::{
     register::Register,
-    plic::InterruptId,
-    driver::{self, Timeout, DriverState, Shared},
+    scheduler::{self, Timeout, DriverState, Shared},
 };
 
 pub struct State {
@@ -136,7 +135,7 @@ impl State {
 }
 
 impl DriverState for State {
-    fn handle(&mut self, shared: &mut Shared, event: &tau::Event<InterruptId>) {
+    fn handle(&mut self, shared: &mut Shared, event: tau::Event<u32>) {
         if self.error.is_none() {
             if let Err(err) = self.handle_inner(shared, event) {
                 self.error = Some(err);
@@ -149,7 +148,7 @@ impl State {
     fn handle_inner(
         &mut self,
         shared: &mut Shared,
-        _event: &tau::Event<InterruptId>,
+        _event: tau::Event<u32>,
     ) -> Result<(), DriverError> {
         let reg = &self.reg;
         let int_bits = reg.mintsts.read();
@@ -361,7 +360,7 @@ impl Reg {
     fn init(&self, fifo_depth: u16) -> Result<(), DriverError> {
         let ctrl_reset = Ctrl::RESET_CONTROLLER | Ctrl::FIFO_RESET | Ctrl::DMA_RESET;
         self.ctrl.write(ctrl_reset);
-        driver::spin(CTRL_RESET_TO, || !self.ctrl.read().intersects(ctrl_reset))
+        scheduler::spin(CTRL_RESET_TO, || !self.ctrl.read().intersects(ctrl_reset))
             .map_err(DriverError::Control)?;
 
         self.rintsts.write(u32::MAX);
@@ -403,7 +402,7 @@ impl Reg {
 
         // Trigger clock update (CMD with bit 21)
         self.cmd.write((1u32 << 31) | (1 << 13) | (1 << 21)); // START_CMD | UPDATE_CLOCK
-        driver::spin(CLK_SET_TO, || self.cmd.read() & (1u32 << 31) == 0)
+        scheduler::spin(CLK_SET_TO, || self.cmd.read() & (1u32 << 31) == 0)
             .map_err(DriverError::Clock)?;
 
         // Enable clock to the card
@@ -411,7 +410,7 @@ impl Reg {
 
         // Trigger another update
         self.cmd.write((1u32 << 31) | (1 << 13) | (1 << 21));
-        driver::spin(CLK_SET_TO, || self.cmd.read() & (1u32 << 31) == 0)
+        scheduler::spin(CLK_SET_TO, || self.cmd.read() & (1u32 << 31) == 0)
             .map_err(DriverError::Clock)?;
 
         Ok(())

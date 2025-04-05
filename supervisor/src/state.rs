@@ -278,21 +278,20 @@ pub fn syscall(
                 sbi::set_timer(msg[1]).unwrap_or_default();
             }
             let cause = wait();
-            if cause == (1 << 63) + 5 {
+            let event = if cause == (1 << 63) + 5 {
                 sbi::set_timer(usize::MAX).unwrap_or_default();
                 // sbi::Printer.ch(*b"SU: timer\r\n");
-                msg[0] = tau::Event::Timeout.encode();
+                tau::Event::Timeout
             } else if cause == (1 << 63) + 9 {
                 // sbi::Printer.ch(*b"SU: interrupt\r\n");
-                msg[0] = tau::Event::Interrupt(()).encode();
+                tau::Event::Interrupt(())
             } else if cause == (1 << 63) + 1 {
                 // sbi::Printer.ch(*b"SU: software interrupt\r\n");
                 // TODO:
-                let event = tau::Event::Signal { inv: 0, arg: 0 };
-                msg[0] = event.encode();
+                tau::Event::Signal { inv: 0, arg: 0 }
             } else if cause & (1 << 63) != 0 {
                 sbi::Printer.ch(*b"SU: unexpected interrupt\r\n");
-                msg[0] = tau::Event::Interrupt(()).encode();
+                tau::Event::Interrupt(())
             } else {
                 let lo = (cause % 10) as u8 + b'0';
                 let hi = ((cause / 10) % 10) as u8 + b'0';
@@ -301,7 +300,8 @@ pub fn syscall(
                     .ch([lo, hi])
                     .ch(*b"\r\n");
                 tau::asm::dbg([0xdeadbeef]);
-            }
+            };
+            msg[0] = event.encode();
         }
         Err(a0) => {
             write!(sbi::Console, "cannot decode {a0:016x}\r\n").unwrap_or_default();

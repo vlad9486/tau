@@ -10,7 +10,7 @@ extern crate alloc;
 
 mod register;
 
-mod driver;
+mod scheduler;
 mod plic;
 
 mod uart;
@@ -118,8 +118,7 @@ extern "C" fn main(
     };
     plic_ctx.set_threshold(plic::InterruptPriority::_0);
 
-    let mut drivers = driver::drivers(dtb, &plic, &plic_e, context_id);
-    drivers.run(&plic_ctx);
+    scheduler::Tasks::new(dtb, &plic, &plic_e, context_id).run(&plic_ctx);
 
     tau::Ubi::respond(inv.inv, 0, [])
 }

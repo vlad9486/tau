@@ -43,6 +43,7 @@
         "sret",
         "sscratch",
         "sstatus",
+        "stval",
         "stvec",
         // unix
         "defsym",

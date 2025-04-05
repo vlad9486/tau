@@ -2,14 +2,14 @@ use core::{
     ffi,
     fmt::{self, Write as _},
     hint,
+    num::NonZeroU32,
 };
 
 use alloc::boxed::Box;
 
 use super::{
     register::Register,
-    plic::InterruptId,
-    driver::{DriverState, Shared},
+    scheduler::{DriverState, Shared},
 };
 
 pub struct Config {
@@ -45,6 +45,7 @@ impl Config {
 
 pub struct State {
     reg: Box<dyn UartIo, tau::Area>,
+    baud_rate: Option<NonZeroU32>,
 }
 
 impl State {
@@ -58,24 +59,27 @@ impl State {
 
         let a = tau::Area::new(addr, size);
         let reg = if reg_io_width == 1 {
-            let io = unsafe { Box::<Uart<true, u8>, _>::new_uninit_in(a).assume_init() };
-            io.init(baud_rate);
-            io as Box<dyn UartIo, tau::Area>
+            (unsafe { Box::<Uart<true, u8>, _>::new_uninit_in(a).assume_init() })
+                as Box<dyn UartIo, tau::Area>
         } else if reg_io_width == 4 {
-            let io = unsafe { Box::<Uart<false, u32>, _>::new_uninit_in(a).assume_init() };
-            io.init(baud_rate);
-            io as Box<dyn UartIo, tau::Area>
+            (unsafe { Box::<Uart<false, u32>, _>::new_uninit_in(a).assume_init() })
+                as Box<dyn UartIo, tau::Area>
         } else {
             unreachable!()
         };
+        let baud_rate = NonZeroU32::new(baud_rate);
 
-        State { reg }
+        State { reg, baud_rate }
     }
 }
 
 impl DriverState for State {
-    fn handle(&mut self, shared: &mut Shared, _event: &tau::Event<InterruptId>) {
+    fn handle(&mut self, shared: &mut Shared, _event: tau::Event<u32>) {
         let uart = &self.reg;
+        if let Some(baud_rate) = self.baud_rate.take() {
+            return uart.init(baud_rate.get());
+        }
+
         let buf = &mut shared.uart_buffer;
 
         match uart.int_status() & 0b1111 {
@@ -87,11 +91,13 @@ impl DriverState for State {
             0b0001 => {}
             // THR empty
             0b0010 => {
+                let mut rem = 16;
                 while !buf.is_empty() {
                     let b = buf.buf[buf.cons % Buffer::SIZE];
-                    if uart.tx(b) {
-                        buf.cons += 1;
-                    } else {
+                    uart.tx(b);
+                    rem -= 1;
+                    buf.cons += 1;
+                    if rem == 0 {
                         break;
                     }
                 }
@@ -146,21 +152,6 @@ where
     const UART0_CLOCK_FREQ: u32 = 24_000_000;
 
     #[inline(always)]
-    fn init(&self, baud_rate: u32) {
-        self.set_line_control(0b10000011);
-        {
-            let divisor = Self::UART0_CLOCK_FREQ / (16 * baud_rate);
-            self.transmit_holding.write((divisor & 0xff) as u8);
-            self.interrupt_enable.write(((divisor >> 8) & 0xff) as u8);
-        }
-        self.interrupt_status_fifo_control.write(0b00000110);
-        self.interrupt_status_fifo_control.write(0b00000001);
-
-        self.set_line_control(0b00000011);
-        self.interrupt_enable.write(0b00000001);
-    }
-
-    #[inline(always)]
     fn set_line_control(&self, v: u8) {
         if !UART_16550_COMPATIBLE {
             while self.uart_status.read().into() & 0b00000001 != 0 {
@@ -172,9 +163,11 @@ where
 }
 
 trait UartIo {
+    fn init(&self, baud_rate: u32);
+
     fn rx(&self) -> Option<u8>;
 
-    fn tx(&self, b: u8) -> bool;
+    fn tx(&self, b: u8);
 
     fn tx_int(&self, on: bool);
 
@@ -186,6 +179,20 @@ where
     Word: From<u8> + Into<u32>,
 {
     #[inline(always)]
+    fn init(&self, baud_rate: u32) {
+        self.set_line_control(0b10000011);
+        {
+            let divisor = Self::UART0_CLOCK_FREQ / (16 * baud_rate);
+            self.transmit_holding.write((divisor & 0xff) as u8);
+            self.interrupt_enable.write(((divisor >> 8) & 0xff) as u8);
+        }
+        self.interrupt_status_fifo_control.write(0b0000111);
+
+        self.set_line_control(0b00000011);
+        self.interrupt_enable.write(0b10000001);
+    }
+
+    #[inline(always)]
     fn rx(&self) -> Option<u8> {
         if self.line_status.read().into() & 0b0000_0001 != 0 {
             Some(self.transmit_holding.read().into() as _)
@@ -195,13 +202,8 @@ where
     }
 
     #[inline(always)]
-    fn tx(&self, b: u8) -> bool {
-        if self.line_status.read().into() & 0b0010_0000 != 0 {
-            self.transmit_holding.write(b);
-            true
-        } else {
-            false
-        }
+    fn tx(&self, b: u8) {
+        self.transmit_holding.write(b);
     }
 
     #[inline(always)]
