@@ -36,15 +36,8 @@ enum StateInit {
 }
 
 pub enum Task {
-    Read {
-        page: u32,
-        phys: u32,
-    },
-    #[allow(dead_code)]
-    Write {
-        page: u32,
-        phys: u32,
-    },
+    Read { page: u32, phys: u32 },
+    Write { page: u32, phys: u32 },
 }
 
 #[derive(Debug, Error)]
@@ -175,14 +168,14 @@ impl State {
                 shared.write(format_args!("sdio: off..."));
                 reg.pwren.write(0u32);
                 self.inner = StateInner::On;
-                shared.sleep(Self::RESET_DELAY);
+                shared.sleep(1, Self::RESET_DELAY);
                 return Ok(());
             }
             StateInner::On => {
                 shared.write(format_args!("sdio: on..."));
                 reg.pwren.write(1u32);
                 self.inner = StateInner::Init(StateInit::Setup);
-                shared.sleep(Self::RESET_DELAY);
+                shared.sleep(1, Self::RESET_DELAY);
                 return Ok(());
             }
             StateInner::Init(StateInit::Setup) => {
@@ -222,7 +215,7 @@ impl State {
                                 Err(DriverError::Control(Timeout))
                             } else {
                                 *acmd41_sleep = true;
-                                shared.sleep(Self::ACMD_41_DELAY);
+                                shared.sleep(1, Self::ACMD_41_DELAY);
                                 return Ok(());
                             };
                         }
@@ -237,6 +230,8 @@ impl State {
                         let r = reg.resp0.read();
                         if (r >> 9) & 0b1111 == 4 {
                             self.inner = StateInner::Ready { task: None };
+                            // TODO: set high freq
+
                             return self.handle_inner(shared, _event);
                         } else {
                             self.cmd::<13>(shared, CmdFl::RESP_EXP, self.rca);
@@ -364,21 +359,21 @@ impl Reg {
             .map_err(DriverError::Control)?;
 
         self.rintsts.write(u32::MAX);
+        self.i_dmac_status.write(u32::MAX);
+
         self.intmask
             .write(Interrupt::ERR | Interrupt::DONE | Interrupt::ACD | Interrupt::DTO);
         self.ctrl.write(
             self.ctrl.read() | Ctrl::ENABLE_INTERRUPTS | Ctrl::ENABLE_DMA | Ctrl::USE_INTERNAL_DMAC,
         );
+        self.init_clk()?;
 
         self.blksiz.write(0x200_u32);
         self.bus_mod
             .write((self.bus_mod.read() & !((1 << 1) | (1 << 7))) | (1 << 0));
 
-        self.i_dmac_status
-            .write(self.i_dmac_status.read() | 0b1100110111);
         self.i_dmac_int_enable.write(0b1100110111_u32);
 
-        self.init_clk()?;
         self.ctype.write(0u32);
         self.timeout.write(u32::MAX);
         let mid = ((fifo_depth & 0xfff) / 2) as u32;
@@ -389,16 +384,16 @@ impl Reg {
     }
 
     fn init_clk(&self) -> Result<(), DriverError> {
-        const SDMMC_INPUT_FREQ_HZ: u32 = 50000000; // 50 MHz typical
-        const SD_INIT_FREQ_HZ: u32 = 400000; // 400 kHz during init
-
         // Disable clock output while changing dividers
         self.clkena.write(0u32);
         self.clksrc.write(0u32);
 
+        const SDMMC_INPUT_FREQ_HZ: u32 = 50000000; // 50 MHz typical
+        const SD_INIT_FREQ_HZ: u32 = 400000; // 400 kHz during init
         // Compute divider: SDCLK = INPUT_CLK / (CLKDIV + 1)
         let clkdiv = (SDMMC_INPUT_FREQ_HZ / SD_INIT_FREQ_HZ).saturating_sub(1);
-        self.clkdiv.write(clkdiv); // e.g., 124 for ~400kHz at 50 MHz input
+        // e.g., 124 for ~400kHz at 50 MHz input
+        self.clkdiv.write(clkdiv);
 
         // Trigger clock update (CMD with bit 21)
         self.cmd.write((1u32 << 31) | (1 << 13) | (1 << 21)); // START_CMD | UPDATE_CLOCK
@@ -406,7 +401,7 @@ impl Reg {
             .map_err(DriverError::Clock)?;
 
         // Enable clock to the card
-        self.clkena.write(1u32 | (1 << 16));
+        self.clkena.write(1u32 | (1 << 16)); //  low-power mode
 
         // Trigger another update
         self.cmd.write((1u32 << 31) | (1 << 13) | (1 << 21));

@@ -1,11 +1,10 @@
+use core::cell::UnsafeCell;
 use core::{hint, fmt, num::NonZeroUsize, time::Duration};
-
-use alloc::boxed::Box;
 
 use thiserror_no_std::Error;
 
 use super::plic::{PlicPriority, PlicEnable, PlicCtx, InterruptNumber, InterruptId, InterruptPriority};
-use super::{uart, sdio};
+use super::{uart, sdio, user};
 
 pub trait DriverState
 where
@@ -19,15 +18,26 @@ pub struct Shared {
     pub sdio_task: Option<sdio::Task>,
     pub sdio_done: Option<sdio::Task>,
     pub terminate: bool,
-    pub deadline: Option<NonZeroUsize>,
+    pub deadline: [Option<Deadline>; 8],
     freq: u128,
 }
 
+#[derive(Clone, Copy)]
+pub struct Deadline {
+    val: NonZeroUsize,
+    issuer: u8,
+}
+
 impl Shared {
-    pub fn sleep(&mut self, delay: Duration) {
+    pub fn sleep(&mut self, issuer: u8, delay: Duration) {
         let tick = ((delay.as_nanos() * self.freq) / 1_000_000_000) as usize;
-        let d = tau::asm::read_time().wrapping_add(tick);
-        self.deadline = NonZeroUsize::new(d);
+        let val = unsafe { NonZeroUsize::new_unchecked(tau::asm::read_time().wrapping_add(tick)) };
+        let d = Deadline { val, issuer };
+        *self
+            .deadline
+            .iter_mut()
+            .find(|d| d.is_none())
+            .expect("too many timers") = Some(d);
     }
 
     pub fn write(&mut self, args: fmt::Arguments<'_>) {
@@ -125,43 +135,69 @@ impl Tasks {
     }
 
     pub fn run(&mut self, plic: &PlicCtx) {
-        // TODO: move in user task
-        // TODO: allocator for DMA
-        let phys = 0x7000_1000;
-        let page =
-            Box::<[u8], _>::new_uninit_slice_in(0x1000, tau::Area::new(phys as usize, 0x1000));
-
-        let mut shared = Shared {
+        let shared = UnsafeCell::new(Shared {
             uart_buffer: uart::Buffer::default(),
-            sdio_task: Some(sdio::Task::Read { page: 0x400, phys }),
+            sdio_task: None,
             sdio_done: None,
             terminate: false,
-            deadline: None,
+            deadline: [None; 8],
             // TODO: take from dts
             freq: 4_000_000_u128,
-        };
+        });
+        let mut user = user::State::new(&shared);
 
+        let shared = unsafe { &mut *shared.get() };
+
+        user.step();
         if let Some(driver) = self.uart.as_mut() {
-            driver.state.handle(&mut shared, tau::Event::Timeout);
+            driver.state.handle(shared, tau::Event::Timeout);
         }
         if let Some(driver) = self.sdio.as_mut() {
-            driver.state.handle(&mut shared, tau::Event::Timeout);
+            driver.state.handle(shared, tau::Event::Timeout);
         }
 
         while !(shared.terminate && shared.uart_buffer.is_empty()) {
-            // TODO: proper time wheel
-            let mut event = Some(tau::Ubi::wait(shared.deadline.take()));
+            let deadline = shared
+                .deadline
+                .iter()
+                .filter_map(|x| *x)
+                .map(|d| d.val)
+                .min();
+            let mut event = Some(tau::Ubi::wait(deadline));
 
             while let Some(event) = tau::event_with(&mut event, plic.next()) {
                 match &event {
                     tau::Event::Signal { .. } => continue,
                     tau::Event::Interrupt(int) => {
-                        handle(&mut self.uart, &mut shared, int);
-                        handle(&mut self.sdio, &mut shared, int);
+                        handle(&mut self.uart, shared, int);
+                        handle(&mut self.sdio, shared, int);
+
+                        if shared.sdio_done.is_some() {
+                            user.step();
+                        }
                     }
                     tau::Event::Timeout => {
-                        if let Some(driver) = self.sdio.as_mut() {
-                            driver.state.handle(&mut shared, tau::Event::Timeout);
+                        let now = tau::asm::read_time();
+                        let mut issuers = [0; 8];
+                        let mut it = issuers.iter_mut();
+                        for d in &mut shared.deadline {
+                            if let Some(dl) = d {
+                                if dl.val.get() <= now {
+                                    *it.next().expect("cannot fail") = dl.issuer;
+                                    *d = None;
+                                }
+                            }
+                        }
+                        for issuer in issuers {
+                            match issuer {
+                                1 => {
+                                    if let Some(driver) = self.sdio.as_mut() {
+                                        driver.state.handle(shared, tau::Event::Timeout);
+                                    }
+                                }
+                                2 => user.step(),
+                                _ => (),
+                            }
                         }
                     }
                 }
@@ -171,24 +207,9 @@ impl Tasks {
                 }
             }
 
-            // TODO: move in user task
-            if shared.sdio_done.take().is_some() {
-                let dma_data = unsafe { page.assume_init_ref() };
-                for chunk in dma_data.chunks(0x10) {
-                    let &[a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] = chunk else {
-                        break;
-                    };
-                    shared.write(format_args!(
-                        "\
-                        {a:02x} {b:02x} {c:02x} {d:02x} {e:02x} {f:02x} {g:02x} {h:02x} \
-                        {i:02x} {j:02x} {k:02x} {l:02x} {m:02x} {n:02x} {o:02x} {p:02x}"
-                    ));
-                }
-            }
-
             if !shared.uart_buffer.is_empty() {
                 if let Some(driver) = self.uart.as_mut() {
-                    driver.state.handle(&mut shared, tau::Event::Timeout);
+                    driver.state.handle(shared, tau::Event::Timeout);
                 }
             }
         }

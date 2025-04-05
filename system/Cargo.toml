@@ -7,3 +7,4 @@ edition = "2024"
 tau = { path = "../tau" }
 bitflags = { version = "2.9" }
 thiserror-no-std = { version = "2.0" }
+noop-waker = { version = "0.1" }

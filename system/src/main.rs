@@ -4,7 +4,6 @@
 #![test_runner(tau::tester::test_runner)]
 #![feature(allocator_api)]
 #![feature(new_zeroed_alloc)]
-#![feature(maybe_uninit_slice)]
 
 extern crate alloc;
 
@@ -15,6 +14,7 @@ mod plic;
 
 mod uart;
 mod sdio;
+mod user;
 
 #[cfg(not(test))]
 #[panic_handler]
