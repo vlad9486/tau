@@ -26,9 +26,15 @@ Tau is optimized for 64+ core systems, ensuring superior scalability compared to
 
 Tau is currently under development and not yet ready for general use.
 
-## Build
+## Build Dependencies Ubuntu 24.04
+
+```
+apt install -y make clang llvm lld device-tree-compiler u-boot-tools
+```
 
 You may be missing some build time dependencies. It requires llvm binutils to produce debugging disassembly. It also needs `dtc` to compile the device tree and `clang` to build OpenSBI.
+
+## Build
 
 To build the OS image do:
 
