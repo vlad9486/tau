@@ -74,6 +74,8 @@
         "RUSTFLAGS",
         "thiserror",
         "bitflags",
+        "uninit",
+        "repr",
         // riscv
         "opensbi",
         "SRST",

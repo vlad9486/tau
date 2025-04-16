@@ -220,6 +220,8 @@ impl State {
                     2 => self.cmd::<3>(shared, CmdFl::RESP_EXP, 0),
                     3 => {
                         self.rca = reg.resp0.read() & 0xffff0000;
+                        // self.reg.ctype.write(1u32);
+                        self.reg.clkdiv.write(2_u32);
                         self.cmd::<7>(shared, CmdFl::RESP_EXP, self.rca);
                     }
                     7 => self.cmd::<13>(shared, CmdFl::RESP_EXP, self.rca),
@@ -227,8 +229,6 @@ impl State {
                         let r = reg.resp0.read();
                         if (r >> 9) & 0b1111 == 4 {
                             self.inner = StateInner::Ready { task: None };
-                            // TODO: set high freq
-
                             return self.handle_inner(shared, _event);
                         } else {
                             self.cmd::<13>(shared, CmdFl::RESP_EXP, self.rca);
@@ -372,7 +372,7 @@ impl Reg {
         self.i_dmac_int_enable.write(0b1100110111_u32);
 
         self.ctype.write(0u32);
-        self.timeout.write(u32::MAX);
+        self.timeout.write(0x_ffff_ff40_u32);
         let mid = ((fifo_depth & 0xfff) / 2) as u32;
         self.fifo_threshold
             .write((2u32 << 28) | ((mid - 1) << 16) | mid);
@@ -381,6 +381,9 @@ impl Reg {
     }
 
     fn init_clk(&self) -> Result<(), DriverError> {
+        // wait while the card is busy
+        scheduler::spin(1000, || self.status.read() & (1 << 9) == 0).map_err(DriverError::Clock)?;
+
         // Disable clock output while changing dividers
         self.clkena.write(0u32);
         self.clksrc.write(0u32);
@@ -388,7 +391,7 @@ impl Reg {
         const SDMMC_INPUT_FREQ_HZ: u32 = 50000000; // 50 MHz typical
         const SD_INIT_FREQ_HZ: u32 = 400000; // 400 kHz during init
         // Compute divider: SDCLK = INPUT_CLK / (CLKDIV + 1)
-        let clkdiv = (SDMMC_INPUT_FREQ_HZ / SD_INIT_FREQ_HZ).saturating_sub(1);
+        let clkdiv = (SDMMC_INPUT_FREQ_HZ / SD_INIT_FREQ_HZ).saturating_sub(1) as u8;
         // e.g., 124 for ~400kHz at 50 MHz input
         self.clkdiv.write(clkdiv);
 
