@@ -104,5 +104,9 @@ target/vf2/tau.img: target/tau target/vf2/opensbi target/vf2/$(VF2_DT).dtb board
 	cd target/vf2 && mkimage -f ../../board/vf2/$(VF2_ITS) tau.img
 
 install-vf2: target/vf2/tau.img
-	dd if=target/vf2/tau.img of=/dev/sda2 && sync || (sudo dd if=target/vf2/tau.img of=/dev/disk8s2 && diskutil unmountDisk /dev/disk8)
+	(dd if=target/vf2/tau.img of=/dev/disk/by-partlabel/tau && sync) || \
+		(sudo dd if=target/vf2/tau.img of=/dev/disk8s2 && diskutil unmountDisk /dev/disk8)
 	# picocom /dev/ttyUSB0 -b 115200
+
+# udev rule 
+# KERNEL=="sd*[0-9]", ENV{ID_PART_ENTRY_NAME}=="tau", MODE="666"
