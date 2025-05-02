@@ -58,15 +58,12 @@ target/tau: target/loader target/supervisor target/system
 # QEMU
 
 clean-qemu:
-	rm -Rf target/qemu/*.{dtb,elf} || true
+	rm -Rf target/qemu/*.elf || true
 	cd target/qemu/opensbi && make distclean clean
 
 target/qemu/opensbi:
 	mkdir -p target/qemu && cd target/qemu && \
 		git clone https://github.com/riscv-software-src/opensbi.git --depth 1
-
-target/qemu/qemu-virt.dtb: board/qemu/qemu-virt.dts
-	dtc -I dts -O dtb -o target/qemu/qemu-virt.dtb board/qemu/qemu-virt.dts
 
 target/qemu/tau.elf: target/tau target/qemu/opensbi
 	cd target/qemu/opensbi && \
@@ -74,9 +71,9 @@ target/qemu/tau.elf: target/tau target/qemu/opensbi
 		FW_TEXT_START=0x80000000 && \
 		cp build/platform/generic/firmware/fw_payload.elf ../tau.elf
 
-run-qemu: target/qemu/tau.elf target/qemu/qemu-virt.dtb
-	cd target/qemu && qemu-system-riscv64 -M virt -smp 4 -m 8G -nographic \
-		-bios tau.elf -dtb qemu-virt.dtb
+run-qemu: target/qemu/tau.elf board/qemu/qemu-virt.dtb
+	qemu-system-riscv64 -M virt -smp 4 -m 8G -nographic \
+		-bios target/qemu/tau.elf -dtb board/qemu/qemu-virt.dtb
 
 # Vision Five 2
 
@@ -86,7 +83,7 @@ run-qemu: target/qemu/tau.elf target/qemu/qemu-virt.dtb
 VF2_OPENSBI_REVISION := d5e88252154dc08ddb13f326a3d765a051215fab
 
 clean-vf2:
-	rm -Rf target/vf2/*.{dtb,img} || true
+	rm -Rf target/vf2/*.img || true
 	cd target/vf2/opensbi && make CC=clang LLVM=1 LD=ld.lld distclean clean
 
 target/vf2/opensbi:
@@ -94,12 +91,10 @@ target/vf2/opensbi:
 		git clone https://github.com/starfive-tech/opensbi.git && \
 		cd opensbi && git checkout $(VF2_OPENSBI_REVISION)
 
-target/vf2/$(VF2_DT).dtb: board/vf2/$(VF2_DT).dts
-	dtc -I dts -O dtb -o target/vf2/$(VF2_DT).dtb board/vf2/$(VF2_DT).dts
-
-target/vf2/tau.img: target/tau target/vf2/opensbi target/vf2/$(VF2_DT).dtb board/vf2/$(VF2_ITS)
+target/vf2/tau.img: target/tau target/vf2/opensbi board/vf2/$(VF2_DT).dtb board/vf2/$(VF2_ITS)
 	cd target/vf2/opensbi && \
-		make CC=clang LLVM=1 LD=ld.lld PLATFORM=generic FW_FDT_PATH=../$(VF2_DT).dtb \
+		make CC=clang LLVM=1 LD=ld.lld PLATFORM=generic \
+		FW_FDT_PATH=../../../board/vf2/$(VF2_DT).dtb \
 		FW_PAYLOAD_PATH=../../tau FW_TEXT_START=0x40000000
 	cd target/vf2 && mkimage -f ../../board/vf2/$(VF2_ITS) tau.img
 
