@@ -14,7 +14,7 @@ pub struct State {
     inner: StateInner,
     fifo_depth: u16,
     rca: u32,
-    dma_desc: Box<[u32], tau::Area>,
+    dma_desc: Box<[u32; 0x200], tau::Area>,
     dma_phys: u32,
     error: Option<DriverError>,
 }
@@ -113,7 +113,7 @@ impl State {
 
         // TODO: allocator for DMA
         let a = tau::Area::new(0x7000_0000, 0x1000);
-        let dma_desc = unsafe { Box::<[u32], _>::new_zeroed_slice_in(0x200, a).assume_init() };
+        let dma_desc = unsafe { Box::<[u32; 0x200], _>::new_zeroed_in(a).assume_init() };
 
         Some(State {
             reg,
@@ -220,8 +220,7 @@ impl State {
                     2 => self.cmd::<3>(shared, CmdFl::RESP_EXP, 0),
                     3 => {
                         self.rca = reg.resp0.read() & 0xffff0000;
-                        // self.reg.ctype.write(1u32);
-                        self.reg.clkdiv.write(2_u32);
+                        self.reg.init_clk(25_000)?;
                         self.cmd::<7>(shared, CmdFl::RESP_EXP, self.rca);
                     }
                     7 => self.cmd::<13>(shared, CmdFl::RESP_EXP, self.rca),
@@ -239,8 +238,7 @@ impl State {
             }
             StateInner::Ready { task } => {
                 if task.is_none() {
-                    let flags =
-                        CmdFl::RESP_EXP | CmdFl::DATA_EXP | CmdFl::PREV_DATA | CmdFl::A_STOP;
+                    let flags = CmdFl::RESP_EXP | CmdFl::DATA_EXP | CmdFl::A_STOP;
                     *task = shared.sdio_task.take();
                     match *task {
                         None => {}
@@ -295,7 +293,7 @@ struct Reg {
 }
 
 const CTRL_RESET_TO: u32 = 1000;
-const CLK_SET_TO: u32 = 20;
+const CLK_SET_TO: u32 = 10000;
 const INIT_TO: u32 = 30;
 
 const MMC_READ_BLOCKS: u32 = 18;
@@ -363,7 +361,8 @@ impl Reg {
         self.ctrl.write(
             self.ctrl.read() | Ctrl::ENABLE_INTERRUPTS | Ctrl::ENABLE_DMA | Ctrl::USE_INTERNAL_DMAC,
         );
-        self.init_clk()?;
+
+        self.init_clk(400)?; // 400 kHz during init
 
         self.blksiz.write(0x200_u32);
         self.bus_mod
@@ -380,7 +379,7 @@ impl Reg {
         Ok(())
     }
 
-    fn init_clk(&self) -> Result<(), DriverError> {
+    fn init_clk(&self, freq: u32) -> Result<(), DriverError> {
         // wait while the card is busy
         scheduler::spin(1000, || self.status.read() & (1 << 9) == 0).map_err(DriverError::Clock)?;
 
@@ -388,11 +387,8 @@ impl Reg {
         self.clkena.write(0u32);
         self.clksrc.write(0u32);
 
-        const SDMMC_INPUT_FREQ_HZ: u32 = 50000000; // 50 MHz typical
-        const SD_INIT_FREQ_HZ: u32 = 400000; // 400 kHz during init
-        // Compute divider: SDCLK = INPUT_CLK / (CLKDIV + 1)
-        let clkdiv = (SDMMC_INPUT_FREQ_HZ / SD_INIT_FREQ_HZ).saturating_sub(1) as u8;
-        // e.g., 124 for ~400kHz at 50 MHz input
+        const SDMMC_INPUT_FREQ_KHZ: u32 = 50_000;
+        let clkdiv = SDMMC_INPUT_FREQ_KHZ.div_ceil(2 * freq) as u8;
         self.clkdiv.write(clkdiv);
 
         // Trigger clock update (CMD with bit 21)

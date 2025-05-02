@@ -31,7 +31,7 @@ impl<'a> State<'a> {
 async fn run(shared: &UnsafeCell<Shared>) {
     // TODO: allocator for DMA
     let phys = 0x7000_1000;
-    let page = Box::<[[u8; 0x10]; 0x100], _>::new_uninit_in(tau::Area::new(phys, 0x1000));
+    let page = Box::<[[u8; 0x10]; 0x100], _>::new_uninit_in(tau::Area::new(phys, 0x2000));
     read(shared, phys, 0x400).await;
 
     let dma_data = unsafe { page.assume_init() };

@@ -230,7 +230,7 @@ impl Default for Buffer {
 }
 
 impl Buffer {
-    const SIZE: usize = 0x4000;
+    const SIZE: usize = 0x8000;
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
