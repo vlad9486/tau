@@ -38,56 +38,36 @@ impl MappedRegion {
     }
 }
 
-pub struct Inv {
-    pub inv: u16,
-    pub share: bool,
-    pub arg: u16,
-}
-
-impl fmt::Display for Inv {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Inv { inv, share, arg } = self;
-        write!(f, "inv={inv}, share={share}, arg={arg}")
-    }
-}
-
-impl Inv {
-    #[inline]
-    pub const fn encode(self) -> usize {
-        let Inv { inv, share, arg } = self;
-        let share = if share { 1 } else { 0 };
-        ((arg as usize) << 16) + (((inv & 0xfff) as usize) << 4) + (share << 1) + 0b0001
-    }
-
-    #[inline]
-    pub const fn decode(a0: usize) -> Result<Self, usize> {
-        let share = ((a0 & 0b0010) >> 1) != 0;
-        let discriminant = (a0 & 0b1100) >> 2;
-        let inv = ((a0 & 0xfff0) >> 4) as u16;
-        let arg = ((a0 & 0xffff0000) >> 16) as u16;
-        if discriminant == 0 {
-            Ok(Inv { inv, share, arg })
-        } else {
-            Err(a0)
-        }
-    }
-}
-
 #[must_use]
 #[derive(Clone, Debug)]
-pub enum Event<Id = ()> {
-    Interrupt(Id),
+pub enum Event {
     Timeout,
-    Signal { inv: u16, arg: u16 },
+    Interrupt { id: u16 },
+    Invocation { inv: u16, share: bool, arg: u16 },
+}
+
+impl fmt::Display for Event {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Timeout => write!(f, "timeout"),
+            Self::Interrupt { id } => write!(f, "int={id:04x}"),
+            Self::Invocation { inv, share, arg } => {
+                write!(f, "inv={inv}, share={share}, arg={arg}")
+            }
+        }
+    }
 }
 
 impl Event {
     pub const fn encode(self) -> usize {
         match self {
-            Self::Interrupt(()) => 0,
-            Self::Timeout => 1,
-            Self::Signal { inv, arg } => {
-                ((arg as usize) << 16) + (((inv & 0xfff) as usize) << 4) + 2
+            Self::Timeout => 0,
+            Self::Interrupt { id } => ((id as usize) << 16) + 1,
+            Self::Invocation { inv, share, arg } => {
+                ((arg as usize) << 16)
+                    + (((inv & 0xfff) as usize) << 4)
+                    + ((share as usize) << 3)
+                    + 2
             }
         }
     }
@@ -95,24 +75,22 @@ impl Event {
     pub const fn decode(a0: usize) -> Result<Self, usize> {
         let inv = ((a0 & 0xfff0) >> 4) as u16;
         let arg = ((a0 & 0xffff0000) >> 16) as u16;
-        match a0 & 0b1111 {
-            0 => Ok(Self::Interrupt(())),
-            1 => Ok(Self::Timeout),
-            2 => Ok(Self::Signal { inv, arg }),
+        let share = (a0 & 0b1000) != 0;
+        match a0 & 0b111 {
+            0 => Ok(Self::Timeout),
+            1 => Ok(Self::Interrupt { id: arg }),
+            2 => Ok(Self::Invocation { inv, share, arg }),
             _ => Err(a0),
         }
     }
 }
 
-pub fn event_with<T>(event: &mut Option<Event>, id: Option<T>) -> Option<Event<T>> {
+pub fn event_with(event: &mut Option<Event>, id: Option<u32>) -> Option<Event> {
     if let Some(id) = id {
-        return Some(Event::Interrupt(id));
+        let id = id as u16;
+        return Some(Event::Interrupt { id });
     }
-    match event.take() {
-        Some(Event::Timeout) => Some(Event::Timeout),
-        Some(Event::Signal { inv, arg }) => Some(Event::Signal { inv, arg }),
-        _ => None,
-    }
+    event.take()
 }
 
 /// The interface of the supervisor

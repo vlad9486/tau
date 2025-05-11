@@ -45,7 +45,7 @@ pub unsafe fn init(
     thread: &mut Thread,
     module: *mut ModuleTables,
     context: &Context,
-) -> Result<(vmem::Root, usize, tau::Inv), InitError> {
+) -> Result<(vmem::Root, usize, tau::Event), InitError> {
     let root = Window::current_root();
     let asid = root.asid();
     window.init(Window::current_root());
@@ -176,7 +176,7 @@ pub unsafe fn init(
 
     let sepc = read_usize(memoffset::offset_of!(tau::Manifest, entry));
     let satp = Window::current_root();
-    let inv = tau::Inv {
+    let inv = tau::Event::Invocation {
         inv,
         share: false,
         arg: 0,
@@ -284,14 +284,18 @@ pub fn syscall(
                 tau::Event::Timeout
             } else if cause == (1 << 63) + 9 {
                 // sbi::Printer.ch(*b"SU: interrupt\r\n");
-                tau::Event::Interrupt(())
+                tau::Event::Interrupt { id: 0 }
             } else if cause == (1 << 63) + 1 {
                 // sbi::Printer.ch(*b"SU: software interrupt\r\n");
                 // TODO:
-                tau::Event::Signal { inv: 0, arg: 0 }
+                tau::Event::Invocation {
+                    inv: 0,
+                    share: false,
+                    arg: 0,
+                }
             } else if cause & (1 << 63) != 0 {
                 sbi::Printer.ch(*b"SU: unexpected interrupt\r\n");
-                tau::Event::Interrupt(())
+                tau::Event::Interrupt { id: 0 }
             } else {
                 let lo = (cause % 10) as u8 + b'0';
                 let hi = ((cause / 10) % 10) as u8 + b'0';

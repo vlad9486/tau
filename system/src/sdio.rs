@@ -128,7 +128,7 @@ impl State {
 }
 
 impl DriverState for State {
-    fn handle(&mut self, shared: &mut Shared, event: tau::Event<u32>) {
+    fn handle(&mut self, shared: &mut Shared, event: tau::Event) {
         if self.error.is_none() {
             if let Err(err) = self.handle_inner(shared, event) {
                 self.error = Some(err);
@@ -138,11 +138,7 @@ impl DriverState for State {
 }
 
 impl State {
-    fn handle_inner(
-        &mut self,
-        shared: &mut Shared,
-        _event: tau::Event<u32>,
-    ) -> Result<(), DriverError> {
+    fn handle_inner(&mut self, shared: &mut Shared, _event: tau::Event) -> Result<(), DriverError> {
         let reg = &self.reg;
         let int_bits = reg.mintsts.read();
         let int = Interrupt::from_bits_truncate(int_bits);

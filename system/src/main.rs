@@ -47,7 +47,7 @@ extern "C" fn main(
 ) -> ! {
     use alloc::boxed::Box;
 
-    let Ok(inv) = tau::Inv::decode(a0) else {
+    let Ok(tau::Event::Invocation { inv, .. }) = tau::Event::decode(a0) else {
         tau::Ubi::exit([1]);
     };
 
@@ -57,7 +57,7 @@ extern "C" fn main(
         Box::<[u32], _>::new_uninit_slice_in(len / size_of::<u32>(), dtb_alloc).assume_init()
     };
     let Ok((dtb, _)) = tau::Dtb::new(&raw) else {
-        tau::Ubi::respond(inv.inv, 1, []);
+        tau::Ubi::respond(inv, 1, []);
     };
 
     #[derive(Clone, Copy, Debug)]
@@ -95,11 +95,11 @@ extern "C" fn main(
     let Some(plic_config) = dtb.iter().find_map(|(props, path)| {
         (path[1] == "soc" && path[2].starts_with("plic")).then_some(props)
     }) else {
-        tau::Ubi::respond(inv.inv, 1, []);
+        tau::Ubi::respond(inv, 1, []);
     };
 
     let Some([addr_hi, addr_lo, _, _]) = plic_config.find_int(|name| name == "reg") else {
-        tau::Ubi::respond(inv.inv, 1, []);
+        tau::Ubi::respond(inv, 1, []);
     };
     let addr = ((addr_hi.to_be() as usize) << 32) + (addr_lo.to_be() as usize);
 
@@ -120,5 +120,5 @@ extern "C" fn main(
 
     scheduler::Tasks::new(dtb, &plic, &plic_e, context_id).run(&plic_ctx);
 
-    tau::Ubi::respond(inv.inv, 0, [])
+    tau::Ubi::respond(inv, 0, [])
 }

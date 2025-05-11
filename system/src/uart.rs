@@ -74,7 +74,7 @@ impl State {
 }
 
 impl DriverState for State {
-    fn handle(&mut self, shared: &mut Shared, _event: tau::Event<u32>) {
+    fn handle(&mut self, shared: &mut Shared, _event: tau::Event) {
         let uart = &self.reg;
         if let Some(baud_rate) = self.baud_rate.take() {
             return uart.init(baud_rate.get());

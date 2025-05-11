@@ -10,7 +10,7 @@ pub trait DriverState
 where
     Self: Sized,
 {
-    fn handle(&mut self, shared: &mut Shared, event: tau::Event<u32>);
+    fn handle(&mut self, shared: &mut Shared, event: tau::Event);
 }
 
 pub struct Shared {
@@ -99,7 +99,8 @@ where
     if let Some(driver) = driver {
         let num = id.as_ref().get();
         if driver.int.contains(&num) {
-            driver.state.handle(shared, tau::Event::Interrupt(num))
+            let id = num as u16;
+            driver.state.handle(shared, tau::Event::Interrupt { id })
         }
     }
 }
@@ -165,47 +166,44 @@ impl Tasks {
                 .filter_map(|x| *x)
                 .map(|d| d.val)
                 .min();
-            let mut event = Some(tau::Ubi::wait(deadline));
 
-            while let Some(event) = tau::event_with(&mut event, plic.next()) {
-                match &event {
-                    tau::Event::Signal { .. } => continue,
-                    tau::Event::Interrupt(int) => {
-                        handle(&mut self.uart, shared, int);
-                        handle(&mut self.sdio, shared, int);
+            match tau::Ubi::wait(deadline) {
+                tau::Event::Invocation { .. } => continue,
+                tau::Event::Interrupt { .. } => {
+                    while let Some(id) = plic.next() {
+                        handle(&mut self.uart, shared, &id);
+                        handle(&mut self.sdio, shared, &id);
 
                         if shared.sdio_done.is_some() || !shared.uart_in.is_empty() {
                             user.step();
                         }
-                    }
-                    tau::Event::Timeout => {
-                        let now = tau::asm::read_time();
-                        let mut issuers = [0; 8];
-                        let mut it = issuers.iter_mut();
-                        for d in &mut shared.deadline {
-                            if let Some(dl) = d {
-                                if dl.val.get() <= now {
-                                    *it.next().expect("cannot fail") = dl.issuer;
-                                    *d = None;
-                                }
-                            }
-                        }
-                        for issuer in issuers {
-                            match issuer {
-                                1 => {
-                                    if let Some(driver) = self.sdio.as_mut() {
-                                        driver.state.handle(shared, tau::Event::Timeout);
-                                    }
-                                }
-                                2 => user.step(),
-                                _ => (),
-                            }
-                        }
+
+                        plic.complete(id);
                     }
                 }
-
-                if let tau::Event::Interrupt(int) = event {
-                    plic.complete(int);
+                tau::Event::Timeout => {
+                    let now = tau::asm::read_time();
+                    let mut issuers = [0; 8];
+                    let mut it = issuers.iter_mut();
+                    for d in &mut shared.deadline {
+                        if let Some(dl) = d {
+                            if dl.val.get() <= now {
+                                *it.next().expect("cannot fail") = dl.issuer;
+                                *d = None;
+                            }
+                        }
+                    }
+                    for issuer in issuers {
+                        match issuer {
+                            1 => {
+                                if let Some(driver) = self.sdio.as_mut() {
+                                    driver.state.handle(shared, tau::Event::Timeout);
+                                }
+                            }
+                            2 => user.step(),
+                            _ => (),
+                        }
+                    }
                 }
             }
 
