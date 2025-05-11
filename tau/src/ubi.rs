@@ -56,7 +56,10 @@ fn ubi<const I: usize, const O: usize>(call: Call, arg: [usize; I]) -> (usize, [
                 options(nostack),
             )
         },
-        _ => asm::dbg([I, O, 0xdeadbeef]),
+        _ => {
+            asm::dbg([I, O, 0xdeadbeef]);
+            unsafe { hint::unreachable_unchecked() };
+        }
     }
 
     (r0, output)

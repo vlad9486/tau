@@ -304,6 +304,7 @@ pub fn syscall(
                     .ch([lo, hi])
                     .ch(*b"\r\n");
                 tau::asm::dbg([0xdeadbeef]);
+                tau::Event::Interrupt { id: 0 }
             };
             msg[0] = event.encode();
         }

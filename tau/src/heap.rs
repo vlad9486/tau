@@ -35,6 +35,7 @@ pub struct Area {
 
 impl Area {
     pub const fn new(base: usize, len: usize) -> Self {
+        let len = len.div_ceil(0x1000) << 12;
         Area { base, len }
     }
 }

@@ -19,7 +19,7 @@ pub fn read_time() -> usize {
 }
 
 #[inline(always)]
-pub fn dbg<const I: usize>(arg: [usize; I]) -> ! {
+pub fn dbg<const I: usize>(arg: [usize; I]) {
     use core::arch::asm;
 
     unsafe {

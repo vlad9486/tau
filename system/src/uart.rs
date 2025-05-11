@@ -29,7 +29,7 @@ impl Config {
         let size = ((size_hi.to_be() as usize) << 32) + (size_lo.to_be() as usize);
         let reg_io_width = props
             .find_int(|name| name == "reg-io-width")
-            .and_then(|x| x.first().copied().map(u32::to_be))?;
+            .map_or(Some(1), |x| x.first().copied().map(u32::to_be))?;
         if ![1, 4].contains(&reg_io_width) {
             return None;
         }
@@ -169,7 +169,7 @@ trait UartIo {
     fn int_status(&self) -> u8;
 }
 
-impl<const UART_STATUS: bool, Word> UartIo for Uart<UART_STATUS, Word>
+impl<const UART_16550_COMPATIBLE: bool, Word> UartIo for Uart<UART_16550_COMPATIBLE, Word>
 where
     Word: From<u8> + Into<u32>,
 {

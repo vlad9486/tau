@@ -142,7 +142,7 @@ fn init_memory(
             }
         }
     }
-    if cores < 2 || memory_size < 400000 * cores {
+    if cores < 2 || memory_size < 0x1000000 * cores {
         return Err(Error::Memory);
     }
     let frames = memory_size >> 12;
