@@ -16,7 +16,7 @@ mod ubi;
 pub use self::ubi::{Ubi, FreeError, AllocError};
 
 mod dtb;
-pub use self::dtb::{Dtb, DtbProps};
+pub use self::dtb::{Dtb, DtbProps, DtbError, DtbHeaderError};
 
 mod heap;
 pub use self::heap::Area;

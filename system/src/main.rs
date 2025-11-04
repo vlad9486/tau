@@ -3,7 +3,6 @@
 #![feature(custom_test_frameworks)]
 #![test_runner(tau::tester::test_runner)]
 #![feature(allocator_api)]
-#![feature(new_zeroed_alloc)]
 
 extern crate alloc;
 

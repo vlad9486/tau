@@ -162,7 +162,7 @@ impl<'a> Lower<'a> {
 
     /// Returns if the frame is free. This might be racy!
     pub fn is_free(&self, frame: usize, order: u32) -> bool {
-        debug_assert!(frame % (1 << order) == 0);
+        debug_assert!(frame.is_multiple_of(1 << order));
         if order > Bitfield::ORDER || frame + (1 << order) > self.frames() {
             return false;
         }

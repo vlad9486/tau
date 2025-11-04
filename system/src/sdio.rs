@@ -129,10 +129,10 @@ impl State {
 
 impl DriverState for State {
     fn handle(&mut self, shared: &mut Shared, event: tau::Event) {
-        if self.error.is_none() {
-            if let Err(err) = self.handle_inner(shared, event) {
-                self.error = Some(err);
-            }
+        if self.error.is_none()
+            && let Err(err) = self.handle_inner(shared, event)
+        {
+            self.error = Some(err);
         }
     }
 }
@@ -150,10 +150,10 @@ impl State {
             reg.i_dmac_status.write(dma_status & 0x3ff);
         }
 
-        if int.contains(Interrupt::DTO) {
-            if let StateInner::Ready { task } = &mut self.inner {
-                shared.sdio_done = task.take();
-            }
+        if int.contains(Interrupt::DTO)
+            && let StateInner::Ready { task } = &mut self.inner
+        {
+            shared.sdio_done = task.take();
         }
 
         match &mut self.inner {

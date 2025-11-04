@@ -80,7 +80,7 @@ run-qemu: target/qemu/tau.elf board/qemu/qemu-virt.dtb
 # StarFive recommends this OpenSBI revision in their main repo as submodule:
 # https://github.com/starfive-tech/VisionFive2
 # Do not use master — timer interrupts may not be delegated correctly!
-VF2_OPENSBI_REVISION := d5e88252154dc08ddb13f326a3d765a051215fab
+VF2_OPENSBI_REVISION := 1725bd71080960290fdde4499a58c25c09d5c8ee
 
 clean-vf2:
 	rm -Rf target/vf2/*.img || true
@@ -99,9 +99,18 @@ target/vf2/tau.img: target/tau target/vf2/opensbi board/vf2/$(VF2_DT).dtb board/
 	cd target/vf2 && mkimage -f ../../board/vf2/$(VF2_ITS) tau.img
 
 install-vf2: target/vf2/tau.img
-	(dd if=target/vf2/tau.img of=/dev/disk/by-partlabel/tau && sync) || \
+	(dd if=target/vf2/tau.img of=/dev/disk/by-partlabel/starfive_visionfive_2_u-boot && sync) || \
 		(sudo dd if=target/vf2/tau.img of=/dev/disk4s2 && diskutil unmountDisk /dev/disk4)
 	# picocom /dev/ttyUSB0 -b 115200
 
 # udev rule 
 # KERNEL=="sd*[0-9]", ENV{ID_PART_ENTRY_NAME}=="tau", MODE="666"
+
+# SRCTREE=...path/to/linux... \
+	gcc -E -P -x assembler-with-cpp \
+        -nostdinc -undef -D__DTS__ \
+        -I"$SRCTREE/include" \
+        -I"$SRCTREE/arch/riscv/boot/dts" \
+        -I"$SRCTREE/arch/riscv/boot/dts/include" \
+        -I"$SRCTREE/arch/riscv/boot/dts/starfive" \
+        "$SRCTREE/arch/riscv/boot/dts/starfive/jh7110-starfive-visionfive-2-v1.3b.dts" | dtc -I dts -O dtb -o build/board/vf2/jh7110-starfive-visionfive-2-v1.3b.dtb

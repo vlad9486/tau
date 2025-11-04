@@ -2,7 +2,6 @@
 #![no_main]
 #![feature(custom_test_frameworks)]
 #![test_runner(tau::tester::test_runner)]
-#![feature(naked_functions)]
 #![feature(strict_provenance_lints)]
 #![warn(fuzzy_provenance_casts)]
 
@@ -32,27 +31,25 @@ unsafe extern "C" {
 
 #[unsafe(link_section = ".text.init")]
 #[unsafe(no_mangle)]
-#[naked]
+#[unsafe(naked)]
 extern "C" fn _start() -> ! {
-    unsafe {
-        arch::naked_asm! {
-            "auipc t0, 0",
-            "lui a2, %hi({st})",
-            "add a2, a2, t0",
-            "lui a3, %hi({ro})",
-            "add a3, a3, t0",
-            "lui a4, %hi({hp})",
-            "add a4, a4, t0",
-            "mv gp, a3",
-            "mv sp, a4",
-            "lui t0, 1",
-            "add sp, sp, t0",
-            "j {inner}",
-            st = sym __ST,
-            ro = sym __RO,
-            hp = sym __HP,
-            inner = sym inner,
-        }
+    arch::naked_asm! {
+        "auipc t0, 0",
+        "lui a2, %hi({st})",
+        "add a2, a2, t0",
+        "lui a3, %hi({ro})",
+        "add a3, a3, t0",
+        "lui a4, %hi({hp})",
+        "add a4, a4, t0",
+        "mv gp, a3",
+        "mv sp, a4",
+        "lui t0, 1",
+        "add sp, sp, t0",
+        "j {inner}",
+        st = sym __ST,
+        ro = sym __RO,
+        hp = sym __HP,
+        inner = sym inner,
     }
 }
 
@@ -136,10 +133,11 @@ fn init_memory(
     for (props, path) in dtb.iter() {
         if path.len() == 3 && path[1] == "cpus" && path[2].starts_with("cpu@") {
             cores += usize::from(props.find_str(|name| name == "status") == Some("okay"));
-        } else if path.len() == 2 && path[1].starts_with("memory@") {
-            if let Some([_, _, size_hi, size_lo]) = props.find_int(|name| name == "reg") {
-                memory_size = ((size_hi.to_be() as usize) << 32) + (size_lo.to_be() as usize);
-            }
+        } else if let Some([_, _, size_hi, size_lo]) = props.find_int(|name| name == "reg")
+            && path.len() == 2
+            && path[1].starts_with("memory@")
+        {
+            memory_size = ((size_hi.to_be() as usize) << 32) + (size_lo.to_be() as usize);
         }
     }
     if cores < 2 || memory_size < 0x1000000 * cores {

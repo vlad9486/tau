@@ -1,4 +1,6 @@
 {
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.cargo.extraArgs": ["--target", "riscv64gc-unknown-none-elf"],
     "cSpell.words": [
         // no category
         "binutils",

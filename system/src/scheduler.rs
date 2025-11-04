@@ -119,7 +119,7 @@ impl Tasks {
     ) -> Tasks {
         let uart = dtb
             .iter()
-            .find(|(_, path)| (path[1] == "soc" && path[2].starts_with("serial@")))
+            .find(|(_, path)| path[1] == "soc" && path[2].starts_with("serial@"))
             .and_then(|(config, _)| {
                 Driver::parse_dtb(config, plic, plic_e, context_id, |config| {
                     Some(uart::State::new(uart::Config::parse(config, 115200)?))
@@ -127,7 +127,7 @@ impl Tasks {
             });
         let sdio = dtb
             .iter()
-            .find(|(_, path)| (path[1] == "soc" && path[2].starts_with("sdio1@")))
+            .find(|(_, path)| path[1] == "soc" && path[2].starts_with("sdio1@"))
             .and_then(|(config, _)| {
                 Driver::parse_dtb(config, plic, plic_e, context_id, |config| {
                     sdio::State::new(config)
@@ -186,11 +186,11 @@ impl Tasks {
                     let mut issuers = [0; 8];
                     let mut it = issuers.iter_mut();
                     for d in &mut shared.deadline {
-                        if let Some(dl) = d {
-                            if dl.val.get() <= now {
-                                *it.next().expect("cannot fail") = dl.issuer;
-                                *d = None;
-                            }
+                        if let Some(dl) = d
+                            && dl.val.get() <= now
+                        {
+                            *it.next().expect("cannot fail") = dl.issuer;
+                            *d = None;
                         }
                     }
                     for issuer in issuers {
@@ -207,10 +207,10 @@ impl Tasks {
                 }
             }
 
-            if !shared.uart_out.is_empty() {
-                if let Some(driver) = self.uart.as_mut() {
-                    driver.state.handle(shared, tau::Event::Timeout);
-                }
+            if !shared.uart_out.is_empty()
+                && let Some(driver) = self.uart.as_mut()
+            {
+                driver.state.handle(shared, tau::Event::Timeout);
             }
         }
     }
