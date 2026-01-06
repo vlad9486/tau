@@ -4,13 +4,11 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "install-vf2",
+            "label": "build-vf2",
             "type": "shell",
-            "command": "make",
+            "command": "tau-builder",
             "args": [
-                "-C",
-                "build",
-                "install-vf2"
+                "build-tau"
             ],
             "group": {
                 "kind": "build",

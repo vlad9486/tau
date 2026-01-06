@@ -1,9 +1,12 @@
 #![no_std]
 #![no_main]
-#![feature(custom_test_frameworks)]
-#![test_runner(tau::tester::test_runner)]
-#![feature(strict_provenance_lints)]
-#![warn(fuzzy_provenance_casts)]
+#![cfg_attr(
+    feature = "nightly",
+    feature(custom_test_frameworks),
+    test_runner(tau::tester::test_runner),
+    feature(strict_provenance_lints),
+    warn(fuzzy_provenance_casts)
+)]
 
 use core::{arch, cell::UnsafeCell, hint, mem::MaybeUninit, slice};
 

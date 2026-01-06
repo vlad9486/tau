@@ -1,7 +1,5 @@
 use core::{arch, hint, num::NonZeroUsize, slice};
 
-use thiserror_no_std::Error;
-
 use super::{
     vmem::{Window, Mapping},
     module::{ModuleTables, Invocation},
@@ -26,15 +24,11 @@ impl Context {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum InitError {
-    #[error("{0}")]
-    Elf(#[from] elf::ParseError),
-    #[error("{0:?}")]
-    Allocator(#[from] llfree::Error),
-    #[error("{0:?}")]
-    Alloc(#[from] tau::AllocError),
-    #[error("failed to parse manifest")]
+    Elf(elf::ParseError),
+    Allocator(llfree::Error),
+    Alloc(tau::AllocError),
     Manifest,
 }
 
@@ -60,7 +54,8 @@ pub unsafe fn init(
 
     window
         .map(asid, mapping, || context.page(thread.hart_id()))
-        .map_err(|_| tau::AllocError::OutOfMemory)?;
+        .map_err(|_| tau::AllocError::OutOfMemory)
+        .map_err(InitError::Alloc)?;
     unsafe { module.write_bytes(0, 1) };
 
     let module = unsafe { &*module };
@@ -75,7 +70,7 @@ pub unsafe fn init(
         endian::LittleEndian,
         abi::{PT_LOAD, PF_R, PF_W, PF_X},
     };
-    let elf = ElfBytes::<LittleEndian>::minimal_parse(data)?;
+    let elf = ElfBytes::<LittleEndian>::minimal_parse(data).map_err(InitError::Elf)?;
     let mut manifest_segment = None;
     let mut manifest_range = 0..0;
     if let Some(s) = elf.segments() {
@@ -106,7 +101,9 @@ pub unsafe fn init(
                 flags,
             };
 
-            window.map(0, mapping, || context.page(thread.hart_id()))?;
+            window
+                .map(0, mapping, || context.page(thread.hart_id()))
+                .map_err(InitError::Allocator)?;
         }
     }
 
@@ -163,9 +160,10 @@ pub unsafe fn init(
             thread,
             context,
             region.phys_start,
-            region.virt_start as usize,
+            region.virtual_start as usize,
             region.pages,
-        )?;
+        )
+        .map_err(InitError::Alloc)?;
     }
 
     let inv = unsafe {

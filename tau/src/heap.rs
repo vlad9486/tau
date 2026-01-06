@@ -1,7 +1,8 @@
 use core::{
-    alloc::{AllocError, Allocator, GlobalAlloc, Layout},
+    alloc::{GlobalAlloc, Layout},
+    mem,
     num::NonZeroUsize,
-    ptr,
+    ptr, slice,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -38,26 +39,36 @@ impl Area {
         let len = len.div_ceil(0x1000) << 12;
         Area { base, len }
     }
-}
 
-unsafe impl Allocator for Area {
-    fn allocate(&self, layout: Layout) -> Result<ptr::NonNull<[u8]>, AllocError> {
-        if layout.size() > self.len {
-            return Err(AllocError);
-        }
+    fn alloc(&self, layout: Layout) -> usize {
         let start = ALLOCATOR.alloc_unmapped(layout);
         Ubi::map(
             NonZeroUsize::new(self.base),
             start,
             layout.size().div_ceil(0x1000),
         )
-        .map_err(|_| AllocError)?;
-        let ptr = ptr::NonNull::new(start as _).ok_or(AllocError)?;
-        Ok(ptr::NonNull::slice_from_raw_parts(ptr, layout.size()))
+        .expect("failed to map page");
+        start
     }
 
-    unsafe fn deallocate(&self, ptr: ptr::NonNull<u8>, layout: Layout) {
-        let _ = (ptr, layout);
+    pub fn sl<T>(self) -> &'static [T] {
+        let addr = self
+            .alloc(unsafe { Layout::from_size_align_unchecked(self.len, mem::align_of::<T>()) });
+        unsafe {
+            slice::from_raw_parts(
+                ptr::with_exposed_provenance(addr),
+                self.len / mem::size_of::<T>(),
+            )
+        }
+    }
+
+    pub fn r<T>(self) -> &'static T {
+        let addr = self.alloc(Layout::new::<T>());
+        if mem::size_of::<T>() <= self.len {
+            unsafe { &*ptr::with_exposed_provenance(addr) }
+        } else {
+            panic!()
+        }
     }
 }
 
@@ -71,6 +82,6 @@ unsafe impl GlobalAlloc for Bump {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let _ = (ptr, layout);
+        Ubi::unmap(ptr.addr(), layout.size().div_ceil(0x1000)).unwrap_or_default();
     }
 }

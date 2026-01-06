@@ -37,8 +37,8 @@ pub struct InterruptId(NonZeroU32);
 
 impl InterruptNumber {
     #[inline(always)]
-    pub const fn new(value: u32) -> Self {
-        Self(unsafe { NonZeroU32::new_unchecked(value) })
+    pub fn new(value: u32) -> Option<Self> {
+        NonZeroU32::new(value).map(Self)
     }
 
     #[inline(always)]
@@ -48,7 +48,7 @@ impl InterruptNumber {
 
     #[inline(always)]
     pub fn hi(&self) -> usize {
-        ((self.0.get() >> 5) & 0x1f) as usize
+        tau::to_size((self.0.get() >> 5) & 0x1f)
     }
 
     #[inline(always)]
@@ -112,7 +112,7 @@ impl PlicPriority {
 
     #[inline(always)]
     pub fn set_priority(&self, id: &InterruptNumber, priority: InterruptPriority) {
-        if let Some(reg) = self.priorities.get(id.as_int() as usize) {
+        if let Some(reg) = self.priorities.get(tau::to_size(id.as_int())) {
             reg.write(priority as u32)
         }
     }

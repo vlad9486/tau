@@ -3,5 +3,11 @@ name = "tau"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
-thiserror-no-std = { version = "2.0" }
+[lib]
+name = "tau"
+test = false
+doctest = false
+bench = false
+
+[features]
+nightly = []

@@ -26,6 +26,12 @@ SECTIONS
 		ASSERT(SIZEOF(.got) == 0, "Error: .got section is not empty");
 	}
 
+	.plt :
+	{
+		KEEP(*(.plt .plt.*))
+		ASSERT(SIZEOF(.plt) == 0, "Error: .plt section is not empty");
+	}
+
 	.data :
 	{
 		KEEP(*(.data .data.*))

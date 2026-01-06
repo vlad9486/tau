@@ -1,8 +1,6 @@
 use core::{fmt, ops::Index, slice, str};
 
-use thiserror_no_std::Error;
-
-use super::asm;
+use super::{asm, heap::Area, to_size};
 
 pub struct Dtb<'a> {
     dt: &'a [u32],
@@ -79,26 +77,27 @@ pub struct DtbProps<'a> {
     str: &'a [u8],
 }
 
-#[derive(Debug, Error)]
-pub enum DtbError {
-    #[error("dtb header error: {0}")]
-    Header(#[from] DtbHeaderError),
+#[derive(Debug)]
+pub enum DtbHeaderError {
+    HeaderSize,
+    Magic,
+    TotalSize,
+    ReservedMemoryTableSize,
+    DeviceTreeSize,
+    StringTableSize,
 }
 
-#[derive(Debug, Error)]
-pub enum DtbHeaderError {
-    #[error("bad header size")]
-    HeaderSize,
-    #[error("bad magic")]
-    Magic,
-    #[error("bad total size")]
-    TotalSize,
-    #[error("bad reserved memory table size")]
-    ReservedMemoryTableSize,
-    #[error("bad device tree size")]
-    DeviceTreeSize,
-    #[error("bad string table size")]
-    StringTableSize,
+impl fmt::Display for DtbHeaderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::HeaderSize => write!(f, "bad header size"),
+            Self::Magic => write!(f, "bad magic"),
+            Self::TotalSize => write!(f, "bad total size"),
+            Self::ReservedMemoryTableSize => write!(f, "bad reserved memory table size"),
+            Self::DeviceTreeSize => write!(f, "bad device tree size"),
+            Self::StringTableSize => write!(f, "bad string table size"),
+        }
+    }
 }
 
 const BEGIN_NODE: u32 = 0x00000001;
@@ -286,6 +285,15 @@ impl<'a> DtbProps<'a> {
                 slice::from_raw_parts(b.as_ptr().cast::<u32>(), b.len() / size_of::<u32>())
             })
         })
+    }
+
+    pub fn find_reg(&self) -> Option<Area> {
+        let Some([addr_hi, addr_lo, size_hi, size_lo]) = self.find_int(|name| name == "reg") else {
+            return None;
+        };
+        let addr = (to_size(addr_hi.to_be()) << 32) + to_size(addr_lo.to_be());
+        let size = (to_size(size_hi.to_be()) << 32) + to_size(size_lo.to_be());
+        Some(Area::new(addr, size))
     }
 
     fn find<P>(&self, predicate: P) -> Option<&'a [u8]>

@@ -32,36 +32,35 @@ Tau is currently under development and not yet ready for general use.
 apt install -y make clang llvm lld device-tree-compiler u-boot-tools
 ```
 
-You may be missing some build time dependencies. It requires llvm binutils to produce debugging disassembly. It also needs `dtc` to compile the device tree and `clang` to build OpenSBI.
-
-## Build
-
-To build the OS image do:
-
-```bash
-make -C build target/tau
-```
-
-The file will be in `build/target/tau`, as you can see from the command. This file should be a payload for [OpenSBI](https://github.com/riscv-software-src/opensbi.git).
-
-### Run in Qemu
-
-```
-make -C build run-qemu
-```
+You may be missing some build time dependencies. It needs `git`, `make`, `clang` and `riscv64-gnu-toolchain-elf-bin` to build u-boot and OpenSBI.
 
 ## Build for Vision Five 2
 
-Build the OS image:
+To build the OS image, build the builder:
 
 ```
-make -C build target/vf2/tau.img
+cargo install --path tools --bin tau-builder
 ```
 
-Copy to `/dev/sda2` and run `picocom` on `/dev/ttyUSB0`. Edit the makefile if you need to change these paths:
+Clone u-boot and OpenSBI git repositories into `riscv/target` directory and build them.
 
 ```
-make -C build install-vf2
+tau-builder build-firmware
+```
+
+Format the SD card. The command will ask root password. Double check device path,
+the command will destroy the data contained on the first few megabytes of the disk.
+Then it will create GPT on the device and write u-boot and OpenSBI on the corresponding partitions.
+
+```
+tau-builder format --path=/dev/sda
+```
+
+Build and write the tau image on the SD card:
+
+```
+tau-builder build-tau
+tau-builder update --path=/dev/disk/by-partlabel/starfive_visionfive_2_u-boot
 ```
 
 ## Build for another computer

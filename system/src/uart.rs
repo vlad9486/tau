@@ -5,28 +5,21 @@ use core::{
     num::NonZeroU32,
 };
 
-use alloc::boxed::Box;
-
 use super::{
     register::Register,
     scheduler::{DriverState, Shared},
 };
 
 pub struct Config {
-    pub addr: usize,
-    pub size: usize,
+    pub area: tau::Area,
     pub reg_io_width: u32,
     pub baud_rate: u32,
 }
 
 impl Config {
     pub fn parse(props: tau::DtbProps<'_>, baud_rate: u32) -> Option<Self> {
-        let Some([addr_hi, addr_lo, size_hi, size_lo]) = props.find_int(|name| name == "reg")
-        else {
-            return None;
-        };
-        let addr = ((addr_hi.to_be() as usize) << 32) + (addr_lo.to_be() as usize);
-        let size = ((size_hi.to_be() as usize) << 32) + (size_lo.to_be() as usize);
+        let area = props.find_reg()?;
+
         let reg_io_width = props
             .find_int(|name| name == "reg-io-width")
             .map_or(Some(1), |x| x.first().copied().map(u32::to_be))?;
@@ -35,8 +28,7 @@ impl Config {
         }
 
         Some(Config {
-            addr,
-            size,
+            area,
             reg_io_width,
             baud_rate,
         })
@@ -44,26 +36,22 @@ impl Config {
 }
 
 pub struct State {
-    reg: Box<dyn UartIo, tau::Area>,
+    reg: &'static dyn UartIo,
     baud_rate: Option<NonZeroU32>,
 }
 
 impl State {
     pub fn new(config: Config) -> Self {
         let Config {
-            addr,
-            size,
+            area,
             reg_io_width,
             baud_rate,
         } = config;
 
-        let a = tau::Area::new(addr, size);
         let reg = if reg_io_width == 1 {
-            (unsafe { Box::<Uart<true, u8>, _>::new_uninit_in(a).assume_init() })
-                as Box<dyn UartIo, tau::Area>
+            area.r::<Uart<true, u8>>() as &'static dyn UartIo
         } else if reg_io_width == 4 {
-            (unsafe { Box::<Uart<false, u32>, _>::new_uninit_in(a).assume_init() })
-                as Box<dyn UartIo, tau::Area>
+            area.r::<Uart<false, u32>>() as &'static dyn UartIo
         } else {
             unreachable!()
         };

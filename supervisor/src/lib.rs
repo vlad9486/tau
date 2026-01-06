@@ -1,8 +1,11 @@
 #![no_std]
-#![feature(custom_test_frameworks)]
-#![test_runner(tau::tester::test_runner)]
-#![feature(strict_provenance_lints)]
-#![warn(fuzzy_provenance_casts)]
+#![cfg_attr(
+    feature = "nightly",
+    feature(custom_test_frameworks),
+    test_runner(tau::tester::test_runner),
+    feature(strict_provenance_lints),
+    warn(fuzzy_provenance_casts)
+)]
 
 mod asm;
 

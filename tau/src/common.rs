@@ -21,7 +21,7 @@ pub struct ModuleId {
 #[derive(Clone, Copy)]
 pub struct MappedRegion {
     pub phys_start: Option<NonZeroUsize>,
-    pub virt_start: isize,
+    pub virtual_start: isize,
     pub pages: usize,
     pub write: bool,
 }
@@ -31,7 +31,7 @@ impl MappedRegion {
         MappedRegion {
             // physical address is allocated dynamically
             phys_start: None,
-            virt_start: -(size as isize),
+            virtual_start: -(size as isize),
             pages: size >> 12,
             write: true,
         }

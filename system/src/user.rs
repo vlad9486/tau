@@ -1,7 +1,9 @@
 use core::{
     cell::UnsafeCell,
     future,
+    mem::MaybeUninit,
     pin::Pin,
+    ptr,
     task::{Context, Poll},
     time::Duration,
 };
@@ -30,14 +32,16 @@ impl<'a> State<'a> {
 
 async fn run(shared: &UnsafeCell<Shared>) {
     // TODO: allocator for DMA
-    let phys = 0x7000_1000;
-    let page = Box::<[[u8; 0x10]; 0x100], _>::new_uninit_in(tau::Area::new(phys, 0x2000));
-    read(shared, phys, 0x400).await;
+    let phys = 0x7000_1000_u32;
+    let base = tau::to_size(phys);
+    let page = tau::Area::new(base, 0x1000).r::<MaybeUninit<[[u8; 0x10]; 0x100]>>();
+    read(shared, phys, 0x600).await;
 
+    unsafe { &mut *shared.get() }.write(format_args!("___page: 0x600"));
     let dma_data = unsafe { page.assume_init() };
     for chunk in dma_data.iter() {
         let [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] =
-            unsafe { (chunk as *const [u8; 16]).read_volatile() };
+            unsafe { (ptr::from_ref(chunk)).read_volatile() };
         unsafe { &mut *shared.get() }.write(format_args!(
             "\
             {a:02x} {b:02x} {c:02x} {d:02x} {e:02x} {f:02x} {g:02x} {h:02x} \
@@ -75,11 +79,8 @@ async fn read_uart(shared: &UnsafeCell<Shared>, b: &mut [u8]) -> usize {
     .await
 }
 
-async fn read(shared: &UnsafeCell<Shared>, phys: usize, block: u32) {
-    let task = sdio::Task::Read {
-        page: block,
-        phys: phys as u32,
-    };
+async fn read(shared: &UnsafeCell<Shared>, phys: u32, block: u32) {
+    let task = sdio::Task::Read { page: block, phys };
     unsafe { &mut *shared.get() }.sdio_task = Some(task);
     let _done = future::poll_fn(move |_| {
         if let Some(done) = unsafe { &mut *shared.get() }.sdio_done.take() {
@@ -92,11 +93,8 @@ async fn read(shared: &UnsafeCell<Shared>, phys: usize, block: u32) {
 }
 
 #[allow(dead_code)]
-async fn write(shared: &UnsafeCell<Shared>, phys: usize, block: u32) {
-    let task = sdio::Task::Write {
-        page: block,
-        phys: phys as u32,
-    };
+async fn write(shared: &UnsafeCell<Shared>, phys: u32, block: u32) {
+    let task = sdio::Task::Write { page: block, phys };
     unsafe { &mut *shared.get() }.sdio_task = Some(task);
     let _done = future::poll_fn(move |_| {
         if let Some(done) = unsafe { &mut *shared.get() }.sdio_done.take() {

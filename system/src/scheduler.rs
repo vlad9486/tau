@@ -1,8 +1,6 @@
 use core::cell::UnsafeCell;
 use core::{hint, fmt, num::NonZeroUsize, time::Duration};
 
-use thiserror_no_std::Error;
-
 use super::plic::{PlicPriority, PlicEnable, PlicCtx, InterruptNumber, InterruptId, InterruptPriority};
 use super::{uart, sdio, user};
 
@@ -47,8 +45,7 @@ impl Shared {
     }
 }
 
-#[derive(Debug, Error)]
-#[error("timeout")]
+#[derive(Debug)]
 pub struct Timeout;
 
 pub fn spin(mut timeout: u32, cond: impl Fn() -> bool) -> Result<(), Timeout> {
@@ -84,7 +81,10 @@ impl<S> Driver<S> {
         for (num, i) in sl.iter().zip(int.iter_mut()) {
             let num = num.to_be();
             *i = num;
-            let num = InterruptNumber::new(num);
+            let Some(num) = InterruptNumber::new(num) else {
+                // the number is zero, should not have such number in the dtb
+                continue;
+            };
             plic.set_priority(&num, InterruptPriority::_1);
             plic_e.enable(context_id, &num);
         }

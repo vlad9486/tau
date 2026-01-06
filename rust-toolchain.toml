@@ -1,4 +1,4 @@
 [toolchain]
 components = ["clippy", "rustfmt"]
-channel = "nightly-2025-10-02"
-targets = ["riscv64gc-unknown-none-elf"]
+channel = "1.92.0"
+targets = ["riscv64imac-unknown-none-elf"]

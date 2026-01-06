@@ -1,8 +1,4 @@
-use core::time::Duration;
-
-use alloc::boxed::Box;
-
-use thiserror_no_std::Error;
+use core::{time::Duration, fmt};
 
 use super::{
     register::Register,
@@ -10,11 +6,11 @@ use super::{
 };
 
 pub struct State {
-    reg: Box<Reg, tau::Area>,
+    reg: &'static Reg,
     inner: StateInner,
-    fifo_depth: u16,
+    fifo_depth: u32,
     rca: u32,
-    dma_desc: Box<[u32; 0x200], tau::Area>,
+    dma_desc: &'static [Register<u32, u32>; 0x200],
     dma_phys: u32,
     error: Option<DriverError>,
 }
@@ -40,14 +36,21 @@ pub enum Task {
     Write { page: u32, phys: u32 },
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum DriverError {
-    #[error("control reset {0}")]
     Control(Timeout),
-    #[error("clock setup {0}")]
     Clock(Timeout),
-    #[error("cmd failed {0}")]
     CmdFailed(u32),
+}
+
+impl fmt::Display for DriverError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Control(Timeout) => write!(f, "timeout"),
+            Self::Clock(Timeout) => write!(f, "timeout"),
+            Self::CmdFailed(code) => write!(f, "failed CMD{code}"),
+        }
+    }
 }
 
 impl State {
@@ -80,16 +83,24 @@ impl State {
         // buffer size
         // buffer address (physical)
         // next descriptor address (physical)
-        self.dma_desc[..8].clone_from_slice(&[
-            0b1000_0000_0000_0000_0000_0000_0001_1010,
-            0x800,
-            phys,
-            self.dma_phys + 0x10,
-            0b1000_0000_0000_0000_0000_0000_0001_0100,
-            0x800,
-            phys + 0x800,
-            0,
-        ]);
+        self.dma_desc[0].write(0b1000_0000_0000_0000_0000_0000_0001_1010_u32);
+        self.dma_desc[1].write(0x800_u32);
+        self.dma_desc[2].write(phys);
+        self.dma_desc[3].write(self.dma_phys + 0x10);
+        self.dma_desc[4].write(0b1000_0000_0000_0000_0000_0000_0001_0100_u32);
+        self.dma_desc[5].write(0x800_u32);
+        self.dma_desc[6].write(phys + 0x800);
+        self.dma_desc[7].write(0_u32);
+        // self.dma_desc[..8].clone_from_slice(&[
+        //     0b1000_0000_0000_0000_0000_0000_0001_1010,
+        //     0x800,
+        //     phys,
+        //     self.dma_phys + 0x10,
+        //     0b1000_0000_0000_0000_0000_0000_0001_0100,
+        //     0x800,
+        //     phys + 0x800,
+        //     0,
+        // ]);
         tau::asm::fence();
         reg.desc_base.write(self.dma_phys);
         reg.bus_mod.write(reg.bus_mod.read() | (1 << 1) | (1 << 7));
@@ -101,19 +112,12 @@ impl State {
         let Some(&[fifo_depth]) = config.find_int(|name| name == "fifo-depth") else {
             return None;
         };
-        let fifo_depth = fifo_depth.to_be() as u16;
-        let Some([addr_hi, addr_lo, size_hi, size_lo]) = config.find_int(|name| name == "reg")
-        else {
-            return None;
-        };
-        let addr = ((addr_hi.to_be() as usize) << 32) + (addr_lo.to_be() as usize);
-        let size = ((size_hi.to_be() as usize) << 32) + (size_lo.to_be() as usize);
-        let a = tau::Area::new(addr, size);
-        let reg = unsafe { Box::<Reg, _>::new_uninit_in(a).assume_init() };
+        let fifo_depth = fifo_depth.to_be();
+        let area = config.find_reg()?;
+        let reg = area.r();
 
         // TODO: allocator for DMA
-        let a = tau::Area::new(0x7000_0000, 0x1000);
-        let dma_desc = unsafe { Box::<[u32; 0x200], _>::new_zeroed_in(a).assume_init() };
+        let dma_desc = tau::Area::new(0x7000_0000, 0x1000).r();
 
         Some(State {
             reg,
@@ -343,7 +347,7 @@ bitflags::bitflags! {
 }
 
 impl Reg {
-    fn init(&self, fifo_depth: u16) -> Result<(), DriverError> {
+    fn init(&self, fifo_depth: u32) -> Result<(), DriverError> {
         let ctrl_reset = Ctrl::RESET_CONTROLLER | Ctrl::FIFO_RESET | Ctrl::DMA_RESET;
         self.ctrl.write(ctrl_reset);
         scheduler::spin(CTRL_RESET_TO, || !self.ctrl.read().intersects(ctrl_reset))
@@ -368,7 +372,7 @@ impl Reg {
 
         self.ctype.write(0u32);
         self.timeout.write(0x_ffff_ff40_u32);
-        let mid = ((fifo_depth & 0xfff) / 2) as u32;
+        let mid = (fifo_depth & 0xfff) / 2;
         self.fifo_threshold
             .write((2u32 << 28) | ((mid - 1) << 16) | mid);
 

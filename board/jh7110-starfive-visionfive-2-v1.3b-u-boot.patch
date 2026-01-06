@@ -1,0 +1,98 @@
+diff --git a/configs/starfive_visionfive2_defconfig b/configs/starfive_visionfive2_defconfig
+index 2b3abacfb0b..3d22ae349e5 100644
+--- a/configs/starfive_visionfive2_defconfig
++++ b/configs/starfive_visionfive2_defconfig
+@@ -169,3 +169,7 @@ CONFIG_DISPLAY_STARFIVE_HDMI=y
+ CONFIG_DISPLAY_STARFIVE_MIPI=y
+ CONFIG_VIDEO_NW_MIPI_DSI=y
+ CONFIG_OF_LIBFDT_OVERLAY=y
++
++CONFIG_SPL_RAW_IMAGE_SUPPORT=y
++CONFIG_SYS_TEXT_BASE=0x40000000
++CONFIG_SYS_UBOOT_START=0x40000000
+diff --git a/drivers/net/rtl8169.c b/drivers/net/rtl8169.c
+index 3896760b5f1..7353ecd12af 100644
+--- a/drivers/net/rtl8169.c
++++ b/drivers/net/rtl8169.c
+@@ -99,12 +99,12 @@ static int media[MAX_UNITS] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+ #define TX_TIMEOUT  (6*HZ)
+ 
+ /* write/read MMIO register. Notice: {read,write}[wl] do the necessary swapping */
+-#define RTL_W8(reg, val8)	writeb((val8), ioaddr + (reg))
+-#define RTL_W16(reg, val16)	writew((val16), ioaddr + (reg))
+-#define RTL_W32(reg, val32)	writel((val32), ioaddr + (reg))
+-#define RTL_R8(reg)		readb(ioaddr + (reg))
+-#define RTL_R16(reg)		readw(ioaddr + (reg))
+-#define RTL_R32(reg)		readl(ioaddr + (reg))
++#define RTL_W8(reg, val8)	writeb((val8), (u8*)(ioaddr + (reg)))
++#define RTL_W16(reg, val16)	writew((val16), (u16*)(ioaddr + (reg)))
++#define RTL_W32(reg, val32)	writel((val32), (u32*)(ioaddr + (reg)))
++#define RTL_R8(reg)		readb((u8*)(ioaddr + (reg)))
++#define RTL_R16(reg)		readw((u16*)(ioaddr + (reg)))
++#define RTL_R32(reg)		readl((u32*)(ioaddr + (reg)))
+ 
+ #define bus_to_phys(a)	pci_mem_to_phys((pci_dev_t)(unsigned long)dev->priv, \
+ 	(pci_addr_t)(unsigned long)a)
+diff --git a/drivers/usb/cdns3/cdns3-starfive.c b/drivers/usb/cdns3/cdns3-starfive.c
+index 631fae21cd6..faffd53779a 100644
+--- a/drivers/usb/cdns3/cdns3-starfive.c
++++ b/drivers/usb/cdns3/cdns3-starfive.c
+@@ -10,6 +10,7 @@
+ #include <common.h>
+ #include <clk.h>
+ #include <dm.h>
++#include <dm/lists.h>
+ #include <dm/device_compat.h>
+ #include <linux/usb/otg.h>
+ #include <reset.h>
+diff --git a/drivers/video/dw_hdmi.c b/drivers/video/dw_hdmi.c
+index c4fbb182944..b5c5b3bba4b 100644
+--- a/drivers/video/dw_hdmi.c
++++ b/drivers/video/dw_hdmi.c
+@@ -78,10 +78,10 @@ static void dw_hdmi_write(struct dw_hdmi *hdmi, u8 val, int offset)
+ {
+ 	switch (hdmi->reg_io_width) {
+ 	case 1:
+-		writeb(val, hdmi->ioaddr + offset);
++		writeb(val, (u8*)hdmi->ioaddr + offset);
+ 		break;
+ 	case 4:
+-		writel(val, hdmi->ioaddr + (offset << 2));
++		writel(val, (u32*)(hdmi->ioaddr + (offset << 2)));
+ 		break;
+ 	default:
+ 		debug("reg_io_width has unsupported width!\n");
+@@ -93,9 +93,9 @@ static u8 dw_hdmi_read(struct dw_hdmi *hdmi, int offset)
+ {
+ 	switch (hdmi->reg_io_width) {
+ 	case 1:
+-		return readb(hdmi->ioaddr + offset);
++		return readb((u8*)hdmi->ioaddr + offset);
+ 	case 4:
+-		return readl(hdmi->ioaddr + (offset << 2));
++		return readl((u32*)(hdmi->ioaddr + (offset << 2)));
+ 	default:
+ 		debug("reg_io_width has unsupported width!\n");
+ 		break;
+diff --git a/include/configs/starfive-visionfive2.h b/include/configs/starfive-visionfive2.h
+index 0f681941b5b..01ce79f604e 100644
+--- a/include/configs/starfive-visionfive2.h
++++ b/include/configs/starfive-visionfive2.h
+@@ -59,6 +59,8 @@
+ 
+ #define CONFIG_SYS_SDRAM_BASE		0x40000000
+ 
++#define CONFIG_SYS_MONITOR_LEN 0x240000
++
+ /* Init Stack Pointer */
+ #define CONFIG_SYS_INIT_SP_ADDR		(CONFIG_SYS_SDRAM_BASE + SZ_8M)
+ 
+@@ -329,7 +331,7 @@
+ 		    "if test ${emmc_size} = 0; then "	\
+ 		        "setenv bootenv uEnv_Lite.txt;"    \
+ 		    "else "				   \
+-		        "setenv bootenv uEnv_Lite_emmc.txt;" \	
++		        "setenv bootenv uEnv_Lite_emmc.txt;" \
+ 		     "fi; "				    \
+ 		"fi;" \
+ 		"run load_distro_uenv; " \

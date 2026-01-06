@@ -1,9 +1,12 @@
 #![no_std]
 #![no_main]
-#![feature(custom_test_frameworks)]
-#![test_runner(tau::tester::test_runner)]
-#![feature(strict_provenance_lints)]
-#![warn(fuzzy_provenance_casts)]
+#![cfg_attr(
+    feature = "nightly",
+    feature(custom_test_frameworks),
+    test_runner(tau::tester::test_runner),
+    feature(strict_provenance_lints),
+    warn(fuzzy_provenance_casts)
+)]
 
 use core::{arch, cell::UnsafeCell, hint, mem::MaybeUninit, fmt::Write as _};
 
@@ -99,7 +102,7 @@ extern "C" fn init(
             }
         },
         Err(err) => {
-            writeln!(sbi::Console, "{err}\r").unwrap_or_default();
+            writeln!(sbi::Console, "{err:?}\r").unwrap_or_default();
             loop {
                 hint::spin_loop();
             }

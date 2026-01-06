@@ -1,8 +1,10 @@
 #![no_std]
 #![no_main]
-#![feature(custom_test_frameworks)]
-#![test_runner(tau::tester::test_runner)]
-#![feature(allocator_api)]
+#![cfg_attr(
+    feature = "nightly",
+    feature(custom_test_frameworks),
+    test_runner(tau::tester::test_runner)
+)]
 
 extern crate alloc;
 
@@ -44,18 +46,13 @@ extern "C" fn main(
     _: usize,
     _: usize,
 ) -> ! {
-    use alloc::boxed::Box;
-
     let Ok(tau::Event::Invocation { inv, .. }) = tau::Event::decode(a0) else {
         tau::Ubi::exit([1]);
     };
 
     let len = info_pages << 12;
-    let dtb_alloc = tau::Area::new(info, len);
-    let raw = unsafe {
-        Box::<[u32], _>::new_uninit_slice_in(len / size_of::<u32>(), dtb_alloc).assume_init()
-    };
-    let Ok((dtb, _)) = tau::Dtb::new(&raw) else {
+    let raw = tau::Area::new(info, len).sl();
+    let Ok((dtb, _)) = tau::Dtb::new(raw) else {
         tau::Ubi::respond(inv, 1, []);
     };
 
@@ -100,24 +97,17 @@ extern "C" fn main(
     let Some([addr_hi, addr_lo, _, _]) = plic_config.find_int(|name| name == "reg") else {
         tau::Ubi::respond(inv, 1, []);
     };
-    let addr = ((addr_hi.to_be() as usize) << 32) + (addr_lo.to_be() as usize);
+    let addr = (tau::to_size(addr_hi.to_be()) << 32) + tau::to_size(addr_lo.to_be());
 
-    let plic = unsafe {
-        Box::<plic::PlicPriority, _>::new_uninit_in(tau::Area::new(addr, 0x2000)).assume_init()
-    };
+    let plic = tau::Area::new(addr, 0x2000).r();
 
-    let plic_e = unsafe {
-        let a = tau::Area::new(addr + plic::enable_offset(context_id), 0x1000);
-        Box::<plic::PlicEnable, _>::new_uninit_in(a).assume_init()
-    };
+    let plic_e = tau::Area::new(addr + plic::enable_offset(context_id), 0x1000).r();
 
-    let plic_ctx = unsafe {
-        let a = tau::Area::new(addr + plic::context_offset(context_id), 0x1000);
-        Box::<plic::PlicCtx, _>::new_uninit_in(a).assume_init()
-    };
+    let plic_ctx =
+        tau::Area::new(addr + plic::context_offset(context_id), 0x1000).r::<plic::PlicCtx>();
     plic_ctx.set_threshold(plic::InterruptPriority::_0);
 
-    scheduler::Tasks::new(dtb, &plic, &plic_e, context_id).run(&plic_ctx);
+    scheduler::Tasks::new(dtb, plic, plic_e, context_id).run(plic_ctx);
 
     tau::Ubi::respond(inv, 0, [])
 }

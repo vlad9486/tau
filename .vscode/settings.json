@@ -1,28 +1,25 @@
 {
     "rust-analyzer.check.command": "clippy",
-    "rust-analyzer.cargo.extraArgs": ["--target", "riscv64gc-unknown-none-elf"],
+    "rust-analyzer.cargo.extraArgs": [
+        "--target=riscv64imac-unknown-none-elf"
+    ],
     "cSpell.words": [
         // no category
-        "binutils",
         "bitfield",
         "bitfields",
         "cpus",
-        "diskutil",
         "vmem",
         "llfree",
         "memoffset",
         "nanos",
-        "nographic",
         "NVRAM",
         "Optane",
-        "picocom",
         "plic",
         "sdio",
         "starfive",
         "subsec",
         "syscall",
         "UART",
-        "virt",
         "visionfive",
         // RISC-V asm
         "addi",
@@ -50,24 +47,17 @@
         // unix
         "defsym",
         "objcopy",
-        "objdump",
-        "oformat",
         "rodata",
         "srodata",
         "sbss",
         "sdata",
-        "uboot",
-        "conv",
-        "notrunc",
         // elf,
         "ehdr",
         "vaddr",
         "memsz",
         "filesz",
-        // u-boot
-        "incbin",
-        "mkimage",
         // Rust
+        "clippy",
         "ctypes",
         "ilog",
         "nomem",
@@ -79,6 +69,8 @@
         "uninit",
         "repr",
         // riscv
+        "riscv",
+        "riscv64imac",
         "opensbi",
         "SRST",
         "DBCN",
@@ -101,7 +93,5 @@
         "dmac",
         "ACMD",
         "SDMMC",
-        "SDCLK",
-        "Idmac",
     ]
 }
