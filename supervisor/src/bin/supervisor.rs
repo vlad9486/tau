@@ -67,9 +67,9 @@ extern "C" fn init(
     let module = unsafe { __MODULE.get() };
 
     if cores != 0 {
-        let (_, metadata) =
-            LLFree::create_metadata(cores, frames, false, unsafe { __ALLOCATOR.get().cast() });
-        let allocator = unsafe { LLFree::new(Init::None, metadata).unwrap_unchecked() };
+        let (_, allocator) = unsafe {
+            LLFree::new(Init::None, cores, frames, __ALLOCATOR.get().cast()).unwrap_unchecked()
+        };
 
         unsafe {
             __CONTEXT.get().write(MaybeUninit::new(state::Context {

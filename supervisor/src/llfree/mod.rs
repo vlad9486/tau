@@ -63,8 +63,6 @@ pub enum Init {
     FreeAll,
     /// Clear the allocator marking all frames as allocated
     AllocAll,
-    /// Try recovering all frames from persistent memory
-    Recover(bool),
     /// Assume that the allocator is already initialized
     None,
 }

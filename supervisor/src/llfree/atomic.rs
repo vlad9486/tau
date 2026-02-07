@@ -1,6 +1,6 @@
 //! Generic atomics
 
-use core::fmt;
+use core::{fmt, ptr};
 use core::sync::atomic::Ordering;
 use core::sync::atomic::*;
 
@@ -167,16 +167,13 @@ atomic_impl!(usize, AtomicUsize);
 
 pub trait AtomArray<T: Copy, const L: usize> {
     /// Overwrite the content of the whole array non-atomically.
-    ///
-    /// This is faster than atomics but does not handle race conditions.
-    fn atomic_fill(&self, e: T);
+    fn atomic_fill(&mut self, e: T);
 }
 
 impl<T: Atomic, const L: usize> AtomArray<T, L> for [Atom<T>; L] {
-    fn atomic_fill(&self, e: T) {
+    fn atomic_fill(&mut self, e: T) {
         // cast to raw memory to let the compiler use vector instructions
-        // WARNING: invalid cast, this is likely UB
-        unsafe { &mut *(self.as_ptr() as *mut [T; L]) }.fill(e);
+        unsafe { &mut *ptr::from_mut(self).cast::<[T; L]>() }.fill(e);
         // memory ordering has to be enforced with a memory barrier
         fence(Ordering::Release);
     }

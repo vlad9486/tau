@@ -45,21 +45,20 @@ impl<'a> Lower<'a> {
         frames: usize,
         init: Init,
         bitfields: &'a [Align<Bitfield>],
-        children: &'a [Align<[Atom<HugeEntry>; TREE_HUGE]>],
+        children: &'a mut [Align<[Atom<HugeEntry>; TREE_HUGE]>],
     ) -> Result<Self, Error> {
-        let alloc = Self {
+        // TODO: refactor this
+        match init {
+            Init::FreeAll => Self::free_all(frames, bitfields, &mut *children),
+            Init::AllocAll => Self::reserve_all(frames, bitfields, &mut *children),
+            Init::None => {} // skip, assuming everything is valid
+        }
+
+        Ok(Lower {
             len: frames,
             bitfields,
-            children,
-        };
-
-        match init {
-            Init::FreeAll => alloc.free_all(),
-            Init::AllocAll => alloc.reserve_all(),
-            Init::Recover(false) | Init::None => {} // skip, assuming everything is valid
-            Init::Recover(true) => alloc.recover(),
-        }
-        Ok(alloc)
+            children: &*children,
+        })
     }
 
     pub fn frames(&self) -> usize {
@@ -76,7 +75,8 @@ impl<'a> Lower<'a> {
 
     /// Recovers the data structures for the [LowerAlloc::N] sized chunk at `start`.
     /// This corrects any data corrupted by a crash.
-    pub fn recover(&self) {
+    #[allow(unused)]
+    fn recover(&self) {
         for (i, table) in self.children.iter().enumerate() {
             for (j, a_entry) in table.iter().enumerate() {
                 let start = i * TREE_FRAMES + j * Bitfield::LEN;
@@ -217,30 +217,34 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn free_all(&self) {
+    fn free_all(
+        frames: usize,
+        bitfields: &[Align<Bitfield>],
+        children: &mut [Align<[Atom<HugeEntry>; TREE_HUGE]>],
+    ) {
         // Init tables
-        let (last, tables) = unsafe { self.children.split_last().unwrap_unchecked() };
+        let (last, tables) = unsafe { children.split_last_mut().unwrap_unchecked() };
         // Table is fully included in the memory range
-        for table in tables {
+        for table in &mut *tables {
             table.atomic_fill(HugeEntry::new_free(Bitfield::LEN));
         }
         // Table is only partially included in the memory range
         for (i, entry) in last.iter().enumerate() {
             let frame = tables.len() * TREE_FRAMES + i * Bitfield::LEN;
-            let free = self.frames().saturating_sub(frame).min(Bitfield::LEN);
+            let free = frames.saturating_sub(frame).min(Bitfield::LEN);
             entry.store(HugeEntry::new_free(free));
         }
 
         // Init bitfields
-        let last_i = self.frames() / Bitfield::LEN;
-        let (included, mut remainder) = unsafe { self.bitfields.split_at_unchecked(last_i) };
+        let last_i = frames / Bitfield::LEN;
+        let (included, mut remainder) = unsafe { bitfields.split_at_unchecked(last_i) };
         // Bitfield is fully included in the memory range
         for bitfield in included {
             bitfield.fill(false);
         }
         // Bitfield might be only partially included in the memory range
         if let Some((last, excluded)) = remainder.split_first() {
-            let end = self.frames() - included.len() * Bitfield::LEN;
+            let end = frames - included.len() * Bitfield::LEN;
             debug_assert!(end <= Bitfield::LEN);
             last.set(0..end, false);
             last.set(end..Bitfield::LEN, true);
@@ -252,15 +256,19 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn reserve_all(&self) {
+    fn reserve_all(
+        frames: usize,
+        bitfields: &[Align<Bitfield>],
+        children: &mut [Align<[Atom<HugeEntry>; TREE_HUGE]>],
+    ) {
         // Init table
-        let (last, tables) = unsafe { self.children.split_last().unwrap_unchecked() };
+        let (last, tables) = unsafe { children.split_last_mut().unwrap_unchecked() };
         // Table is fully included in the memory range
-        for table in tables {
+        for table in &mut *tables {
             table.atomic_fill(HugeEntry::new_huge());
         }
         // Table is only partially included in the memory range
-        let last_i = (self.frames() / Bitfield::LEN) - tables.len() * TREE_HUGE;
+        let last_i = (frames / Bitfield::LEN) - tables.len() * TREE_HUGE;
         let (included, remainder) = unsafe { last.split_at_unchecked(last_i) };
         for entry in included {
             entry.store(HugeEntry::new_huge());
@@ -271,8 +279,8 @@ impl<'a> Lower<'a> {
         }
 
         // Init bitfields
-        let last_i = self.frames() / Bitfield::LEN;
-        let (included, remainder) = unsafe { self.bitfields.split_at_unchecked(last_i) };
+        let last_i = frames / Bitfield::LEN;
+        let (included, remainder) = unsafe { bitfields.split_at_unchecked(last_i) };
         // Bitfield is fully included in the memory range
         for bitfield in included {
             bitfield.fill(false);

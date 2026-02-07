@@ -149,8 +149,7 @@ fn init_memory(
     let frames = memory_size >> 12;
 
     let ptr = unsafe { st.add(HEAP_END) };
-    let (pages, metadata) = LLFree::create_metadata(cores, frames, true, ptr);
-    let allocator = LLFree::new(Init::AllocAll, metadata)?;
+    let (pages, allocator) = LLFree::new(Init::AllocAll, cores, frames, ptr)?;
 
     // beginning of free memory
     // `0x200` is opensbi size

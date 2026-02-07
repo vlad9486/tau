@@ -37,17 +37,17 @@ pub struct LLFree<'a> {
     trees: Trees<'a>,
 }
 
-pub struct Metadata<'a> {
+struct Metadata<'a> {
     frames: usize,
     local: &'a [Align<Local>],
     tree_entries: &'a [Atom<Tree>],
-    children: &'a [Align<[Atom<HugeEntry>; TREE_HUGE]>],
+    children: &'a mut [Align<[Atom<HugeEntry>; TREE_HUGE]>],
     bitfields: &'a [Align<Bitfield>],
 }
 
 impl<'a> LLFree<'a> {
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    pub fn create_metadata<'b>(
+    fn create_metadata<'b>(
         cores: usize,
         frames: usize,
         init: bool,
@@ -101,7 +101,7 @@ impl<'a> LLFree<'a> {
         unsafe {
             let local = slice::from_raw_parts(ptr.cast(), cores);
             let tree_entries = slice::from_raw_parts(ptr.add(p0).cast(), tree_len(frames));
-            let children = slice::from_raw_parts(ptr.add(p0 + p1).cast(), children_len(frames));
+            let children = slice::from_raw_parts_mut(ptr.add(p0 + p1).cast(), children_len(frames));
             let bitfields =
                 slice::from_raw_parts(ptr.add(p0 + p1 + p2).cast(), bitfields_len(frames));
 
@@ -118,14 +118,22 @@ impl<'a> LLFree<'a> {
 
     /// Initialize the allocator.
     #[cold]
-    pub fn new(init: Init, metadata: Metadata<'a>) -> Result<Self, Error> {
-        let Metadata {
-            frames,
-            local,
-            tree_entries,
-            children,
-            bitfields,
-        } = metadata;
+    pub fn new(
+        init: Init,
+        cores: usize,
+        frames: usize,
+        ptr: *mut MaybeUninit<[usize; 0o1000]>,
+    ) -> Result<(usize, Self), Error> {
+        let (
+            pages,
+            Metadata {
+                frames,
+                local,
+                tree_entries,
+                children,
+                bitfields,
+            },
+        ) = Self::create_metadata(cores, frames, !matches!(&init, Init::None), ptr);
         let cores = local.len();
 
         if frames < TREE_FRAMES * cores {
@@ -139,11 +147,14 @@ impl<'a> LLFree<'a> {
         let tree_init = (init != Init::None).then_some(|start| lower.free_in_tree(start));
         let trees = Trees::new(tree_entries, tree_init);
 
-        Ok(LLFree {
-            local,
-            lower,
-            trees,
-        })
+        Ok((
+            pages,
+            LLFree {
+                local,
+                lower,
+                trees,
+            },
+        ))
     }
 
     pub fn get(&self, core: usize, flags: Flags) -> Result<usize, Error> {
