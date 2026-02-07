@@ -1,4 +1,4 @@
-use core::{fmt, ops::Index, slice, str};
+use core::{fmt, ops::Index, slice, str, ptr};
 
 use super::{asm, heap::Area, to_size};
 
@@ -313,7 +313,7 @@ impl<'a> DtbProps<'a> {
                     let data = if len == 0 {
                         &[]
                     } else {
-                        let ptr = (self.dt.get(cursor)? as *const u32).cast::<u8>();
+                        let ptr = ptr::from_ref(self.dt.get(cursor)?).cast::<u8>();
                         cursor += len;
 
                         unsafe { slice::from_raw_parts(ptr, len * size_of::<u32>()) }

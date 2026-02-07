@@ -1,4 +1,4 @@
-use core::{mem::MaybeUninit, num::NonZeroUsize};
+use core::{mem::MaybeUninit, num::NonZeroUsize, ptr};
 
 use super::{llfree, asm, cpu};
 
@@ -69,8 +69,8 @@ impl Table {
         let v = Some(unsafe { NonZeroUsize::new_unchecked(((addr_physical >> 12) << 10) | flags) });
         let ptr = self.0.get_mut(pos & 0o777).expect("cannot fail");
         if v != *ptr {
-            unsafe { (ptr as *mut Option<NonZeroUsize>).write_volatile(v) };
-            let addr = (self as *const Self).addr() + pos * 0x1000;
+            unsafe { ptr::from_mut(ptr).write_volatile(v) };
+            let addr = ptr::from_ref(self).addr() + pos * 0x1000;
             asm::sfence_vma(Some(addr), Some(asid));
         }
     }
@@ -161,7 +161,7 @@ impl Window {
         new_asid: u16,
         page: impl Fn() -> Result<usize, llfree::Error>,
     ) -> Result<Root, llfree::Error> {
-        let addr_virtual = (self as *const Self).addr();
+        let addr_virtual = ptr::from_ref(self).addr();
 
         let addr_physical = page()?;
         let root = Root::sv39(addr_physical, new_asid);

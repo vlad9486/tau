@@ -1,4 +1,4 @@
-use core::{arch, hint, num::NonZeroUsize, slice};
+use core::{arch, hint, num::NonZeroUsize, slice, ptr};
 
 use super::{
     vmem::{Window, Mapping},
@@ -62,7 +62,7 @@ pub unsafe fn init(
     module.init();
 
     let elf_base = context.base_addr + (tau::loader::SYSTEM_OFFSET << 12);
-    let data = (window as *mut Window).cast::<u8>().with_addr(elf_base);
+    let data = ptr::from_mut(window).cast::<u8>().with_addr(elf_base);
     let data = unsafe { slice::from_raw_parts(data, tau::loader::SYSTEM_SIZE << 12) };
 
     use elf::{

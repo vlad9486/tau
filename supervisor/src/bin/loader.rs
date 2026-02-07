@@ -235,7 +235,7 @@ fn init_memory(
     let mut l2 = gfp();
     // the branch of the supervisor image
     l1[0o003] = (l2.as_mut_ptr().addr() >> 2) + 1;
-    l2[0o000] = ((gfp() as *mut usize).addr() >> 2) + vmem::flags_new(b"rw--g");
+    l2[0o000] = (gfp().as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw--g");
 
     for p in 0..SUPERVISOR_SIZE {
         let virtual_page = 0x601 + p;
