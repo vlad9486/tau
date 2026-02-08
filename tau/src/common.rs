@@ -85,18 +85,12 @@ impl Event {
     }
 }
 
-pub fn event_with(event: &mut Option<Event>, id: Option<u32>) -> Option<Event> {
-    if let Some(id) = id {
-        let id = id as u16;
-        return Some(Event::Interrupt { id });
-    }
-    event.take()
-}
-
 /// The interface of the supervisor
+/// The `Call` is submitted along with a message, which is few machine words passed thru registers.
 pub enum Call {
-    /// Invokes a module by spawning an invocation at its entry point
-    /// and blocking until it responds.
+    /// Invokes a module. Continue execute in the module address space
+    /// where it is waiting for events or at its entry point.
+    /// Blocking until the module call `respond`.
     ///
     /// If `share` parameter is true, share memory with a module.
     /// The message must specify the address and size to share.
@@ -107,7 +101,7 @@ pub enum Call {
     /// - `arg`: A small argument passed to the invoked module.
     Invoke { slot: u16, share: bool, arg: u16 },
     /// Sends a response to the caller that invoked this module.
-    /// The current thread cease to exist and execution continues at caller's point.
+    /// Never returns, the current thread cease to exist and execution continues at caller's point.
     ///
     /// Accept or reject the shared memory.
     /// The message must specify the address where to put the shared memory.
@@ -117,14 +111,13 @@ pub enum Call {
     /// - `accept`: Whether accept or reject shared memory.
     /// - `code`: The response error code to send back.
     Respond { inv: u16, accept: bool, code: u16 },
-    /// Spawns a thread within the current module.
+    /// Spawns a thread. This will create a new module from the same ELF file.
     /// The new thread will run in the specified entry point with the given message.
     ///
     /// # Parameters
     /// - `entry`: The entry point of the new thread.
     Spawn { entry: usize },
-    /// Exit the current thread. Never returns, the thread cease to exist.
-    /// No message required.
+    /// Exit the current thread with the given message. Never returns, the thread cease to exist.
     Exit,
     /// Blocks until the specified thread completes execution and returns a message.
     /// No message required.
@@ -141,7 +134,7 @@ pub enum Call {
     /// Unmap the physical memory from the virtual address space of the thread.
     /// The message must provide the virtual address and the number of pages.
     Unmap,
-    /// Wait an external interrupt. The message may provide a timeout. Privileged.
+    /// Wait an external interrupt. The message may provide a timeout.
     Wait,
 }
 

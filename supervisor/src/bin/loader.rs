@@ -116,7 +116,6 @@ extern "C" fn inner(
             ctx = const { 0x_ffff_ffc0_0020_0000_usize },
         }
     }
-    // sbi::set_timer(cpu::csrr!("time") + 0x10000000).unwrap_or_default();
 }
 
 fn init_memory(
@@ -202,8 +201,8 @@ fn init_memory(
     // 0x0000_0040_0000_0000 .. 0xffff_ffc0_0000_0000 (unavailable)
     // 0xffff_ffc0_0000_0000 .. 0xffff_ffc0_0020_0000 (2 MiB, per cpu, window, stack)
     // 0xffff_ffc0_0020_0000 .. 0xffff_ffc0_0040_0000 (2 MiB, per thread, registers)
-    // 0xffff_ffc0_0040_0000 .. 0xffff_ffc0_0060_0000 (2 MiB, scheduler)
-    // 0xffff_ffc0_0060_0000 .. 0xffff_ffc0_006e_0000 (896 kiB, global, supervisor image)
+    // 0xffff_ffc0_0040_0000 .. 0xffff_ffc0_0060_0000 (2 MiB, global, scheduler)
+    // 0xffff_ffc0_0060_0000 .. 0xffff_ffc0_006e_0000 (896 kiB, global, context and supervisor image)
     // 0xffff_ffc0_006e_0000 .. 0xffff_ffc0_0100_0000 (9 MiB 128 kiB, global, llfree allocator)
     // 0xffff_ffc0_0100_0000 .. 0xffff_ffc0_4000_0000 (1008 MiB, unused)
     // 0xffff_ffc0_4000_0000 .. 0x0000_0040_0000_0000 (511 GiB, user)
@@ -218,6 +217,7 @@ fn init_memory(
     // loop
     l2[0o000] = (l2.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
 
+    // STATUS: size of the kernel stack is 1 page, increase if needed
     let stack = gfp();
     l2[0o777] = (stack.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
 

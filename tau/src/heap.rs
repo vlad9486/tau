@@ -8,18 +8,19 @@ use core::{
 
 use super::ubi::Ubi;
 
+// STATUS: starts at 0x0100_0000 = 16 MiB
 #[global_allocator]
-static ALLOCATOR: Bump = Bump::new();
+static ALLOCATOR: Bump = Bump::new(0x0100_0000);
 
-// TODO: proper allocator
+// TODO: need proper allocator
 struct Bump {
     base: AtomicUsize,
 }
 
 impl Bump {
-    const fn new() -> Self {
+    const fn new(offset: usize) -> Self {
         Bump {
-            base: AtomicUsize::new(0x0100_0000),
+            base: AtomicUsize::new(offset),
         }
     }
 

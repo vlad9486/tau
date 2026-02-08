@@ -17,7 +17,7 @@ pub struct Shared {
     pub sdio_task: Option<sdio::Task>,
     pub sdio_done: Option<sdio::Task>,
     pub terminate: bool,
-    pub deadline: [Option<Deadline>; 8],
+    deadline: [Option<Deadline>; 8],
     freq: u128,
 }
 
