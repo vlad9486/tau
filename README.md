@@ -36,13 +36,14 @@ You may be missing some build time dependencies. It needs `git`, `make`, `clang`
 
 ## Build for Vision Five 2
 
-To build the OS image, build the builder:
+To build the OS image, build the builder from corresponding repository:
 
 ```
 cargo install --path tools --bin tau-builder
 ```
 
-Clone u-boot and OpenSBI git repositories into `riscv/target` directory and build them.
+Run this command to clone u-boot and OpenSBI git repositories into `riscv/target` directory
+and build them.
 
 ```
 tau-builder build-firmware
@@ -56,7 +57,7 @@ Then it will create GPT on the device and write u-boot and OpenSBI on the corres
 tau-builder format --path=/dev/sda
 ```
 
-Build and write the tau image on the SD card:
+Build and write the tau image on the SD card by the following:
 
 ```
 tau-builder build-tau
@@ -66,3 +67,10 @@ tau-builder update --path=/dev/disk/by-partlabel/starfive_visionfive_2_u-boot
 ## Build for another computer
 
 You need the device tree and OpenSBI version for the specific computer.
+
+## Qemu
+
+```
+tau-builder build-tau --qemu
+qemu-system-riscv64 -M virt -smp 4 -m 4G -nographic -bios target/opensbi-qemu/build/platform/generic/firmware/fw_payload.elf
+```
