@@ -35,18 +35,21 @@ async fn run(shared: &UnsafeCell<Shared>) {
     let phys = 0x7000_1000_u32;
     let base = tau::to_size(phys);
     let page = tau::Area::new(base, 0x1000).r::<MaybeUninit<[[u8; 0x10]; 0x100]>>();
-    read(shared, phys, 0x600).await;
 
-    unsafe { &mut *shared.get() }.write(format_args!("___page: 0x600"));
-    let dma_data = unsafe { page.assume_init() };
-    for chunk in dma_data.iter() {
-        let [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] =
-            unsafe { (ptr::from_ref(chunk)).read_volatile() };
-        unsafe { &mut *shared.get() }.write(format_args!(
-            "\
-            {a:02x} {b:02x} {c:02x} {d:02x} {e:02x} {f:02x} {g:02x} {h:02x} \
-            {i:02x} {j:02x} {k:02x} {l:02x} {m:02x} {n:02x} {o:02x} {p:02x}"
-        ));
+    if unsafe { &*shared.get() }.sdio_task.is_some() {
+        read(shared, phys, 0x600).await;
+
+        unsafe { &mut *shared.get() }.write(format_args!("___page: 0x600"));
+        let dma_data = unsafe { page.assume_init() };
+        for chunk in dma_data.iter() {
+            let [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] =
+                unsafe { (ptr::from_ref(chunk)).read_volatile() };
+            unsafe { &mut *shared.get() }.write(format_args!(
+                "\
+                {a:02x} {b:02x} {c:02x} {d:02x} {e:02x} {f:02x} {g:02x} {h:02x} \
+                {i:02x} {j:02x} {k:02x} {l:02x} {m:02x} {n:02x} {o:02x} {p:02x}"
+            ));
+        }
     }
 
     let mut cmd = [0; 8];

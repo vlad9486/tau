@@ -73,7 +73,8 @@ extern "C" fn main(
             .find_int(|name| name == "reg")
             .and_then(|x| x.first().copied().map(u32::to_be))
             .unwrap_or(0xffff);
-        if props.find_str(|name| name == "status") == Some("okay") {
+        let status = props.find_str(|name| name == "status");
+        if status.is_some_and(|s| s.starts_with("okay")) {
             cpu.contexts = 2;
         } else {
             cpu.contexts = 1;

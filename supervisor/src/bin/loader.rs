@@ -134,7 +134,8 @@ fn init_memory(
     let mut memory_size = 0;
     for (props, path) in dtb.iter() {
         if path.len() == 3 && path[1] == "cpus" && path[2].starts_with("cpu@") {
-            cores += usize::from(props.find_str(|name| name == "status") == Some("okay"));
+            let status = props.find_str(|name| name == "status");
+            cores += usize::from(status.is_some_and(|s| s.starts_with("okay")));
         } else if let Some([_, _, size_hi, size_lo]) = props.find_int(|name| name == "reg")
             && path.len() == 2
             && path[1].starts_with("memory@")
