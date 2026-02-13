@@ -112,7 +112,7 @@ pub struct Tasks {
 
 impl Tasks {
     pub fn new(
-        dtb: tau::Dtb<'_>,
+        dtb: &tau::Dtb<'_>,
         plic: &PlicPriority,
         plic_e: &PlicEnable,
         context_id: usize,

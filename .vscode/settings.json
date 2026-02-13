@@ -51,6 +51,7 @@
         "sbss",
         "sdata",
         "partlabel",
+        "phandle",
         // elf,
         "ehdr",
         "vaddr",

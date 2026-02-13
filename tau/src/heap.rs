@@ -31,8 +31,8 @@ impl Bump {
 }
 
 pub struct Area {
-    base: usize,
-    len: usize,
+    pub base: usize,
+    pub len: usize,
 }
 
 impl Area {

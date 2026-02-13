@@ -136,11 +136,11 @@ fn init_memory(
         if path.len() == 3 && path[1] == "cpus" && path[2].starts_with("cpu@") {
             let status = props.find_str(|name| name == "status");
             cores += usize::from(status.is_some_and(|s| s.starts_with("okay")));
-        } else if let Some([_, _, size_hi, size_lo]) = props.find_int(|name| name == "reg")
+        } else if let Some(area) = props.find_reg()
             && path.len() == 2
             && path[1].starts_with("memory@")
         {
-            memory_size = ((size_hi.to_be() as usize) << 32) + (size_lo.to_be() as usize);
+            memory_size = area.len;
         }
     }
     if cores < 2 || memory_size < 0x1000000 * cores {

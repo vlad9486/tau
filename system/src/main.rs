@@ -56,59 +56,61 @@ extern "C" fn main(
         tau::Ubi::respond(inv, 1, []);
     };
 
-    #[derive(Clone, Copy, Debug)]
-    struct CpuInfo {
-        id: u16,
-        contexts: u8,
-    }
-
-    // TODO: allocate cpu map in heap in vector
-    let mut cpus = [CpuInfo { id: 0, contexts: 0 }; 64];
-    let cpus_it = dtb
+    let Some((cpu_props, cpu_path)) = dtb
         .iter()
         .filter(|(_, path)| path[1] == "cpus" && path[2].starts_with("cpu@") && path.len() == 3)
-        .zip(cpus.iter_mut());
-    for ((props, _), cpu) in cpus_it {
-        let id = props
-            .find_int(|name| name == "reg")
-            .and_then(|x| x.first().copied().map(u32::to_be))
-            .unwrap_or(0xffff);
-        let status = props.find_str(|name| name == "status");
-        if status.is_some_and(|s| s.starts_with("okay")) {
-            cpu.contexts = 2;
-        } else {
-            cpu.contexts = 1;
-        }
-        cpu.id = id as u16;
-    }
+        .find_map(|(props, path)| {
+            let reg = props.find_int(|name| name.starts_with("reg"))?;
+            let reg = reg.first().copied().map(u32::to_be)?;
+            (tau::to_size(reg) == hart_id).then_some((props, path))
+        })
+    else {
+        tau::Ubi::respond(inv, 2, []);
+    };
+    let Some((cpu_interrupt_props, _)) = dtb.iter().find(|(_, path)| {
+        path.len() == 4 && path[2] == cpu_path[2] && path[3].starts_with("interrupt-controller")
+    }) else {
+        tau::Ubi::respond(inv, 3, []);
+    };
+    let Some(handle) = cpu_interrupt_props
+        .find_int(|name| name.starts_with("phandle"))
+        .and_then(|x| x.first().copied().map(u32::to_be))
+    else {
+        tau::Ubi::respond(inv, 4, []);
+    };
 
-    let context_id = cpus
-        .iter()
-        .take(hart_id + 1)
-        .map(|cpu| usize::from(cpu.contexts))
-        .sum::<usize>()
-        - 1;
+    // STATUS: can use it
+    let _ = (cpu_props, cpu_interrupt_props);
 
     let Some(plic_config) = dtb.iter().find_map(|(props, path)| {
         (path[1] == "soc" && path[2].starts_with("plic")).then_some(props)
     }) else {
-        tau::Ubi::respond(inv, 1, []);
+        tau::Ubi::respond(inv, 5, []);
     };
 
-    let Some([addr_hi, addr_lo, _, _]) = plic_config.find_int(|name| name == "reg") else {
-        tau::Ubi::respond(inv, 1, []);
+    let Some(ie) = plic_config.find_int(|name| name.starts_with("interrupts-extended")) else {
+        tau::Ubi::respond(inv, 6, []);
     };
-    let addr = (tau::to_size(addr_hi.to_be()) << 32) + tau::to_size(addr_lo.to_be());
+    let Some(context_id) = ie
+        .chunks(2)
+        .position(|sl| sl[0].to_be() == handle && sl[1].to_be() == 9)
+    else {
+        tau::Ubi::respond(inv, 7, []);
+    };
 
-    let plic = tau::Area::new(addr, 0x2000).r();
+    let Some(plic_area) = plic_config.find_reg() else {
+        tau::Ubi::respond(inv, 8, []);
+    };
 
-    let plic_e = tau::Area::new(addr + plic::enable_offset(context_id), 0x1000).r();
+    let plic = tau::Area::new(plic_area.base, 0x2000).r();
 
-    let plic_ctx =
-        tau::Area::new(addr + plic::context_offset(context_id), 0x1000).r::<plic::PlicCtx>();
+    let plic_e = tau::Area::new(plic_area.base + plic::enable_offset(context_id), 0x1000).r();
+
+    let plic_ctx = tau::Area::new(plic_area.base + plic::context_offset(context_id), 0x1000)
+        .r::<plic::PlicCtx>();
     plic_ctx.set_threshold(plic::InterruptPriority::_0);
 
-    scheduler::Tasks::new(dtb, plic, plic_e, context_id).run(plic_ctx);
+    scheduler::Tasks::new(&dtb, plic, plic_e, context_id).run(plic_ctx);
 
     tau::Ubi::respond(inv, 0, [])
 }
