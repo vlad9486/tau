@@ -91,16 +91,6 @@ impl State {
         self.dma_desc[5].write(0x800_u32);
         self.dma_desc[6].write(phys + 0x800);
         self.dma_desc[7].write(0_u32);
-        // self.dma_desc[..8].clone_from_slice(&[
-        //     0b1000_0000_0000_0000_0000_0000_0001_1010,
-        //     0x800,
-        //     phys,
-        //     self.dma_phys + 0x10,
-        //     0b1000_0000_0000_0000_0000_0000_0001_0100,
-        //     0x800,
-        //     phys + 0x800,
-        //     0,
-        // ]);
         tau::asm::fence();
         reg.desc_base.write(self.dma_phys);
         reg.bus_mod.write(reg.bus_mod.read() | (1 << 1) | (1 << 7));

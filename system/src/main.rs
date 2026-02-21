@@ -15,6 +15,7 @@ mod plic;
 
 mod uart;
 mod sdio;
+mod ethernet;
 mod user;
 
 #[cfg(not(test))]

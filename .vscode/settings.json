@@ -1,5 +1,5 @@
 {
-    "rust-analyzer.check.command": "clippy",
+    // "rust-analyzer.check.command": "clippy",
     "rust-analyzer.cargo.extraArgs": [
         "--target=riscv64imac-unknown-none-elf"
     ],
@@ -11,6 +11,7 @@
         "vmem",
         "llfree",
         "memoffset",
+        "smallvec",
         "nanos",
         "NVRAM",
         "Optane",

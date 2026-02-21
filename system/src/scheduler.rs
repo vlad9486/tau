@@ -1,8 +1,10 @@
 use core::cell::UnsafeCell;
 use core::{hint, fmt, num::NonZeroUsize, time::Duration};
 
+use smallvec::SmallVec;
+
 use super::plic::{PlicPriority, PlicEnable, PlicCtx, InterruptNumber, InterruptId, InterruptPriority};
-use super::{uart, sdio, user};
+use super::{uart, sdio, ethernet, user};
 
 pub trait DriverState
 where
@@ -92,11 +94,14 @@ impl<S> Driver<S> {
     }
 }
 
-fn handle<S>(driver: &mut Option<Driver<S>>, shared: &mut Shared, id: &InterruptId)
-where
-    S: DriverState,
+fn handle<'a, S>(
+    driver: impl IntoIterator<Item = &'a mut Driver<S>>,
+    shared: &mut Shared,
+    id: &InterruptId,
+) where
+    S: DriverState + 'a,
 {
-    if let Some(driver) = driver {
+    for driver in driver {
         let num = id.as_ref().get();
         if driver.int.contains(&num) {
             let id = num as u16;
@@ -108,6 +113,7 @@ where
 pub struct Tasks {
     uart: Option<Driver<uart::State>>,
     sdio: Option<Driver<sdio::State>>,
+    ethernet: SmallVec<[Driver<ethernet::State>; 4]>,
 }
 
 impl Tasks {
@@ -133,7 +139,21 @@ impl Tasks {
                     sdio::State::new(config)
                 })
             });
-        Tasks { uart, sdio }
+        let ethernet = dtb
+            .iter()
+            .filter(|(_, path)| path[1] == "soc" && path[2].starts_with("ethernet@"))
+            .filter_map(|(config, _)| {
+                Driver::parse_dtb(config, plic, plic_e, context_id, |config| {
+                    ethernet::State::new(config)
+                })
+            })
+            .collect();
+
+        Tasks {
+            uart,
+            sdio,
+            ethernet,
+        }
     }
 
     pub fn run(&mut self, plic: &PlicCtx) {
@@ -158,6 +178,9 @@ impl Tasks {
         if let Some(driver) = self.sdio.as_mut() {
             driver.state.handle(shared, tau::Event::Timeout);
         }
+        for driver in self.ethernet.as_mut() {
+            driver.state.handle(shared, tau::Event::Timeout);
+        }
 
         while !(shared.terminate && shared.uart_out.is_empty()) {
             let deadline = shared
@@ -171,8 +194,9 @@ impl Tasks {
                 tau::Event::Invocation { .. } => continue,
                 tau::Event::Interrupt { .. } => {
                     while let Some(id) = plic.next() {
-                        handle(&mut self.uart, shared, &id);
-                        handle(&mut self.sdio, shared, &id);
+                        handle(self.uart.as_mut(), shared, &id);
+                        handle(self.sdio.as_mut(), shared, &id);
+                        handle(self.ethernet.iter_mut(), shared, &id);
 
                         if shared.sdio_done.is_some() || !shared.uart_in.is_empty() {
                             user.step();
