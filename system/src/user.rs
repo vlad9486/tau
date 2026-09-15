@@ -31,12 +31,12 @@ impl<'a> State<'a> {
 }
 
 async fn run(shared: &UnsafeCell<Shared>) {
-    // TODO: allocator for DMA
-    let phys = 0x7000_1000_u32;
-    let base = tau::to_size(phys);
-    let page = tau::Area::new(base, 0x1000).r::<MaybeUninit<[[u8; 0x10]; 0x100]>>();
-
     if unsafe { &*shared.get() }.sdio_task.is_some() {
+        // TODO: allocator for DMA
+        let phys = 0x7000_1000_u32;
+        let base = tau::to_size(phys);
+        let page = tau::Area::new(base, 0x1000).r::<MaybeUninit<[[u8; 0x10]; 0x100]>>();
+
         read(shared, phys, 0x600).await;
 
         unsafe { &mut *shared.get() }.write(format_args!("___page: 0x600"));

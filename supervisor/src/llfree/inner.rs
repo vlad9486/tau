@@ -417,7 +417,7 @@ impl LLFree<'_> {
     /// Reserve a new tree and allocate the frame in it
     fn reserve_and_get(&self, core: usize, flags: Flags, old: LocalTree) -> Result<usize, Error> {
         // Try reserve new tree
-        let preferred = self.local[core].preferred(flags.into());
+        let preferred = unsafe { self.local.get_unchecked(core) }.preferred(flags.into());
         let start = if old.present() {
             old.frame() / TREE_FRAMES
         } else {

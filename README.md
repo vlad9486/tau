@@ -32,14 +32,15 @@ Tau is currently under development and not yet ready for general use.
 apt install -y make clang llvm lld device-tree-compiler u-boot-tools
 ```
 
-You may be missing some build time dependencies. It needs `git`, `make`, `clang` and `riscv64-gnu-toolchain-elf-bin` to build u-boot and OpenSBI.
+You may be missing some build time dependencies. It needs at least `git`, `make`, `bison`, `flex`, `clang` and `riscv64-linux-gnu-gcc` to build u-boot and OpenSBI.
 
 ## Build for Vision Five 2
 
-To build the OS image, build the builder from corresponding repository:
+The builder is not part of this repository, `tau-builder` crate is required to build for Vision Five 2.
+Install the builder from that separate repository.
 
 ```
-cargo install --path tools --bin tau-builder
+cargo install --path . --bin tau-builder
 ```
 
 Run this command to clone u-boot and OpenSBI git repositories into `riscv/target` directory
@@ -54,7 +55,7 @@ the command will destroy the data contained on the first few megabytes of the di
 Then it will create GPT on the device and write u-boot and OpenSBI on the corresponding partitions.
 
 ```
-tau-builder format --path=/dev/sda
+tau-builder format --path=/dev/sdX
 ```
 
 Build and write the tau image on the SD card by the following:

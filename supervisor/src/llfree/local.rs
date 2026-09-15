@@ -85,7 +85,7 @@ impl LocalTree {
 
     pub fn set_start(self, frame: usize, force: bool) -> Option<Self> {
         if force || (self.present() && self.frame() / TREE_FRAMES == frame / TREE_FRAMES) {
-            Some(self.with_frame(frame))
+            Some(unsafe { self.with_frame_checked(frame).unwrap_unchecked() })
         } else {
             None
         }

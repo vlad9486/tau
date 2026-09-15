@@ -27,6 +27,6 @@ nightly = []
 [dependencies]
 panic-never = { version = "0.1.0", optional = true }
 memoffset = { version = "0.9.1" }
-bitfield-struct = { version = "0.12.1" }
+bitfield-struct = { version = "0.13.0" }
 elf = { version = "0.8.0", default-features = false }
 tau = { path = "../tau" }
