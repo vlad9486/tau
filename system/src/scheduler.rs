@@ -18,6 +18,9 @@ pub struct Shared {
     pub uart_in: uart::Buffer,
     pub sdio_task: Option<sdio::Task>,
     pub sdio_done: Option<sdio::Task>,
+    // One producer and one outstanding TX per port. Consume done before reuse.
+    pub ethernet_task: [Option<ethernet::TxTask>; 2],
+    pub ethernet_done: [Option<ethernet::TxDone>; 2],
     pub terminate: bool,
     deadline: [Option<Deadline>; 8],
     freq: u128,
@@ -162,6 +165,8 @@ impl Tasks {
             uart_in: uart::Buffer::default(),
             sdio_task: None,
             sdio_done: None,
+            ethernet_task: [None; 2],
+            ethernet_done: [None; 2],
             terminate: false,
             deadline: [None; 8],
             // TODO: take from dts
@@ -225,9 +230,39 @@ impl Tasks {
                                 }
                             }
                             2 => user.step(),
+                            3 | 4 => {
+                                for driver in self.ethernet.as_mut() {
+                                    if driver.state.timer_issuer() == issuer {
+                                        driver.state.handle(shared, tau::Event::Timeout);
+                                    }
+                                }
+                            }
                             _ => (),
                         }
                     }
+                }
+            }
+
+            // A completion can immediately cause user.rs to submit on the
+            // other port. Drain those exchanges before sleeping, including
+            // synchronous errors on absent/not-ready ports. Bound the work so
+            // an unconsumed completion cannot starve interrupt processing.
+            for _ in 0..2 {
+                for port in 0..2 {
+                    if let Some(driver) = self.ethernet.iter_mut().find(|driver| {
+                        driver.state.timer_issuer() == 3 + port as u8
+                    }) {
+                        driver.state.submit(shared);
+                    } else if shared.ethernet_done[port].is_none()
+                        && shared.ethernet_task[port].take().is_some()
+                    {
+                        shared.ethernet_done[port] = Some(Err(ethernet::TxError::Failed));
+                    }
+                }
+                if shared.ethernet_done.iter().any(Option::is_some) {
+                    user.step();
+                } else {
+                    break;
                 }
             }
 
