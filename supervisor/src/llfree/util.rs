@@ -5,10 +5,23 @@ use core::{
     ops::{Deref, DerefMut},
 };
 
-/// Align v down to previous `align` (power of two!)
-#[inline(always)]
-pub const fn align_down(v: usize, align: usize) -> usize {
-    (v / align) * align
+/// Retries the condition n times and returns if it was successfull.
+/// This pauses the CPU between retries if possible.
+pub fn spin_wait(n: usize, mut cond: impl FnMut() -> bool) -> bool {
+    for _ in 0..n {
+        if cond() {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
+}
+
+/// Calculate the size of a slice of T, respecting any alignment constraints
+///
+/// Note: This might not be correct for all types, but it is for the ones we use.
+pub const fn size_of_slice<T>(len: usize) -> Option<usize> {
+    len.checked_mul(size_of::<T>().next_multiple_of(align_of::<T>()))
 }
 
 /// Cache alignment for T

@@ -1,444 +1,698 @@
 //! Lower allocator implementations
 
-use core::hint;
-use core::sync::atomic::AtomicU16;
+use core::num::{NonZero, NonZeroUsize};
+use core::ops::Deref;
+use core::sync::atomic::AtomicU32;
+use core::slice;
 
-use super::atomic::{Atom, AtomArray, Atomic};
-use super::util::{align_down, Align};
-use super::{Error, Init, HUGE_FRAMES, HUGE_ORDER, RETRIES, TREE_FRAMES, TREE_HUGE};
+use super::id::{RowId, TreeId, FrameId, HugeId};
 
-const CHILDREN: usize = HUGE_FRAMES / super::bitfield::Bitfield::<1>::ENTRY_BITS;
-pub type Bitfield = super::bitfield::Bitfield<CHILDREN>;
+use super::atomic::{Atom, Atomic};
+use super::bitfield::Bitfield;
+use super::util::{Align, size_of_slice, spin_wait};
+use super::{
+    Error, HUGE_FRAMES, HUGE_ORDER, MAX_FRAMES, MAX_ORDER, RETRIES, Stats, TREE_FRAMES, TREE_HUGE,
+};
+
+const _: () = assert!(Bitfield::LEN == HUGE_FRAMES);
+
+pub struct Allocator {
+    frames: NonZeroUsize,
+    ptr: *mut u8,
+    metadata: Metadata,
+}
+
+impl Allocator {
+    /// Size in bytes needed to store the allocator metadata.
+    ///
+    /// Returns `None` when `frames` exceeds [`MAX_FRAMES`].
+    pub const fn expected_size(frames: NonZeroUsize) -> Option<usize> {
+        match Metadata::new(frames) {
+            Some(metadata) => Some(metadata.size()),
+            None => None,
+        }
+    }
+
+    /// # Safety
+    /// `ptr` must refer to a single readable, writable allocation of at least
+    /// [`Self::expected_size`] bytes. All metadata bytes must be initialized
+    /// (zeroed storage is sufficient), and the storage must remain valid until
+    /// this allocator and every borrowed `Lower` have been dropped.
+    ///
+    /// During that time, access the storage only through this allocator. In
+    /// particular, do not construct another allocator over overlapping storage
+    /// or mutate or deallocate the backing buffer while this one is alive.
+    /// Before allocation operations, call [`Self::reserve_all`] or
+    /// [`Self::free_all`], unless the storage already holds valid metadata from
+    /// a previous allocator with exactly the same frame count and layout.
+    ///
+    /// Null or misaligned pointers and unsupported sizes return `None`.
+    pub unsafe fn new(frames: NonZeroUsize, ptr: *mut u8) -> Option<Self> {
+        let metadata = Metadata::new(frames)?;
+        if ptr.is_null()
+            || !ptr.addr().is_multiple_of(align_of::<Align>())
+            || ptr.addr().checked_add(metadata.size()).is_none()
+        {
+            return None;
+        }
+
+        Some(Allocator {
+            frames,
+            ptr,
+            metadata,
+        })
+    }
+
+    /// Reset all managed frames to free. The caller must have relinquished all
+    /// outstanding frame allocations before using them again through this allocator.
+    pub fn free_all(&mut self) {
+        self.reset(true);
+    }
+
+    /// Reset all managed frames to reserved; subranges can then be freed with `put`.
+    pub fn reserve_all(&mut self) {
+        self.reset(false);
+    }
+
+    fn reset(&mut self, free: bool) {
+        let m = self.metadata;
+        // The constructor's contract keeps this storage valid and exclusive.
+        // &mut self excludes every borrowed Lower during the reset.
+        let bitfields = unsafe {
+            slice::from_raw_parts_mut(self.ptr.cast::<Align<Bitfield>>(), m.bitfield_len)
+        };
+        let children = unsafe {
+            slice::from_raw_parts_mut(
+                self.ptr.add(m.bitfield_size).cast::<Align<Table>>(),
+                m.table_len,
+            )
+        };
+
+        // Initialize padded entries too, but never expose padding as free frames.
+        for (table_i, table) in children.iter().enumerate() {
+            for (entry_i, entry) in table.iter().enumerate() {
+                let frame = table_i * TREE_FRAMES + entry_i * Bitfield::LEN;
+                let count = self.frames.get().saturating_sub(frame).min(Bitfield::LEN);
+                entry.store(if free {
+                    HugeEntry::new_with(count)
+                } else if count == Bitfield::LEN {
+                    HugeEntry::new_huge()
+                } else {
+                    HugeEntry::new_with(0)
+                });
+            }
+        }
+
+        for (i, bitfield) in bitfields.iter().enumerate() {
+            let count = (self.frames.get() - i * Bitfield::LEN).min(Bitfield::LEN);
+            // Huge reservations use the counter sentinel and an empty bitmap.
+            // Partial final huge frames reserve their padding in the bitmap.
+            bitfield.fill(count != Bitfield::LEN);
+            if free {
+                bitfield.set(FrameId(0)..FrameId(count), false);
+            }
+        }
+    }
+
+    /// Consume the owner and hand off permanently allocated metadata.
+    ///
+    /// # Safety
+    /// The backing storage must remain valid and writable for the rest of the
+    /// program. After this handoff, access it only through the returned `Lower`;
+    /// do not reset it or construct another allocator over the same storage.
+    pub unsafe fn into_lower(self) -> Lower<'static> {
+        // The caller guarantees permanent storage and exclusive handoff.
+        unsafe { self.lower_with_lifetime() }
+    }
+
+    /// Borrow the metadata, preventing resets while the returned view is in use.
+    pub fn as_lower(&self) -> Lower<'_> {
+        // The constructor guarantees valid storage for this borrow.
+        unsafe { self.lower_with_lifetime() }
+    }
+
+    /// # Safety
+    /// The backing storage must remain valid for `'a`, with access restricted
+    /// to this allocator and its shared views. No resets may occur during `'a`.
+    unsafe fn lower_with_lifetime<'a>(&self) -> Lower<'a> {
+        let m = self.metadata;
+        let bitfields =
+            unsafe { slice::from_raw_parts(self.ptr.cast::<Align<Bitfield>>(), m.bitfield_len) };
+        let children = unsafe {
+            slice::from_raw_parts(
+                self.ptr.add(m.bitfield_size).cast::<Align<Table>>(),
+                m.table_len,
+            )
+        };
+
+        Lower {
+            len: self.frames.get(),
+            bitfields,
+            children,
+        }
+    }
+}
+
+unsafe impl Send for Allocator {}
+
+unsafe impl Sync for Allocator {}
 
 /// Lower-level frame allocator.
 ///
 /// This level implements the actual allocation/free operations.
-/// Each allocation/free is limited to a chunk of [LowerAlloc::N] frames.
+/// Each allocation/free is limited to a chunk of [`MAX_ORDER`] frames.
 ///
-/// Here the bitfields are 512 bit large -> strong focus on huge frames.
+/// Here the bitfields are [`HUGE_FRAMES`] bit large -> strong focus on huge frames.
 /// Upon that is a table for each tree, with an entry per bitfield.
 ///
-/// The parameter `HP` configures the number of table entries (huge frames per tree).
+/// The parameter [`TREE_HUGE`] configures the number of table entries (huge frames per tree).
 /// It has to be a multiple of 2!
 ///
-/// ## Memory Layout
-/// **persistent:**
-/// ```text
-/// NVRAM: [ Frames | Bitfields | Tables | Zone ]
-/// ```
-/// **volatile:**
-/// ```text
-/// RAM: [ Frames ], Bitfields and Tables are allocated elsewhere
-/// ```
-#[derive(Default, Debug)]
+/// Metadata is volatile and stored separately from the managed frames.
+/// There is no crash recovery or persistent-metadata support.
+#[derive(Debug)]
 pub struct Lower<'a> {
     len: usize,
     bitfields: &'a [Align<Bitfield>],
-    children: &'a [Align<[Atom<HugeEntry>; TREE_HUGE]>],
+    children: &'a [Align<Table>],
 }
 
-const _: () = assert!(TREE_HUGE < (1 << (u16::BITS - HUGE_ORDER)));
+const _: () = assert!(TREE_HUGE < (1 << (u16::BITS as usize - HUGE_ORDER)));
+
+/// Size of the dynamic metadata
+#[derive(Clone, Copy)]
+struct Metadata {
+    bitfield_len: usize,
+    bitfield_size: usize,
+    table_len: usize,
+    size: usize,
+}
+
+impl Metadata {
+    const fn new(frames: NonZero<usize>) -> Option<Self> {
+        let frames = frames.get();
+        if frames > MAX_FRAMES {
+            return None;
+        }
+        let bitfield_len = frames.div_ceil(Bitfield::LEN);
+        let table_len = frames.div_ceil(TREE_FRAMES);
+        // These sizes also respect cache-line alignment.
+        let bitfield_size = match size_of_slice::<Bitfield>(bitfield_len) {
+            Some(size) => size,
+            None => return None,
+        };
+        let table_size = match size_of_slice::<Align<Table>>(table_len) {
+            Some(size) => size,
+            None => return None,
+        };
+        let size = match bitfield_size.checked_add(table_size) {
+            Some(size) if size <= isize::MAX as usize => size,
+            _ => return None,
+        };
+        Some(Self {
+            bitfield_len,
+            bitfield_size,
+            table_len,
+            size,
+        })
+    }
+
+    const fn size(&self) -> usize {
+        self.size
+    }
+}
 
 impl<'a> Lower<'a> {
-    /// Create a new lower allocator.
-    pub fn new(
-        frames: usize,
-        init: Init,
-        bitfields: &'a [Align<Bitfield>],
-        children: &'a mut [Align<[Atom<HugeEntry>; TREE_HUGE]>],
-    ) -> Result<Self, Error> {
-        // TODO: refactor this
-        match init {
-            Init::FreeAll => Self::free_all(frames, bitfields, &mut *children),
-            Init::AllocAll => Self::reserve_all(frames, bitfields, &mut *children),
-            Init::None => {} // skip, assuming everything is valid
+    fn allocation_size(order: usize) -> Result<usize, Error> {
+        if order > MAX_ORDER {
+            return Err(Error::OrderNotSuported);
         }
+        1usize
+            .checked_shl(order as u32)
+            .ok_or(Error::OrderNotSuported)
+    }
 
-        Ok(Lower {
-            len: frames,
-            bitfields,
-            children: &*children,
-        })
+    fn validate_range(&self, frame: FrameId, order: usize) -> Result<usize, Error> {
+        let size = Self::allocation_size(order)?;
+        if !frame.is_aligned(order)
+            || frame
+                .0
+                .checked_add(size)
+                .is_none_or(|end| end > self.frames())
+        {
+            Err(Error::Address)
+        } else {
+            Ok(size)
+        }
+    }
+
+    fn children(&self, tree: TreeId) -> Result<&Table, Error> {
+        self.children
+            .get(tree.0)
+            .map(Deref::deref)
+            .ok_or(Error::InvalidArgument)
+    }
+
+    fn bitfield(&self, huge: HugeId) -> Result<&Bitfield, Error> {
+        self.bitfields
+            .get(huge.0)
+            .map(Deref::deref)
+            .ok_or(Error::InvalidArgument)
     }
 
     pub fn frames(&self) -> usize {
         self.len
     }
 
-    fn bitfield(&self, frame: usize) -> &Bitfield {
-        unsafe { self.bitfields.get_unchecked(frame / Bitfield::LEN) }
+    /// Allocate an aligned block of `1 << order` frames, searching all trees.
+    ///
+    /// Starts at `core_id % tree_count` and wraps around, without per-CPU
+    /// reservations or additional metadata. Under concurrent updates, `Error::Memory` does
+    /// not guarantee that the allocator is globally exhausted.
+    pub fn alloc(&self, core_id: usize, order: usize) -> Result<FrameId, Error> {
+        Self::allocation_size(order)?;
+        let count = self.children.len();
+        let first = core_id.checked_rem(count).ok_or(Error::Memory)?;
+        for tree in (first..count).chain(0..first) {
+            let start = TreeId(tree).as_row().ok_or(Error::InvalidArgument)?;
+            match self.get(start, order) {
+                Err(Error::Memory) => {}
+                result => return result,
+            }
+        }
+        Err(Error::Memory)
     }
 
-    fn child(&self, frame: usize) -> &[Atom<HugeEntry>; TREE_HUGE] {
-        unsafe { self.children.get_unchecked(frame / TREE_FRAMES) }
-    }
+    /// Try allocating a new `frame` in the [`TREE_FRAMES`] sized chunk at `start`.
+    ///
+    /// Returns the allocated frame.
+    pub fn get(&self, start: RowId, order: usize) -> Result<FrameId, Error> {
+        let size = Self::allocation_size(order)?;
+        if start.0 >= self.frames().div_ceil(super::BITFIELD_ROW) {
+            return Err(Error::InvalidArgument);
+        }
 
-    /// Recovers the data structures for the [LowerAlloc::N] sized chunk at `start`.
-    /// This corrects any data corrupted by a crash.
-    #[allow(unused)]
-    fn recover(&self) {
-        for (i, table) in self.children.iter().enumerate() {
-            for (j, a_entry) in table.iter().enumerate() {
-                let start = i * TREE_FRAMES + j * Bitfield::LEN;
-                let entry = a_entry.load();
+        let tree = start.as_tree();
+        let tree_start = tree.as_frame().ok_or(Error::InvalidArgument)?;
+        let child_off = start.as_huge().child_idx();
+        let children = self.children(tree)?;
 
-                if entry.huge() {
-                    // Check that underlying bitfield is empty
-                    let p = self.bitfield(start).count_zeros();
-                    if p != Bitfield::LEN {
-                        // log::warn!("Invalid L2 start=0x{start:x} i{i}: h != {p}");
-                        self.bitfield(start).fill(false);
+        if order == MAX_ORDER {
+            let table_pair = self.child_pairs(tree)?;
+            for i in 0..TREE_HUGE / 2 {
+                let i = (child_off / 2 + i) % (TREE_HUGE / 2);
+                let table_pair = table_pair.get(i).ok_or(Error::InvalidArgument)?;
+                if let Ok(_) = table_pair.fetch_update(|v| v.map(|v| v.mark_huge())) {
+                    return Ok(FrameId(tree_start.0 + 2 * i * HUGE_FRAMES));
+                }
+            }
+        } else if order == HUGE_ORDER {
+            for i in 0..TREE_HUGE {
+                let i = (child_off + i) % TREE_HUGE;
+                let child = children.get(i).ok_or(Error::InvalidArgument)?;
+                if let Ok(_) = child.fetch_update(|v| v.mark_huge()) {
+                    return Ok(FrameId(tree_start.0 + i * HUGE_FRAMES));
+                }
+            }
+        } else if order <= Bitfield::ORDER {
+            let first_child = tree_start.as_huge();
+
+            for j in 0..TREE_HUGE {
+                let i = (child_off + j) % TREE_HUGE;
+                let child = children.get(i).ok_or(Error::InvalidArgument)?;
+                if let Ok(_) = child.fetch_update(|v| v.dec(size)) {
+                    let bf_i = HugeId(first_child.0 + i);
+                    // start with the bitfield row from the last allocation
+                    if let Ok(offset) = self.bitfield(bf_i)?.set_first_zeros(start, order) {
+                        let base = bf_i.as_frame().ok_or(Error::InvalidArgument)?;
+                        return Ok(FrameId(base.0 + offset.0));
                     }
-                } else {
-                    // Check the bitfield has the same number of zero bits
-                    let zeros = self.bitfield(start).count_zeros();
-                    if entry.free() != zeros {
-                        // log::warn!(
-                        //     "Invalid L2 start=0x{start:x} i{i}: {} != {zeros}",
-                        //     entry.free()
-                        // );
-                        a_entry.store(HugeEntry::new_free(zeros));
+                    if child.fetch_update(|v| v.inc(size)).is_err() {
+                        return Err(Error::UndoFailed);
                     }
                 }
             }
+        } else {
+            return Err(Error::OrderNotSuported);
         }
+        // log::debug!("Nothing found o={order}");
+        Err(Error::Memory)
     }
 
-    /// Return the number of free frames in the tree at `start`.
-    pub fn free_in_tree(&self, start: usize) -> usize {
-        debug_assert!(start < self.frames());
-        let mut free = 0;
-        for entry in self.child(start).iter() {
-            free += entry.load().free();
-        }
-        free
-    }
+    /// Try allocating a specific `frame`.
+    pub fn get_at(&self, frame: FrameId, order: usize) -> Result<(), Error> {
+        let size = self.validate_range(frame, order)?;
 
-    /// Try allocating a new `frame` in the [LowerAlloc::N] sized chunk at `start`.
-    ///
-    /// Returns the allocated frame and whether a new huge frame was fragmented.
-    pub fn get(&self, start: usize, order: u32) -> Result<(usize, bool), Error> {
-        debug_assert!(order <= HUGE_ORDER);
-        debug_assert!(start < self.frames());
+        let i = (frame.as_huge().0) % TREE_HUGE;
+        let children = self
+            .children(frame.as_tree())?
+            .get(i)
+            .ok_or(Error::InvalidArgument)?;
 
-        match order {
-            HUGE_ORDER => self.get_huge(start).map(|f| (f, true)),
-            _ => self.get_small(start, order),
-        }
-    }
-
-    /// Free single frame, returning whether a whole huge page has become free.
-    pub fn put(&self, frame: usize, order: u32) -> Result<bool, Error> {
-        debug_assert!(order <= HUGE_ORDER);
-        debug_assert!(frame < self.frames());
-
-        if order == HUGE_ORDER {
-            let i = (frame / Bitfield::LEN) % TREE_HUGE;
-            let table = self.child(frame);
-
-            if table[i]
-                .compare_exchange(HugeEntry::new_huge(), HugeEntry::new_free(Bitfield::LEN))
-                .is_err()
+        if order == MAX_ORDER {
+            if let Ok(_) = self
+                .child_pairs(frame.as_tree())?
+                .get(i / 2)
+                .ok_or(Error::InvalidArgument)?
+                .fetch_update(|v| v.map(|v| v.mark_huge()))
             {
-                Err(Error::Address)
-            } else {
-                Ok(true)
+                return Ok(());
+            }
+        } else if order == HUGE_ORDER {
+            if let Ok(_) = children.fetch_update(|v| v.mark_huge()) {
+                return Ok(());
+            }
+        } else if order <= Bitfield::ORDER {
+            if let Ok(_) = children.fetch_update(|v| v.dec(size)) {
+                if let Ok(()) = self.bitfield(frame.as_huge())?.toggle(frame, order, false) {
+                    return Ok(());
+                }
+                // Undo decrement
+                if children.fetch_update(|v| v.inc(size)).is_err() {
+                    return Err(Error::UndoFailed);
+                }
             }
         } else {
-            let i = (frame / Bitfield::LEN) % TREE_HUGE;
-            let table = self.child(frame);
+            return Err(Error::OrderNotSuported);
+        }
+        Err(Error::Address)
+    }
 
-            let old = table[i].load();
+    /// Free an allocated range, including a subrange of a huge allocation.
+    ///
+    /// The caller must own the entire range and relinquish it on success.
+    /// Concurrent or repeated frees of overlapping ranges are invalid; errors
+    /// are best-effort diagnostics, not a substitute for tracking ownership.
+    pub fn put(&self, _core_id: usize, frame: FrameId, order: usize) -> Result<(), Error> {
+        let size = self.validate_range(frame, order)?;
+
+        let i = frame.as_huge().child_idx();
+        let children = self.children(frame.as_tree())?;
+
+        if order == MAX_ORDER {
+            let table_pair = self.child_pairs(frame.as_tree())?;
+            let table_pair = table_pair.get(i / 2).ok_or(Error::InvalidArgument)?;
+            if let Err(_old) = table_pair.compare_exchange(
+                HugePair(HugeEntry::new_huge(), HugeEntry::new_huge()),
+                HugePair(
+                    HugeEntry::new_with(Bitfield::LEN),
+                    HugeEntry::new_with(Bitfield::LEN),
+                ),
+            ) {
+                // log::error!("Addr {frame:?} o={order} {old:?}");
+                Err(Error::Address)
+            } else {
+                Ok(())
+            }
+        } else if order == HUGE_ORDER {
+            let child = children.get(i).ok_or(Error::InvalidArgument)?;
+            if let Err(_old) =
+                child.compare_exchange(HugeEntry::new_huge(), HugeEntry::new_with(Bitfield::LEN))
+            {
+                // log::error!("Addr {frame:?} o={order} {old:?}");
+                Err(Error::Address)
+            } else {
+                Ok(())
+            }
+        } else if order <= Bitfield::ORDER {
+            let child = children.get(i).ok_or(Error::InvalidArgument)?;
+            let old = child.load();
             if old.huge() {
                 self.partial_put_huge(old, frame, order)
-            } else if old.free() <= Bitfield::LEN - (1 << order) {
+            } else if old.free() <= Bitfield::LEN - size {
                 self.put_small(frame, order)
             } else {
-                // log::error!("Addr p={frame:x} o={order} {old:?}");
+                // log::error!("Addr {frame:?} o={order} {old:?}");
                 Err(Error::Address)
             }
+        } else {
+            Err(Error::OrderNotSuported)
         }
     }
 
     /// Returns if the frame is free. This might be racy!
-    pub fn is_free(&self, frame: usize, order: u32) -> bool {
-        debug_assert!(frame.is_multiple_of(1 << order));
-        if order > Bitfield::ORDER || frame + (1 << order) > self.frames() {
+    pub fn is_free(&self, frame: FrameId, order: usize) -> bool {
+        const TREE_ORDER: usize = TREE_FRAMES.ilog2() as usize;
+        let Some(size) = 1usize.checked_shl(order as u32) else {
+            return false;
+        };
+        if order > TREE_ORDER
+            || !frame.is_aligned(order)
+            || frame
+                .0
+                .checked_add(size)
+                .is_none_or(|end| end > self.frames())
+        {
             return false;
         }
 
-        let table = self.child(frame);
-        let i = (frame / Bitfield::LEN) % TREE_HUGE;
-        let entry = table[i].load();
+        let i = frame.as_huge().child_idx();
+        let Ok(children) = self.children(frame.as_tree()) else {
+            return false;
+        };
 
-        if entry.free() < (1 << order) {
-            false
-        } else if entry.free() == Bitfield::LEN {
-            true
+        if size == TREE_FRAMES {
+            children.iter().all(|e| e.load().free() == Bitfield::LEN)
+        } else if order == MAX_ORDER {
+            // multiple huge frames
+            let Ok(pairs) = self.child_pairs(frame.as_tree()) else {
+                return false;
+            };
+            pairs
+                .get(i / 2)
+                .is_some_and(|pair| pair.load().all(|e| e.free() == Bitfield::LEN))
+        } else if order == HUGE_ORDER {
+            children
+                .get(i)
+                .is_some_and(|child| child.load().free() == Bitfield::LEN)
+        } else if order <= Bitfield::ORDER {
+            let Some(child) = children.get(i).map(|child| child.load()) else {
+                return false;
+            };
+            if child.free() < size {
+                false
+            } else if child.free() == Bitfield::LEN {
+                true
+            } else {
+                self.bitfield(frame.as_huge())
+                    .is_ok_and(|bf| bf.is_zero(frame, order))
+            }
         } else {
-            let bitfield = self.bitfield(frame);
-            bitfield.is_zero(frame % Bitfield::LEN, order)
+            false
         }
     }
 
-    /// Debug function, returning the number of allocated frames and performing internal checks.
-    #[allow(unused)]
-    pub fn free_frames(&self) -> usize {
-        let mut free = 0;
-        self.for_each_huge_frame(|_, f| free += f);
-        free
-    }
-
-    #[allow(unused)]
-    pub fn free_huge(&self) -> usize {
-        let mut huge = 0;
-        self.for_each_huge_frame(|_, f| huge += (f == HUGE_FRAMES) as usize);
-        huge
-    }
-
-    /// Debug function returning number of free frames in each order 9 chunk
-    pub fn for_each_huge_frame<F: FnMut(usize, usize)>(&self, mut f: F) {
-        for (ti, table) in self.children.iter().enumerate() {
-            for (ci, child) in table.iter().enumerate() {
-                f(ti * TREE_HUGE + ci, child.load().free())
+    /// Returns statistics.
+    pub fn stats(&self) -> Stats {
+        let mut stats = Stats::default();
+        for children in self.children {
+            let mut free = 0usize;
+            for child in children.iter() {
+                let f = child.load().free();
+                stats.free_frames += f;
+                stats.free_huge += (f == HUGE_FRAMES) as usize;
+                free += f;
             }
+            stats.free_trees += (free == TREE_FRAMES) as usize;
         }
+        stats
     }
 
-    pub fn free_at(&self, frame: usize, order: u32) -> usize {
+    /// Returns statistics at a specific frame, huge frame, or tree.
+    pub fn stats_at(&self, frame: FrameId, order: usize) -> Result<Stats, Error> {
+        const TREE_ORDER: usize = TREE_FRAMES.ilog2() as usize;
+        if frame.0 >= self.frames() {
+            return Err(Error::Address);
+        }
+        let children = self.children(frame.as_tree())?;
+        let i = frame.as_huge();
         match order {
-            0 => self.is_free(frame, 0) as _,
+            0 => Ok(Stats {
+                free_frames: (children
+                    .get(i.child_idx())
+                    .ok_or(Error::InvalidArgument)?
+                    .load()
+                    .free()
+                    > 0
+                    && self.bitfield(i)?.is_zero(frame, 0)) as usize,
+                free_huge: 0,
+                free_trees: 0,
+            }),
             HUGE_ORDER => {
-                let i = (frame / Bitfield::LEN) % TREE_HUGE;
-                let child = self.child(frame)[i].load();
-                child.free()
+                let free = children
+                    .get(i.child_idx())
+                    .ok_or(Error::InvalidArgument)?
+                    .load()
+                    .free();
+                Ok(Stats {
+                    free_frames: free,
+                    free_huge: free / HUGE_FRAMES,
+                    free_trees: 0,
+                })
             }
-            _ => 0,
-        }
-    }
-
-    fn free_all(
-        frames: usize,
-        bitfields: &[Align<Bitfield>],
-        children: &mut [Align<[Atom<HugeEntry>; TREE_HUGE]>],
-    ) {
-        // Init tables
-        let (last, tables) = unsafe { children.split_last_mut().unwrap_unchecked() };
-        // Table is fully included in the memory range
-        for table in &mut *tables {
-            table.atomic_fill(HugeEntry::new_free(Bitfield::LEN));
-        }
-        // Table is only partially included in the memory range
-        for (i, entry) in last.iter().enumerate() {
-            let frame = tables.len() * TREE_FRAMES + i * Bitfield::LEN;
-            let free = frames.saturating_sub(frame).min(Bitfield::LEN);
-            entry.store(HugeEntry::new_free(free));
-        }
-
-        // Init bitfields
-        let last_i = frames / Bitfield::LEN;
-        let (included, mut remainder) = unsafe { bitfields.split_at_unchecked(last_i) };
-        // Bitfield is fully included in the memory range
-        for bitfield in included {
-            bitfield.fill(false);
-        }
-        // Bitfield might be only partially included in the memory range
-        if let Some((last, excluded)) = remainder.split_first() {
-            let end = frames - included.len() * Bitfield::LEN;
-            debug_assert!(end <= Bitfield::LEN);
-            last.set(0..end, false);
-            last.set(end..Bitfield::LEN, true);
-            remainder = excluded;
-        }
-        // Not part of the final memory range
-        for bitfield in remainder {
-            bitfield.fill(true);
-        }
-    }
-
-    fn reserve_all(
-        frames: usize,
-        bitfields: &[Align<Bitfield>],
-        children: &mut [Align<[Atom<HugeEntry>; TREE_HUGE]>],
-    ) {
-        // Init table
-        let (last, tables) = unsafe { children.split_last_mut().unwrap_unchecked() };
-        // Table is fully included in the memory range
-        for table in &mut *tables {
-            table.atomic_fill(HugeEntry::new_huge());
-        }
-        // Table is only partially included in the memory range
-        let last_i = (frames / Bitfield::LEN) - tables.len() * TREE_HUGE;
-        let (included, remainder) = unsafe { last.split_at_unchecked(last_i) };
-        for entry in included {
-            entry.store(HugeEntry::new_huge());
-        }
-        // Remainder is allocated as small frames
-        for entry in remainder {
-            entry.store(HugeEntry::new_free(0));
-        }
-
-        // Init bitfields
-        let last_i = frames / Bitfield::LEN;
-        let (included, remainder) = unsafe { bitfields.split_at_unchecked(last_i) };
-        // Bitfield is fully included in the memory range
-        for bitfield in included {
-            bitfield.fill(false);
-        }
-        // Bitfield might be only partially included in the memory range
-        for bitfield in remainder {
-            bitfield.fill(true);
-        }
-    }
-
-    /// Allocate frames up to order 8 (or up to order 10 for 16K)
-    fn get_small(&self, start: usize, order: u32) -> Result<(usize, bool), Error> {
-        debug_assert!(order < Bitfield::ORDER);
-
-        let first_bf_i = align_down(start / Bitfield::LEN, TREE_HUGE);
-        let start_bf_e = (start / Bitfield::ENTRY_BITS) % Bitfield::ENTRIES;
-        let table = self.child(start);
-        let offset = (start / Bitfield::LEN) % TREE_HUGE;
-
-        for j in 0..TREE_HUGE {
-            let i = (j + offset) % TREE_HUGE;
-
-            if let Ok(child) = table[i].fetch_update(|v| v.dec(1 << order)) {
-                let bf_i = first_bf_i + i;
-                // start with the previous bitfield entry
-                let bf_e = if j == 0 { start_bf_e } else { 0 };
-
-                if let Ok(offset) =
-                    unsafe { self.bitfields.get_unchecked(bf_i) }.set_first_zeros(bf_e, order)
-                {
-                    return Ok((bf_i * Bitfield::LEN + offset, child.free() == Bitfield::LEN));
-                }
-
-                // Revert counter
-                table[i]
-                    .fetch_update(|v| v.inc(Bitfield::LEN, 1 << order))
-                    .map_err(|_| Error::UndoFailed)?;
+            TREE_ORDER => {
+                let mut stats = children.iter().fold(Stats::default(), |mut acc, e| {
+                    let f = e.load().free();
+                    acc.free_frames += f;
+                    acc.free_huge += f / HUGE_FRAMES;
+                    acc
+                });
+                stats.free_trees = stats.free_frames / TREE_FRAMES;
+                Ok(stats)
             }
+            _ => Ok(Stats::default()),
         }
-
-        Err(Error::Memory)
     }
 
-    /// Allocate huge frame
-    fn get_huge(&self, start: usize) -> Result<usize, Error> {
-        let table = self.child(start);
-        let offset = (start / Bitfield::LEN) % TREE_HUGE;
-
-        for i in 0..TREE_HUGE {
-            let i = (offset + i) % TREE_HUGE;
-            if table[i]
-                .fetch_update(|v| v.mark_huge(Bitfield::LEN))
-                .is_ok()
-            {
-                return Ok(align_down(start, TREE_FRAMES) + i * Bitfield::LEN);
-            }
-        }
-
-        Err(Error::Memory)
+    /// Returns the table with pair entries that can be updated at once.
+    fn child_pairs(&self, tree: TreeId) -> Result<&[Atom<HugePair>; TREE_HUGE / 2], Error> {
+        Ok(&self.children(tree)?.pairs)
     }
 
-    fn put_small(&self, frame: usize, order: u32) -> Result<bool, Error> {
-        debug_assert!(order < HUGE_ORDER);
+    fn put_small(&self, frame: FrameId, order: usize) -> Result<(), Error> {
+        if order >= HUGE_ORDER {
+            return Err(Error::OrderNotSuported);
+        }
 
-        let bitfield = self.bitfield(frame);
-        let i = frame % Bitfield::LEN;
-        if bitfield.toggle(i, order, true).is_err() {
+        let bitfield = self.bitfield(frame.as_huge())?;
+        if bitfield.toggle(frame, order, true).is_err() {
+            // log::error!(
+            //     "L1 put failed o={order} i={} p={frame:?}",
+            //     frame.0 % Bitfield::LEN
+            // );
             return Err(Error::Address);
         }
 
-        let table = self.child(frame);
-        let i = (frame / Bitfield::LEN) % TREE_HUGE;
-        match table[i].fetch_update(|v| v.inc(Bitfield::LEN, 1 << order)) {
-            Err(_) => Err(Error::Retry),
-            Ok(entry) => Ok(entry.free() + (1 << order) == Bitfield::LEN),
+        let children = self.children(frame.as_tree())?;
+        let i = frame.as_huge().child_idx();
+        let child = children.get(i).ok_or(Error::InvalidArgument)?;
+        let size = Self::allocation_size(order)?;
+        match child.fetch_update(|v| v.inc(size)) {
+            Ok(_) => Ok(()),
+            Err(_entry) => Err(Error::FailedToIncrement),
         }
     }
 
-    fn partial_put_huge(&self, old: HugeEntry, frame: usize, order: u32) -> Result<bool, Error> {
-        /// Retries the condition n times and returns if it was successful.
-        /// This pauses the CPU between retries if possible.
-        #[inline(always)]
-        fn spin_wait(n: usize, mut cond: impl FnMut() -> bool) -> bool {
-            for _ in 0..n {
-                if cond() {
-                    return true;
-                }
-                hint::spin_loop()
-            }
-            false
-        }
-
-        let i = (frame / Bitfield::LEN) % TREE_HUGE;
-        let table = self.child(frame);
-        let bitfield = self.bitfield(frame);
-
+    fn partial_put_huge(&self, old: HugeEntry, frame: FrameId, order: usize) -> Result<(), Error> {
+        // log::info!("partial free of huge frame {frame:?} o={order}");
+        let i = frame.as_huge().child_idx();
+        let children = self.children(frame.as_tree())?;
+        let bitfield = self.bitfield(frame.as_huge())?;
+        let child = children.get(i).ok_or(Error::InvalidArgument)?;
         // Try filling the whole bitfield
-        if bitfield.toggle(0, Bitfield::ORDER, false).is_ok() {
-            table[i]
-                .compare_exchange(old, HugeEntry::default())
-                .map_err(|_| Error::FailedPartialCase)?;
+        if bitfield.toggle(FrameId(0), Bitfield::ORDER, false).is_ok() {
+            // TODO:
+            let _ = child.compare_exchange(old, HugeEntry::new());
         }
         // Wait for parallel partial_put_huge to finish
-        else if !spin_wait(RETRIES, || !table[i].load().huge()) {
-            return Err(Error::ExceedReties);
+        else if !spin_wait(RETRIES, || !child.load().huge()) {
+            return Err(Error::Retry);
         }
 
         self.put_small(frame, order)
     }
 }
 
+/// Every access, including a single counter update, uses the same u32 atomic.
+#[derive(Debug)]
+struct Table {
+    pairs: [Atom<HugePair>; TREE_HUGE / 2],
+}
+
+impl Table {
+    fn get(&self, index: usize) -> Option<Child<'_>> {
+        self.pairs.get(index / 2).map(|pair| Child {
+            pair,
+            second: !index.is_multiple_of(2),
+        })
+    }
+
+    fn iter(&self) -> impl Iterator<Item = Child<'_>> {
+        self.pairs.iter().flat_map(|pair| {
+            [
+                Child {
+                    pair,
+                    second: false,
+                },
+                Child { pair, second: true },
+            ]
+        })
+    }
+}
+
+/// A counter view; it never creates a smaller atomic reference.
+struct Child<'a> {
+    pair: &'a Atom<HugePair>,
+    second: bool,
+}
+
+impl Child<'_> {
+    fn entry(&self, pair: HugePair) -> HugeEntry {
+        if self.second { pair.1 } else { pair.0 }
+    }
+
+    fn load(&self) -> HugeEntry {
+        self.entry(self.pair.load())
+    }
+
+    fn store(&self, value: HugeEntry) {
+        let _ = self.fetch_update(|_| Some(value));
+    }
+
+    fn fetch_update(
+        &self,
+        mut f: impl FnMut(HugeEntry) -> Option<HugeEntry>,
+    ) -> Result<HugeEntry, HugeEntry> {
+        self.pair
+            .fetch_update(|pair| {
+                let entry = f(self.entry(pair))?;
+                Some(if self.second {
+                    HugePair(pair.0, entry)
+                } else {
+                    HugePair(entry, pair.1)
+                })
+            })
+            .map(|pair| self.entry(pair))
+            .map_err(|pair| self.entry(pair))
+    }
+
+    fn compare_exchange(&self, current: HugeEntry, new: HugeEntry) -> Result<HugeEntry, HugeEntry> {
+        self.fetch_update(|entry| (entry == current).then_some(new))
+    }
+}
+
 /// Manages huge frame, that can be allocated as base frames.
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HugeEntry {
-    /// Number of free 4K frames or u16::MAX for a huge frame.
-    count: u16,
-}
-
-impl From<u16> for HugeEntry {
-    fn from(count: u16) -> Self {
-        HugeEntry { count }
-    }
-}
-
-impl From<HugeEntry> for u16 {
-    fn from(value: HugeEntry) -> Self {
-        value.count
-    }
-}
-
-impl Atomic for HugeEntry {
-    type I = AtomicU16;
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HugeEntry(u16);
 
 impl HugeEntry {
+    fn new() -> Self {
+        Self(0)
+    }
+
     /// Creates an entry marked as allocated huge frame.
     fn new_huge() -> Self {
-        HugeEntry { count: u16::MAX }
+        Self(u16::MAX)
     }
 
     /// Creates a new entry with the given free counter.
-    fn new_free(free: usize) -> Self {
-        HugeEntry { count: free as _ }
+    fn new_with(free: usize) -> Self {
+        Self(free as u16)
     }
 
     /// Returns wether this entry is allocated as huge frame.
     fn huge(self) -> bool {
-        self.count == u16::MAX
+        self.0 == u16::MAX
     }
 
     /// Returns the free frames counter
     fn free(self) -> usize {
-        if !self.huge() { self.count as _ } else { 0 }
+        if self.huge() { 0 } else { self.0 as usize }
     }
 
     /// Try to allocate this entry as huge frame.
-    fn mark_huge(self, span: usize) -> Option<Self> {
-        if self.free() == span {
+    fn mark_huge(self) -> Option<Self> {
+        if self.free() == Bitfield::LEN {
             Some(Self::new_huge())
         } else {
             None
@@ -448,18 +702,49 @@ impl HugeEntry {
     /// Decrement the free frames counter.
     fn dec(self, num_frames: usize) -> Option<Self> {
         if !self.huge() && self.free() >= num_frames {
-            Some(Self::new_free(self.free() - num_frames))
+            Some(Self::new_with(self.free() - num_frames))
         } else {
             None
         }
     }
 
     /// Increments the free frames counter.
-    fn inc(self, span: usize, num_frames: usize) -> Option<Self> {
-        if !self.huge() && self.free() <= span - num_frames {
-            Some(Self::new_free(self.free() + num_frames))
+    fn inc(self, num_frames: usize) -> Option<Self> {
+        if !self.huge() && self.free() <= Bitfield::LEN.checked_sub(num_frames)? {
+            Some(Self::new_with(self.free() + num_frames))
         } else {
             None
         }
+    }
+}
+
+/// Pair of huge entries that can be changed at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HugePair(HugeEntry, HugeEntry);
+
+impl Atomic for HugePair {
+    type I = AtomicU32;
+}
+
+impl HugePair {
+    /// Apply `f` to both entries.
+    fn map(self, f: impl Fn(HugeEntry) -> Option<HugeEntry>) -> Option<HugePair> {
+        Some(HugePair(f(self.0)?, f(self.1)?))
+    }
+    /// Check if `f` is true for both entries.
+    fn all(self, f: impl Fn(HugeEntry) -> bool) -> bool {
+        f(self.0) && f(self.1)
+    }
+}
+
+impl From<u32> for HugePair {
+    fn from(value: u32) -> Self {
+        Self(HugeEntry(value as u16), HugeEntry((value >> 16) as u16))
+    }
+}
+
+impl From<HugePair> for u32 {
+    fn from(value: HugePair) -> Self {
+        u32::from(value.0.0) | (u32::from(value.1.0) << 16)
     }
 }

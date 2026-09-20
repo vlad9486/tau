@@ -1,12 +1,43 @@
 mod atomic;
-mod bitfield;
-mod local;
-mod lower;
-mod trees;
 mod util;
+mod bitfield;
 
-mod inner;
-pub use self::inner::LLFree;
+mod id;
+pub use self::id::{FrameId, RowId};
+
+mod lower;
+pub use self::lower::{Lower, Allocator};
+
+/// Number of huge frames in tree
+pub const TREE_HUGE: usize = 8;
+/// Number of small frames in tree
+pub const TREE_FRAMES: usize = TREE_HUGE << HUGE_ORDER;
+/// Order of an entire tree
+pub const TREE_ORDER: usize = TREE_FRAMES.ilog2() as usize;
+/// Order for huge frames
+pub const HUGE_ORDER: usize = 9;
+/// Number of small frames in huge frame
+pub const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
+/// Maximum order the llfree supports
+pub const MAX_ORDER: usize = HUGE_ORDER + 1;
+/// Bit size of the atomic ints that comprise the bitfields
+pub const BITFIELD_ROW: usize = 64;
+
+pub const ROWS: usize = HUGE_FRAMES / BITFIELD_ROW;
+
+/// Maximum number of frames accepted by [`Allocator::new`].
+///
+/// This bound guarantees that every metadata index and even statistics over
+/// maximally corrupted `u16` counters fit in `usize`.
+pub const MAX_FRAMES: usize = (usize::MAX / u16::MAX as usize / TREE_HUGE) * TREE_FRAMES;
+
+const _: () = assert!(usize::BITS <= u64::BITS);
+const _: () = assert!(MAX_FRAMES <= usize::MAX - (TREE_FRAMES - 1));
+const _: () =
+    assert!(MAX_FRAMES.div_ceil(TREE_FRAMES) * TREE_HUGE <= usize::MAX / u16::MAX as usize);
+
+/// Number of retries if an atomic operation fails.
+const RETRIES: usize = 4;
 
 /// Allocation error
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,50 +50,22 @@ pub enum Error {
     Address = 3,
     /// Allocator not initialized or initialization failed
     Initialization = 4,
-    /// Exceed reties while putting page
-    ExceedReties = 5,
     /// _
-    FailedUndoToggle,
-    FailedUndoSearch,
-    UndoFailed,
-    FailedPartialCase,
+    FailedUndoToggle = 5,
+    FailedUndoSearch = 6,
+    UndoFailed = 7,
+    InvalidArgument = 8,
+    OrderNotSuported = 9,
+    FailedToIncrement = 10,
 }
 
-/// Number of huge frames in tree
-const TREE_HUGE: usize = 8;
-/// Number of small frames in tree
-const TREE_FRAMES: usize = TREE_HUGE << HUGE_ORDER;
-/// Order for huge frames
-const HUGE_ORDER: u32 = 9;
-/// Number of small frames in huge frame
-const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
-
-/// Number of retries if an atomic operation fails.
-const RETRIES: usize = 4;
-
-#[derive(Clone, Copy)]
-pub struct Flags {
-    pub order: u32,
-    pub movable: bool,
-}
-
-impl Flags {
-    pub fn o(order: u32) -> Self {
-        Flags {
-            order,
-            movable: false,
-        }
-    }
-}
-
-/// Defines if the allocator should be allocated persistently
-/// and if it in that case should try to recover from the persistent memory.
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub enum Init {
-    /// Clear the allocator marking all frames as free
-    FreeAll,
-    /// Clear the allocator marking all frames as allocated
-    AllocAll,
-    /// Assume that the allocator is already initialized
-    None,
+/// Allocation statistics of allocator
+#[derive(Debug, Default)]
+pub struct Stats {
+    /// Number of free frames
+    pub free_frames: usize,
+    /// Number of entirely free huge frames
+    pub free_huge: usize,
+    /// Number of entirely free trees
+    pub free_trees: usize,
 }

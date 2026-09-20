@@ -8,19 +8,19 @@ use super::{
 };
 
 pub struct Context {
-    pub allocator: llfree::LLFree<'static>,
+    pub allocator: llfree::Lower<'static>,
     pub base_addr: usize,
 }
 
 impl Context {
     pub fn page(&self, hart_id: usize) -> Result<usize, llfree::Error> {
-        let frame = self.allocator.get(hart_id, llfree::Flags::o(0))?;
+        let frame = self.allocator.alloc(hart_id, 0)?.0;
         Ok(self.base_addr + (frame << 12))
     }
 
     pub fn free(&self, hart_id: usize, page: usize) -> Result<(), llfree::Error> {
         let frame = (page - self.base_addr) >> 12;
-        self.allocator.put(hart_id, frame, llfree::Flags::o(0))
+        self.allocator.put(hart_id, llfree::FrameId(frame), 0)
     }
 }
 

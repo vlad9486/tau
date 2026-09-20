@@ -8,10 +8,10 @@
     warn(fuzzy_provenance_casts)
 )]
 
-use core::{arch, cell::UnsafeCell, hint, mem::MaybeUninit, slice};
+use core::{arch, cell::UnsafeCell, hint, mem::MaybeUninit, num::NonZero, slice};
 
 use supervisor::{
-    llfree::{Error, Flags, Init, LLFree},
+    llfree::{Error, Allocator, FrameId},
     sbi, vmem,
 };
 
@@ -146,27 +146,34 @@ fn init_memory(
     if cores < 2 || memory_size < 0x1000000 * cores {
         return Err(Error::Memory);
     }
-    let frames = memory_size >> 12;
+    let Some(frames) = NonZero::new(memory_size >> 12) else {
+        return Err(Error::Memory);
+    };
 
     let ptr = unsafe { st.add(HEAP_END) };
-    let (pages, allocator) = LLFree::new(Init::AllocAll, cores, frames, ptr)?;
+    let Some(pages) = Allocator::expected_size(frames).map(|x| x.div_ceil(0x1000)) else {
+        return Err(Error::Memory);
+    };
+    let mut allocator = unsafe { Allocator::new(frames, ptr.cast()) }.ok_or(Error::Memory)?;
+    allocator.reserve_all();
+    let allocator = allocator.as_lower();
 
     // beginning of free memory
     // `0x200` is opensbi size
     let mut frame = 0x200 + HEAP_END + pages;
     while frame & 0o777 != 0 {
         let core = ((frame >> 10) + hart_id) % cores;
-        allocator.put(core, frame, Flags::o(0))?;
+        allocator.put(core, FrameId(frame), 0)?;
         frame += 1;
     }
-    for big_frame in (frame / 0o1000)..(frames / 0o1000) {
+    for big_frame in (frame / 0o1000)..(frames.get() / 0o1000) {
         let frame = big_frame << 9;
         // TODO: handle reserved regions properly
         if frame == dtb_addr >> 12 {
             continue;
         }
         let core = ((frame >> 10) + hart_id) % cores;
-        allocator.put(core, frame, Flags::o(9))?;
+        allocator.put(core, FrameId(frame), 9)?;
     }
 
     let mut gfp = {
@@ -256,5 +263,5 @@ fn init_memory(
     // size can be b (8 bits), h (16 bits), w (32 bits) or g (64 bits).
     // xp/8gx 0x80200000
 
-    Ok(((vmem::SV39 << 60) | (root_table >> 12), cores, frames))
+    Ok(((vmem::SV39 << 60) | (root_table >> 12), cores, frames.get()))
 }

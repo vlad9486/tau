@@ -8,12 +8,9 @@
     warn(fuzzy_provenance_casts)
 )]
 
-use core::{arch, cell::UnsafeCell, hint, mem::MaybeUninit, fmt::Write as _};
+use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem::MaybeUninit, num::NonZero};
 
-use supervisor::{
-    llfree::{Init, LLFree},
-    module, sbi, scheduler, state, vmem,
-};
+use supervisor::{llfree::Allocator, module, sbi, scheduler, state, vmem};
 
 #[cfg(all(not(debug_assertions), feature = "panic-never"))]
 use panic_never as _;
@@ -67,8 +64,11 @@ extern "C" fn init(
     let module = unsafe { __MODULE.get() };
 
     if cores != 0 {
-        let (_, allocator) = unsafe {
-            LLFree::new(Init::None, cores, frames, __ALLOCATOR.get().cast()).unwrap_unchecked()
+        let frames = unsafe { NonZero::new_unchecked(frames) };
+        let allocator = unsafe {
+            Allocator::new(frames, __ALLOCATOR.get().cast())
+                .unwrap_unchecked()
+                .into_lower()
         };
 
         unsafe {
