@@ -19,8 +19,8 @@ pub struct Shared {
     pub sdio_task: Option<sdio::Task>,
     pub sdio_done: Option<sdio::Task>,
     // One producer and one outstanding TX per port. Consume done before reuse.
-    pub ethernet_task: [Option<ethernet::TxTask>; 2],
-    pub ethernet_done: [Option<ethernet::TxDone>; 2],
+    pub ethernet_tx_task: [Option<ethernet::TxTask>; 2],
+    pub ethernet_tx_done: [Option<ethernet::TxDone>; 2],
     pub ethernet_rx_task: [Option<ethernet::RxTask>; 2],
     pub ethernet_rx_done: [Option<ethernet::RxDone>; 2],
     pub terminate: bool,
@@ -167,8 +167,8 @@ impl Tasks {
             uart_in: uart::Buffer::default(),
             sdio_task: None,
             sdio_done: None,
-            ethernet_task: [None; 2],
-            ethernet_done: [None; 2],
+            ethernet_tx_task: [None; 2],
+            ethernet_tx_done: [None; 2],
             ethernet_rx_task: [None; 2],
             ethernet_rx_done: [None; 2],
             terminate: false,
@@ -260,10 +260,10 @@ impl Tasks {
                     {
                         driver.state.submit(shared);
                     } else {
-                        if shared.ethernet_done[port].is_none()
-                            && shared.ethernet_task[port].take().is_some()
+                        if shared.ethernet_tx_done[port].is_none()
+                            && shared.ethernet_tx_task[port].take().is_some()
                         {
-                            shared.ethernet_done[port] = Some(Err(ethernet::TxError::Failed));
+                            shared.ethernet_tx_done[port] = Some(Err(ethernet::TxError::Failed));
                         }
                         if shared.ethernet_rx_done[port].is_none()
                             && shared.ethernet_rx_task[port].take().is_some()
@@ -272,7 +272,7 @@ impl Tasks {
                         }
                     }
                 }
-                if shared.ethernet_done.iter().any(Option::is_some)
+                if shared.ethernet_tx_done.iter().any(Option::is_some)
                     || shared.ethernet_rx_done.iter().any(Option::is_some)
                 {
                     user.step();

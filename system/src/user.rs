@@ -71,7 +71,7 @@ async fn run(shared: &UnsafeCell<Shared>) {
         match wait_event(shared).await {
             Event::Ethernet => {
                 for port in 0..2 {
-                    let done = unsafe { &mut *shared.get() }.ethernet_done[port].take();
+                    let done = unsafe { &mut *shared.get() }.ethernet_tx_done[port].take();
                     if let Some(result) = done {
                         let seq = tx_pending[port].take();
                         if result == Err(ethernet::TxError::BufferUnavailable) {
@@ -128,7 +128,7 @@ async fn run(shared: &UnsafeCell<Shared>) {
                                 dst.write(byte);
                             }
                             tau::asm::fence();
-                            unsafe { &mut *shared.get() }.ethernet_task[port] =
+                            unsafe { &mut *shared.get() }.ethernet_tx_task[port] =
                                 Some(ethernet::TxTask {
                                     phys: tx_phys[port],
                                     len: frame::LEN as u16,
@@ -166,7 +166,7 @@ async fn wait_event(shared: &UnsafeCell<Shared>) -> Event {
             return Poll::Ready(Event::Uart);
         }
         if shared.ethernet_rx_done.iter().any(Option::is_some)
-            || shared.ethernet_done.iter().any(Option::is_some)
+            || shared.ethernet_tx_done.iter().any(Option::is_some)
         {
             return Poll::Ready(Event::Ethernet);
         }

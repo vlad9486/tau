@@ -1,9 +1,16 @@
 //! VisionFive 2 v1.3B YT8531/DWMAC raw Ethernet bring-up.
 //! See docs/visionfive2/transmit-test.md for the boot contract and frame format.
-use core::time::Duration;
+
+mod registers;
+use self::registers::Registers;
 
 mod rx;
-pub use rx::{RxTask, RxDone, RxError};
+pub use self::rx::{RxTask, RxDone, RxError};
+
+mod tx;
+pub use self::tx::{TxTask, TxDone, TxError};
+
+use core::time::Duration;
 
 use super::{
     scheduler::{self, Shared, DriverState},
@@ -14,64 +21,11 @@ const OWN: u32 = 1 << 31;
 const RING_LEN: usize = 4;
 const DMA_IRQ_MASK: u32 = (1 << 15) | (1 << 14) | (1 << 12) | (1 << 6) | 1;
 const DMA_ACK_MASK: u32 = 0xd7ff;
-// Byte offsets, not u32 array indices; DWMAC4/5 register layout.
-const MAC_CONFIG: usize = 0;
-const MDIO_ADDR: usize = 0x200;
-const MDIO_DATA: usize = 0x204;
-const DMA_MODE: usize = 0x1000;
-const TX_CONTROL: usize = 0x1104;
-const RX_CONTROL: usize = 0x1108;
-const RX_TAIL: usize = 0x1128;
-const TX_TAIL: usize = 0x1120;
-const DMA_IRQ_ENABLE: usize = 0x1134;
-const DMA_STATUS: usize = 0x1160;
-
-#[repr(C)]
-struct Registers([Register<u32, u32>; 0x4000]);
-
-impl Registers {
-    fn read(&self, offset: usize) -> u32 {
-        self.0[offset / 4].read()
-    }
-
-    fn write(&self, offset: usize, value: u32) {
-        self.0[offset / 4].write(value);
-    }
-
-    fn modify(&self, offset: usize, clear: u32, set: u32) {
-        self.write(offset, (self.read(offset) & !clear) | set);
-    }
-}
 
 #[repr(C)]
 struct Descriptor([Register<u32, u32>; 4]);
 
 const _: () = assert!(size_of::<Descriptor>() == 16);
-
-/// One complete Ethernet frame, without FCS. The caller owns the DMA mapping.
-/// Keep the buffer valid and untouched until completion.
-#[derive(Clone, Copy, Debug)]
-pub struct TxTask {
-    pub phys: u32,
-    pub len: u16,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TxError {
-    NotReady,
-    InvalidBuffer,
-    Failed,
-    Descriptor,
-    /// DMA did not release ownership. The buffer must remain reserved and
-    /// untouched until the hardware has been reset (currently until reboot).
-    BufferUnavailable,
-}
-
-pub type TxDone = Result<(), TxError>;
-
-fn valid_tx(task: TxTask) -> bool {
-    (14..=1514).contains(&task.len) && task.phys.checked_add(u32::from(task.len) - 1).is_some()
-}
 
 #[derive(Clone, Copy, Debug)]
 enum Phase {
@@ -88,7 +42,7 @@ pub struct State {
     port: u8,
     phy: u8,
     phase: Phase,
-    descriptors: &'static [Descriptor; RING_LEN],
+    tx_descriptors: &'static [Descriptor; RING_LEN],
     rx_descriptors: &'static [Descriptor; RING_LEN],
     rx_index: usize,
     rx_pending: Option<RxTask>,
@@ -119,7 +73,7 @@ impl State {
             port,
             phy: 0,
             phase: Phase::Start,
-            descriptors: rings[..RING_LEN].try_into().ok()?,
+            tx_descriptors: rings[..RING_LEN].try_into().ok()?,
             // RX ring shares the descriptor page, 256 bytes after TX.
             rx_descriptors: rings[16..16 + RING_LEN].try_into().ok()?,
             rx_index: 0,
@@ -140,24 +94,23 @@ impl State {
     }
 
     fn wait_mdio(&self) -> Result<(), &'static str> {
-        scheduler::spin(100_000, || self.reg.read(MDIO_ADDR) & 1 == 0)
+        scheduler::spin(100_000, || self.reg.mdio_addr.read() & 1 == 0)
             .map_err(|_| "MDIO busy timeout")
     }
 
     fn mdio(&self, phy: u8, register: u8, value: Option<u16>) -> Result<u16, &'static str> {
         self.wait_mdio()?;
         if let Some(value) = value {
-            self.reg.write(MDIO_DATA, u32::from(value));
+            self.reg.mdio_data.write(u32::from(value));
         }
         // Clause 22; CR=5 divides the <=300MHz CSR clock by 124 (vendor setting).
         let op = if value.is_some() { 1 } else { 3 };
         tau::asm::fence();
-        self.reg.write(
-            MDIO_ADDR,
-            (u32::from(phy) << 21) | (u32::from(register) << 16) | (5 << 8) | (op << 2) | 1,
-        );
+        self.reg
+            .mdio_addr
+            .write((u32::from(phy) << 21) | (u32::from(register) << 16) | (5 << 8) | (op << 2) | 1);
         self.wait_mdio()?;
-        Ok(self.reg.read(MDIO_DATA) as u16)
+        Ok(self.reg.mdio_data.read() as u16)
     }
 
     fn phy_read(&self, register: u8) -> Result<u16, &'static str> {
@@ -231,14 +184,14 @@ impl State {
                     2,
                 )
             };
-        let crg = tau::Area::new(base, 0x10000).r::<Registers>();
-        let cfg = tau::Area::new(syscon, 0x10000).r::<Registers>();
-        crg.modify(ahb, 0, 1 << 31);
-        crg.modify(axi, 0, 1 << 31);
+        let crg = tau::Area::new(base, 0x10000).r::<[Register<u32, u32>; 0x4000]>();
+        let cfg = tau::Area::new(syscon, 0x10000).r::<[Register<u32, u32>; 0x4000]>();
+        crg[ahb / 4].write(crg[ahb / 4].read() | (1 << 31));
+        crg[axi / 4].write(crg[axi / 4].read() | (1 << 31));
         let sys = if self.port == 1 {
             crg
         } else {
-            tau::Area::new(0x1302_0000, 0x10000).r::<Registers>()
+            tau::Area::new(0x1302_0000, 0x10000).r::<[Register<u32, u32>; 0x4000]>()
         };
         // Keep firmware's GTX divider/root configuration, enable GTX/GTXC gates.
         let (gtx, gtxc) = if self.port == 0 {
@@ -246,21 +199,21 @@ impl State {
         } else {
             (0x190, 0x1ac)
         };
-        sys.modify(gtx, 0, 1 << 31);
-        sys.modify(gtxc, 0, 1 << 31);
-        crg.modify(rtx, 0x1f, 1);
-        crg.modify(tx, 0x3f << 24, (1 << 31) | (1 << 24));
-        crg.modify(rx, 0x3f << 24, 0);
-        cfg.modify(mode, 7 << shift, 1 << shift); // RGMII
-        crg.modify(rst, mask, 0);
+        sys[gtx / 4].write(sys[gtx / 4].read() | (1 << 31));
+        sys[gtxc / 4].write(sys[gtxc / 4].read() | (1 << 31));
+        crg[rtx / 4].write((crg[rtx / 4].read() & !0x1f) | 1);
+        crg[tx / 4].write((crg[tx / 4].read() & !(0x3f << 24)) | (1 << 31) | (1 << 24));
+        crg[rx / 4].write(crg[rx / 4].read() & !(0x3f << 24));
+        cfg[mode / 4].write((cfg[mode / 4].read() & !(7 << shift)) | (1 << shift)); // RGMII
+        crg[rst / 4].write(crg[rst / 4].read() & !mask);
         tau::asm::fence();
-        scheduler::spin(100_000, || crg.read(status) & mask == mask)
+        scheduler::spin(100_000, || crg[status / 4].read() & mask == mask)
             .map_err(|_| "GMAC bus reset did not deassert")
     }
 
     fn configure_dma(&mut self) {
         let r = self.reg;
-        for desc in self.descriptors.iter().chain(self.rx_descriptors) {
+        for desc in self.tx_descriptors.iter().chain(self.rx_descriptors) {
             for word in &desc.0 {
                 word.write(0u32);
             }
@@ -269,58 +222,59 @@ impl State {
         self.pending = false;
         self.rx_index = 0;
         // No EEE, flow control, CRC/pad stripping, or jumbo frames.
-        for offset in [0xb4, 0xd0, 0x70, 0x90, 0xa0, 0x1108] {
-            r.write(offset, 0);
-        }
+        r.mac_irq_enable.write(0u32);
+        r.mac_lpi_control_status.write(0u32);
+        r.mac_tx_flow_control.write(0u32);
+        r.mac_rx_flow_control.write(0u32);
+        r.mac_rx_queue_control0.write(0u32);
+        r.rx_control.write(0u32);
         // MMC counter interrupts share macirq; leave them masked.
-        for offset in [0x70c, 0x710, 0x800] {
-            r.write(offset, u32::MAX);
-        }
-        r.write(0x300, u32::from(self.port + 1) << 8);
-        r.write(0x304, 0x5541_5402); // 02:54:41:55:00:01/02
-        let speed_bits = match self.link >> 14 {
+        r.mmc_rx_irq_mask.write(u32::MAX);
+        r.mmc_tx_irq_mask.write(u32::MAX);
+        r.mmc_rx_ipc_irq_mask.write(u32::MAX);
+        r.mac_address0_high.write(u32::from(self.port + 1) << 8);
+        r.mac_address0_low.write(0x5541_5402u32); // 02:54:41:55:00:01/02
+        let speed_bits: u32 = match self.link >> 14 {
             2 => 0,
             1 => (1 << 15) | (1 << 14),
             _ => 1 << 15,
         };
-        r.write(MAC_CONFIG, speed_bits | (1 << 13));
-        r.write(0x08, 0); // perfect unicast + broadcast, no promiscuous mode
-        r.write(0xa0, 2); // RX queue 0: DCB mode
-        r.write(0xa4, 1 << 20); // multicast/broadcast routed to queue 0
-        r.write(0xc30, 0); // RX queue 0 -> DMA channel 0
-        let rx_fifo_log = r.read(0x120) & 0x1f;
+        r.mac_config.write(speed_bits | (1 << 13));
+        r.mac_packet_filter.write(0u32); // perfect unicast + broadcast, no promiscuous mode
+        r.mac_rx_queue_control0.write(2u32); // RX queue 0: DCB mode
+        r.mac_rx_queue_control1.write(1u32 << 20); // multicast/broadcast routed to queue 0
+        r.mtl_rx_queue_dma_map0.write(0u32); // RX queue 0 -> DMA channel 0
+        let rx_fifo_log = r.mac_hw_feature1.read() & 0x1f;
         let rx_fifo = 128u32.checked_shl(rx_fifo_log).unwrap_or(2048);
-        r.write(
-            0xd30,
-            ((rx_fifo / 256).saturating_sub(1).min(0x3ff) << 20) | (1 << 5),
-        );
+        r.mtl_rx_queue0_operation_mode
+            .write(((rx_fifo / 256).saturating_sub(1).min(0x3ff) << 20) | (1 << 5));
         // Hardware feature 1 encodes FIFO bytes as 128 << field.
-        let fifo_log = (r.read(0x120) >> 6) & 0x1f;
+        let fifo_log = (r.mac_hw_feature1.read() >> 6) & 0x1f;
         let fifo_bytes = 128u32.checked_shl(fifo_log).unwrap_or(2048);
         let queue_size = (fifo_bytes / 256).saturating_sub(1).min(0x1ff);
-        r.write(0xd00, (queue_size << 16) | (2 << 2) | (1 << 1));
-        r.write(0xd18, 0x10);
-        r.write(
-            0x1004,
-            (3 << 24) | (3 << 16) | (1 << 3) | (1 << 2) | (1 << 1),
-        );
-        r.write(0x1100, 0); // contiguous 16-byte descriptors, PBLx8 off
-        r.write(TX_CONTROL, 16 << 16);
-        r.write(0x1110, 0);
-        r.write(0x1114, self.dma_phys);
-        r.write(0x112c, (RING_LEN - 1) as u32);
-        r.write(TX_TAIL, self.dma_phys);
-        r.write(RX_CONTROL, (16 << 16) | (u32::from(rx::BUFFER_SIZE) << 1));
-        r.write(0x1118, 0);
-        r.write(0x111c, self.dma_phys + 0x100);
-        r.write(0x1130, (RING_LEN - 1) as u32);
-        r.write(RX_TAIL, self.dma_phys + 0x100);
-        r.write(0x1138, 0); // RX watchdog off; every packet requests an IRQ
-        r.write(DMA_STATUS, DMA_ACK_MASK);
-        r.write(DMA_IRQ_ENABLE, DMA_IRQ_MASK);
+        r.mtl_tx_queue0_operation_mode
+            .write((queue_size << 16) | (2 << 2) | (1 << 1));
+        r.mtl_queue0_irq_control_status.write(0x10u32);
+        r.dma_sysbus_mode
+            .write((3u32 << 24) | (3 << 16) | (1 << 3) | (1 << 2) | (1 << 1));
+        r.dma_channel0_control.write(0u32); // contiguous 16-byte descriptors, PBLx8 off
+        r.tx_control.write(16u32 << 16);
+        r.tx_descriptor_list_high.write(0u32);
+        r.tx_descriptor_list_low.write(self.dma_phys);
+        r.tx_ring_length.write((RING_LEN - 1) as u32);
+        r.tx_tail.write(self.dma_phys);
+        r.rx_control
+            .write((16 << 16) | (u32::from(rx::BUFFER_SIZE) << 1));
+        r.rx_descriptor_list_high.write(0u32);
+        r.rx_descriptor_list_low.write(self.dma_phys + 0x100);
+        r.rx_ring_length.write((RING_LEN - 1) as u32);
+        r.rx_tail.write(self.dma_phys + 0x100);
+        r.rx_watchdog.write(0u32); // RX watchdog off; every packet requests an IRQ
+        r.dma_status.write(DMA_ACK_MASK);
+        r.dma_irq_enable.write(DMA_IRQ_MASK);
         tau::asm::fence();
-        r.modify(MAC_CONFIG, 0, 1 << 1);
-        r.modify(TX_CONTROL, 0, 1);
+        r.mac_config.write(r.mac_config.read() | (1 << 1));
+        r.tx_control.write(r.tx_control.read() | 1);
         // A link change may have reset an outstanding RX. Only after SWR
         // clears can its descriptor safely be rebuilt using the same buffer.
         if let Some(task) = self.rx_pending.take() {
@@ -338,9 +292,10 @@ impl State {
         tau::asm::fence();
         let next = (self.rx_index + 1) % RING_LEN;
         self.reg
-            .write(RX_TAIL, self.dma_phys + 0x100 + (next * 16) as u32);
-        self.reg.modify(RX_CONTROL, 0, 1);
-        self.reg.modify(MAC_CONFIG, 0, 1);
+            .rx_tail
+            .write(self.dma_phys + 0x100 + (next * 16) as u32);
+        self.reg.rx_control.write(self.reg.rx_control.read() | 1);
+        self.reg.mac_config.write(self.reg.mac_config.read() | 1);
         self.rx_pending = Some(task);
     }
 
@@ -370,7 +325,7 @@ impl State {
     }
 
     fn send(&mut self, task: TxTask) {
-        let desc = &self.descriptors[self.index].0;
+        let desc = &self.tx_descriptors[self.index].0;
         desc[0].write(task.phys);
         desc[1].write(0u32);
         desc[2].write((1u32 << 31) | u32::from(task.len)); // completion interrupt
@@ -378,7 +333,7 @@ impl State {
         desc[3].write(OWN | (1 << 29) | (1 << 28) | u32::from(task.len));
         tau::asm::fence();
         let next = (self.index + 1) % RING_LEN;
-        self.reg.write(TX_TAIL, self.dma_phys + (next * 16) as u32);
+        self.reg.tx_tail.write(self.dma_phys + (next * 16) as u32);
         self.pending = true;
         self.pending_ticks = 0;
     }
@@ -387,13 +342,13 @@ impl State {
     pub fn submit(&mut self, shared: &mut Shared) {
         self.submit_rx(shared);
         let port = usize::from(self.port);
-        if self.pending || shared.ethernet_done[port].is_some() {
+        if self.pending || shared.ethernet_tx_done[port].is_some() {
             return;
         }
-        let Some(task) = shared.ethernet_task[port].take() else {
+        let Some(task) = shared.ethernet_tx_task[port].take() else {
             return;
         };
-        let error = if !valid_tx(task) {
+        let error = if !tx::valid(task) {
             TxError::InvalidBuffer
         } else {
             match self.phase {
@@ -405,7 +360,7 @@ impl State {
                 _ => TxError::NotReady,
             }
         };
-        shared.ethernet_done[port] = Some(Err(error));
+        shared.ethernet_tx_done[port] = Some(Err(error));
     }
 
     fn step(&mut self, shared: &mut Shared, timer: bool) -> Result<(), &'static str> {
@@ -417,23 +372,23 @@ impl State {
                     self.phase = Phase::Failed;
                     return Ok(());
                 }
-                let version = self.reg.read(0x110);
+                let version = self.reg.mac_version.read();
                 shared.write(format_args!(
                     "eth{}: version={version:08x} features={:08x}/{:08x}/{:08x} DMA={:08x}",
                     self.port,
-                    self.reg.read(0x11c),
-                    self.reg.read(0x120),
-                    self.reg.read(0x124),
+                    self.reg.mac_hw_feature0.read(),
+                    self.reg.mac_hw_feature1.read(),
+                    self.reg.mac_hw_feature2.read(),
                     self.dma_phys
                 ));
                 if !matches!(version & 0xff, 0x51 | 0x52) {
                     return Err("unsupported GMAC version (expected 5.10/5.20)");
                 }
-                self.reg.write(DMA_IRQ_ENABLE, 0);
-                self.reg.write(0xb4, 0);
-                self.reg.modify(TX_CONTROL, 1, 0);
-                self.reg.modify(0x1108, 1, 0);
-                self.reg.modify(MAC_CONFIG, 3, 0);
+                self.reg.dma_irq_enable.write(0u32);
+                self.reg.mac_irq_enable.write(0u32);
+                self.reg.tx_control.write(self.reg.tx_control.read() & !1);
+                self.reg.rx_control.write(self.reg.rx_control.read() & !1);
+                self.reg.mac_config.write(self.reg.mac_config.read() & !3);
                 let mut found = None;
                 for phy in 0..32 {
                     let id = (u32::from(self.mdio(phy, 2, None)?) << 16)
@@ -484,7 +439,7 @@ impl State {
                         "eth{}: link {speed} Mbit/s full duplex",
                         self.port
                     ));
-                    self.reg.write(DMA_MODE, 1);
+                    self.reg.dma_mode.write(1u32);
                     self.phase = Phase::DmaReset(0);
                 } else if self.ticks.is_multiple_of(50) {
                     shared.write(format_args!(
@@ -494,7 +449,7 @@ impl State {
                 }
             }
             Phase::DmaReset(attempt) if timer => {
-                if self.reg.read(DMA_MODE) & 1 == 0 {
+                if self.reg.dma_mode.read() & 1 == 0 {
                     self.configure_dma();
                     self.phase = Phase::Ready;
                 } else if attempt == 20 {
@@ -504,8 +459,8 @@ impl State {
                 }
             }
             Phase::Ready => {
-                let status = self.reg.read(DMA_STATUS);
-                self.reg.write(DMA_STATUS, status & DMA_ACK_MASK);
+                let status = self.reg.dma_status.read();
+                self.reg.dma_status.write(status & DMA_ACK_MASK);
                 if status & (1 << 12) != 0 {
                     // Preserve the fault bits before the W1C acknowledgement.
                     shared.write(format_args!(
@@ -515,14 +470,14 @@ impl State {
                     return Err("DMA fatal bus error");
                 }
                 if self.pending {
-                    let desc = self.descriptors[self.index].0[3].read();
+                    let desc = self.tx_descriptors[self.index].0[3].read();
                     if desc & OWN == 0 {
                         tau::asm::fence();
                         shared.write(format_args!(
                             "eth{}: TX completed descriptor={desc:08x} DMA={status:08x} irqs={}",
                             self.port, self.irq_count
                         ));
-                        shared.ethernet_done[usize::from(self.port)] =
+                        shared.ethernet_tx_done[usize::from(self.port)] =
                             Some(if desc & (1 << 15) != 0 {
                                 Err(TxError::Descriptor)
                             } else {
@@ -553,10 +508,10 @@ impl State {
                 if timer && !self.pending && self.ticks.is_multiple_of(10) {
                     self.phy_read(1)?;
                     if self.phy_read(1)? & 4 == 0 || self.phy_read(0x11)? & 0xe000 != self.link {
-                        self.reg.write(DMA_IRQ_ENABLE, 0);
-                        self.reg.modify(TX_CONTROL, 1, 0);
-                        self.reg.modify(RX_CONTROL, 1, 0);
-                        self.reg.modify(MAC_CONFIG, 3, 0);
+                        self.reg.dma_irq_enable.write(0u32);
+                        self.reg.tx_control.write(self.reg.tx_control.read() & !1);
+                        self.reg.rx_control.write(self.reg.rx_control.read() & !1);
+                        self.reg.mac_config.write(self.reg.mac_config.read() & !3);
                         self.phase = Phase::Link;
                         shared.write(format_args!("eth{}: link changed, waiting", self.port));
                     }
@@ -585,14 +540,14 @@ impl DriverState for State {
                 "eth{}: {error}; phase={:?} DMA={:08x} TX={:08x} MTL={:08x}",
                 self.port,
                 self.phase,
-                self.reg.read(DMA_STATUS),
-                self.reg.read(TX_CONTROL),
-                self.reg.read(0xd08)
+                self.reg.dma_status.read(),
+                self.reg.tx_control.read(),
+                self.reg.mtl_tx_queue0_debug.read()
             ));
-            self.reg.write(DMA_IRQ_ENABLE, 0);
-            self.reg.modify(TX_CONTROL, 1, 0);
-            self.reg.modify(RX_CONTROL, 1, 0);
-            self.reg.modify(MAC_CONFIG, 3, 0);
+            self.reg.dma_irq_enable.write(0u32);
+            self.reg.tx_control.write(self.reg.tx_control.read() & !1);
+            self.reg.rx_control.write(self.reg.rx_control.read() & !1);
+            self.reg.mac_config.write(self.reg.mac_config.read() & !3);
             self.phase = Phase::Failed;
             if self.rx_pending.take().is_some() {
                 shared.ethernet_rx_done[usize::from(self.port)] =
@@ -602,7 +557,7 @@ impl DriverState for State {
                 // Stopping the channel alone does not prove all bus accesses
                 // have drained. Do not promise the caller buffer ownership.
                 self.pending = false;
-                shared.ethernet_done[usize::from(self.port)] =
+                shared.ethernet_tx_done[usize::from(self.port)] =
                     Some(Err(TxError::BufferUnavailable));
             }
         }

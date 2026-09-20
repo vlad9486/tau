@@ -6,7 +6,7 @@ use super::{
 };
 
 pub struct State {
-    reg: &'static Reg,
+    reg: &'static Registers,
     inner: StateInner,
     fifo_depth: u32,
     rca: u32,
@@ -251,7 +251,7 @@ impl State {
 }
 
 #[repr(C, align(0x1000))]
-struct Reg {
+struct Registers {
     ctrl: Register<Ctrl, Ctrl>,
     pwren: Register<u32, u32>,
     clkdiv: Register<u32, u32>,
@@ -336,7 +336,7 @@ bitflags::bitflags! {
     }
 }
 
-impl Reg {
+impl Registers {
     fn init(&self, fifo_depth: u32) -> Result<(), DriverError> {
         let ctrl_reset = Ctrl::RESET_CONTROLLER | Ctrl::FIFO_RESET | Ctrl::DMA_RESET;
         self.ctrl.write(ctrl_reset);
