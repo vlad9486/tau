@@ -59,6 +59,12 @@ extern "C" fn init(
     cores: usize,
     frames: usize,
 ) -> ! {
+    writeln!(
+        sbi::Console,
+        "SU: init hart={hart_id} cores={cores} frames=0x{frames:016x}\r"
+    )
+    .unwrap_or_default();
+
     let window = unsafe { &mut *__WINDOW.get() };
     let thread = unsafe { &mut *__THREAD.get() };
     let module = unsafe { __MODULE.get() };

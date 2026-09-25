@@ -120,6 +120,16 @@ impl PlicPriority {
 
 impl PlicEnable {
     #[inline(always)]
+    pub fn disable_all(&self, context_id: usize) {
+        let Some(enable_bit) = self.enable_bit.get(context_id % 0x20) else {
+            return;
+        };
+        for reg in enable_bit {
+            reg.write(0u32);
+        }
+    }
+
+    #[inline(always)]
     pub fn enable(&self, context_id: usize, id: &InterruptNumber) {
         let Some(enable_bit) = self.enable_bit.get(context_id % 0x20) else {
             return;

@@ -17,9 +17,9 @@ pub struct State<'a> {
 }
 
 impl<'a> State<'a> {
-    pub fn new(shared: &'a UnsafeCell<Shared>) -> Self {
+    pub fn new(shared: &'a UnsafeCell<Shared>, has_sdio: bool, has_ethernet: bool) -> Self {
         State {
-            fut: Box::pin(run(shared)),
+            fut: Box::pin(run(shared, has_sdio, has_ethernet)),
         }
     }
 
@@ -30,8 +30,8 @@ impl<'a> State<'a> {
     }
 }
 
-async fn run(shared: &UnsafeCell<Shared>) {
-    {
+async fn run(shared: &UnsafeCell<Shared>, has_sdio: bool, has_ethernet: bool) {
+    if has_sdio {
         // TODO: allocator for DMA
         let phys = 0x7000_1000_u32;
         let base = tau::to_size(phys);
@@ -58,12 +58,15 @@ async fn run(shared: &UnsafeCell<Shared>) {
         tx_phys.map(|phys| tau::Area::new(phys as usize, 0x1000).r::<[Register<u8, u8>; 0x1000]>());
     let mut tx_usable = [true, false];
     let mut tx_pending = [None; 2];
+
     // User-owned RX pages, separate from both descriptor rings and TX buffers.
     let rx_phys = [0x7000_6000u32, 0x7000_7000];
     let rx_buffers =
         rx_phys.map(|phys| tau::Area::new(phys as usize, 0x1000).r::<[Register<u8, u8>; 0x1000]>());
-    for (port, phys) in rx_phys.into_iter().enumerate() {
-        post_receive(shared, port, phys);
+    if has_ethernet {
+        for (port, phys) in rx_phys.into_iter().enumerate() {
+            post_receive(shared, port, phys);
+        }
     }
     let mut sequence = 0u32;
     let mut cmd = [0; 1];

@@ -27,6 +27,23 @@ impl Config {
             return None;
         }
 
+        // Inherit the configuration of a UART already used as the boot
+        // console. In particular, SPL and the SBI firmware use JH7110 UART0
+        // at 115200. Reprogramming that DW APB UART here can wait forever on
+        // its BUSY bit, and the board DTB does not contain current-speed.
+        let current_speed = props
+            .find_int(|name| name == "current-speed")
+            .and_then(|value| value.first().copied())
+            .map(u32::to_be);
+        let dw_apb = props
+            .find_str(|name| name == "compatible")
+            .is_some_and(|compatible| compatible.split('\0').any(|s| s == "snps,dw-apb-uart"));
+        let baud_rate = if current_speed == Some(baud_rate) || dw_apb {
+            0
+        } else {
+            baud_rate
+        };
+
         Some(Config {
             area,
             reg_io_width,

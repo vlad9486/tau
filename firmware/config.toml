@@ -1,0 +1,20 @@
+[[board]]
+name = "qemu"
+firmware = 0x80000000
+dtb = 0x801c0000
+payload = 0x80200000
+uart = 0x10000000
+clint = 0x02000000
+reset = 0x00100000
+stack_size = 0x4000
+max_image_size = 0x4000000
+
+[[board]]
+name = "visionfive2"
+firmware = 0x40000000
+dtb = 0x401c0000
+payload = 0x40200000
+uart = 0x10000000
+clint = 0x02000000
+stack_size = 0x4000
+max_image_size = 0x400000

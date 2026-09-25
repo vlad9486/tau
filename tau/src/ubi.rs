@@ -138,6 +138,12 @@ impl Ubi {
         // supervisor will not send invalid value
         unsafe { Event::decode(a0).unwrap_unchecked() }
     }
+
+    /// Print a diagnostic checkpoint and one machine-word value through the
+    /// supervisor's SBI debug console.
+    pub fn debug(checkpoint: usize, value: usize) {
+        let (_, []) = ubi(Call::Debug, [checkpoint, value]);
+    }
 }
 
 #[repr(usize)]

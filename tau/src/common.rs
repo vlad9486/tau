@@ -136,6 +136,8 @@ pub enum Call {
     Unmap,
     /// Wait an external interrupt. The message may provide a timeout.
     Wait,
+    /// Emit a diagnostic checkpoint through the supervisor console.
+    Debug,
 }
 
 impl Call {
@@ -156,6 +158,7 @@ impl Call {
             Self::Map => (2 << 4) + 0b1001,
             Self::Unmap => (3 << 4) + 0b1001,
             Self::Wait => (4 << 4) + 0b1001,
+            Self::Debug => (5 << 4) + 0b1001,
         }
     }
 
@@ -190,6 +193,7 @@ impl Call {
                     2 => Ok(Self::Map),
                     3 => Ok(Self::Unmap),
                     4 => Ok(Self::Wait),
+                    5 => Ok(Self::Debug),
                     _ => Err(a0),
                 },
                 _ => Err(a0),

@@ -176,7 +176,7 @@ impl Tasks {
             // TODO: take from dts
             freq: 4_000_000_u128,
         });
-        let mut user = user::State::new(&shared);
+        let mut user = user::State::new(&shared, self.sdio.is_some(), !self.ethernet.is_empty());
 
         let shared = unsafe { &mut *shared.get() };
 

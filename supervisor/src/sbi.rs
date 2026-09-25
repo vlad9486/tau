@@ -63,8 +63,12 @@ pub fn hart_stop() -> Result<usize, SbiError> {
 pub fn system_reset() -> ! {
     unsafe {
         asm::sbi(u32::from_be_bytes(*b"SRST"), 0, [0, 0]);
-        hint::unreachable_unchecked()
     };
+    // An SBI without SRST returns NOT_SUPPORTED. There is nowhere useful to
+    // return to after Tau has requested shutdown, so remain stopped.
+    loop {
+        hint::spin_loop();
+    }
 }
 
 pub struct Printer;

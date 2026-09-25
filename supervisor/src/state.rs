@@ -306,6 +306,15 @@ pub fn syscall(
             };
             msg[0] = event.encode();
         }
+        Ok(tau::Call::Debug) => {
+            write!(
+                sbi::Console,
+                "SYS: checkpoint={} value=0x{:016x}\r\n",
+                msg[1],
+                msg[2]
+            )
+            .unwrap_or_default();
+        }
         Err(a0) => {
             write!(sbi::Console, "cannot decode {a0:016x}\r\n").unwrap_or_default();
             loop {

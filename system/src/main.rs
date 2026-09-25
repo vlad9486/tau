@@ -105,7 +105,9 @@ extern "C" fn main(
 
     let plic = tau::Area::new(plic_area.base, 0x2000).r();
 
-    let plic_e = tau::Area::new(plic_area.base + plic::enable_offset(context_id), 0x1000).r();
+    let plic_e = tau::Area::new(plic_area.base + plic::enable_offset(context_id), 0x1000)
+        .r::<plic::PlicEnable>();
+    plic_e.disable_all(context_id);
 
     let plic_ctx = tau::Area::new(plic_area.base + plic::context_offset(context_id), 0x1000)
         .r::<plic::PlicCtx>();

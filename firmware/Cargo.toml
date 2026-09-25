@@ -1,0 +1,26 @@
+[package]
+name = "tau-firmware"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "tau-qemu"
+path = "src/bin/qemu.rs"
+test = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "tau-visionfive2"
+path = "src/bin/visionfive2.rs"
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+rustsbi = { version = "=0.4.1", features = ["machine"] }
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"

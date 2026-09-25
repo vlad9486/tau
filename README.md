@@ -26,52 +26,56 @@ Tau is optimized for 64+ core systems, ensuring superior scalability compared to
 
 Tau is currently under development and not yet ready for general use.
 
-## Build Dependencies Ubuntu 24.04
+## Builder
+
+The builder is not part of this repository, `tau-builder` crate is required to build the system and firmware.
+Install the builder from separate repository.
+This workspace provides `tau-firmware` with `tau-qemu` and `tau-visionfive2` binary targets;
+the builder must use these names when selecting and locating firmware images.
+
+```
+cargo install --path .
+```
+
+## Build for Vision Five 2
+
+### Build Dependencies Ubuntu 24.04
 
 ```
 apt install -y make clang llvm lld device-tree-compiler u-boot-tools
 ```
 
-You may be missing some build time dependencies. It needs at least `git`, `make`, `bison`, `flex`, `clang` and `riscv64-linux-gnu-gcc` to build u-boot and OpenSBI.
+You may be missing some build time dependencies. It needs at least `git`, `make`, `bison`, `flex` and `riscv64-linux-gnu-gcc` to build U-Boot SPL.
 
-## Build for Vision Five 2
-
-The builder is not part of this repository, `tau-builder` crate is required to build for Vision Five 2.
-Install the builder from that separate repository.
+Run this command to clone U-Boot git repository into `target` directory
+and build U-Boot SPL, firmware and tau.
 
 ```
-cargo install --path . --bin tau-builder
-```
-
-Run this command to clone u-boot and OpenSBI git repositories into `riscv/target` directory
-and build them.
-
-```
-tau-builder build-firmware
+tau-builder build --vf2
 ```
 
 Format the SD card. The command will ask root password. Double check device path,
-the command will destroy the data contained on the first few megabytes of the disk.
-Then it will create GPT on the device and write u-boot and OpenSBI on the corresponding partitions.
+the command will destroy the data contained on the first and last few megabytes of the device.
+Then it will create GPT on the device and write U-Boot SPL, rustsbi-based firmware
+and tau on the corresponding partitions.
 
 ```
 tau-builder format --path=/dev/sdX
 ```
 
-Build and write the tau image on the SD card by the following:
+In order to update only tau itself, keeping existing SPL and firmware, use this command:
 
 ```
-tau-builder build-tau
-tau-builder update --path=/dev/disk/by-partlabel/starfive_visionfive_2_u-boot
+tau-builder update --path=/dev/disk/by-partlabel/starfive_visionfive_2_tau
 ```
 
 ## Build for another computer
 
-You need the device tree and OpenSBI version for the specific computer.
+You need the device tree and firmware for the specific computer.
 
 ## Qemu
 
 ```
-tau-builder build-tau --qemu
-qemu-system-riscv64 -M virt -smp 4 -m 4G -nographic -bios target/opensbi-qemu/build/platform/generic/firmware/fw_payload.elf
+tau-builder build --qemu
+qemu-system-riscv64 -M virt -smp 4 -m 4G -nographic -bios target/riscv64imac-unknown-none-elf/release/tau-qemu
 ```

@@ -1,6 +1,8 @@
 [workspace]
-members = ["supervisor", "system", "tau"]
+members = ["firmware", "supervisor", "system", "tau"]
 resolver = "3"
 
 [profile.release]
 lto = true
+debug = 2
+strip = "none"
