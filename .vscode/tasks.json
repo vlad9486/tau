@@ -8,7 +8,8 @@
             "type": "shell",
             "command": "tau-builder",
             "args": [
-                "build-tau"
+                "build",
+                "--vf2"
             ],
             "group": {
                 "kind": "build",

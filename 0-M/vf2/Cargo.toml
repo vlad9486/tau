@@ -1,0 +1,12 @@
+[package]
+name = "tau-visionfive2-spl"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "tau-visionfive2-spl"
+path = "src/main.rs"
+test = false
+doctest = false
+bench = false

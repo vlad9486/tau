@@ -18,8 +18,8 @@ mod board {
 
     #[used]
     #[unsafe(link_section = ".dtb")]
-    pub(super) static DTB: [u8; include_bytes!("../../boards/qemu-riscv-virt.dtb").len()] =
-        *include_bytes!("../../boards/qemu-riscv-virt.dtb");
+    pub(super) static DTB: [u8; include_bytes!("../../boards/qemu/virt.dtb").len()] =
+        *include_bytes!("../../boards/qemu/virt.dtb");
 
     unsafe extern "C" {
         static __UART: u8;

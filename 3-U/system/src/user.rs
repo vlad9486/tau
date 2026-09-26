@@ -249,7 +249,7 @@ mod frame {
     }
 
     // Can run on the host independently of Tau's RISC-V runtime:
-    // rustc --edition=2024 --test system/src/user/frame.rs -o /tmp/tau-frame-test
+    // rustc --edition=2024 --test 3-U/system/src/user/frame.rs -o /tmp/tau-frame-test
     #[cfg(test)]
     mod tests {
         use super::*;

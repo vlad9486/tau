@@ -1,5 +1,5 @@
 [workspace]
-members = ["firmware", "supervisor", "system", "tau"]
+members = ["0-M", "0-M/vf2", "2-S", "3-U/system", "tau"]
 resolver = "3"
 
 [profile.release]

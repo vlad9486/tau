@@ -30,8 +30,7 @@ Tau is currently under development and not yet ready for general use.
 
 The builder is not part of this repository, `tau-builder` crate is required to build the system and firmware.
 Install the builder from separate repository.
-This workspace provides `tau-firmware` with `tau-qemu` and `tau-visionfive2` binary targets;
-the builder must use these names when selecting and locating firmware images.
+This workspace provides `tau-firmware` in `0-M` with `tau-qemu` and `tau-visionfive2` binary targets, plus `tau-visionfive2-spl` in `0-M/vf2` for the board's first boot stage. The supervisor package lives in `2-S`, and the system package lives in `3-U/system`. The builder uses the binary target names when selecting and locating firmware images.
 
 ```
 cargo install --path .
@@ -45,10 +44,7 @@ cargo install --path .
 apt install -y make clang llvm lld device-tree-compiler u-boot-tools
 ```
 
-You may be missing some build time dependencies. It needs at least `git`, `make`, `bison`, `flex` and `riscv64-linux-gnu-gcc` to build U-Boot SPL.
-
-Run this command to clone U-Boot git repository into `target` directory
-and build U-Boot SPL, firmware and tau.
+Build the Rust SPL, firmware and Tau with:
 
 ```
 tau-builder build --vf2
@@ -56,7 +52,7 @@ tau-builder build --vf2
 
 Format the SD card. The command will ask root password. Double check device path,
 the command will destroy the data contained on the first and last few megabytes of the device.
-Then it will create GPT on the device and write U-Boot SPL, rustsbi-based firmware
+Then it will create GPT on the device and write the Rust SPL, rustsbi-based firmware
 and tau on the corresponding partitions.
 
 ```

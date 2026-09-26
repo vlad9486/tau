@@ -249,6 +249,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tau-visionfive2-spl"
+version = "0.1.0"
+
+[[package]]
 name = "toml"
 version = "0.9.12+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

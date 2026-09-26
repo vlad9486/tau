@@ -22,9 +22,9 @@ mod board {
     #[used]
     #[unsafe(link_section = ".dtb")]
     pub(super) static DTB: [u8; include_bytes!(
-        "../../boards/jh7110-starfive-visionfive-2-v1.3b.dtb"
+        "../../boards/vf2/jh7110-starfive-visionfive-2-v1.3b.dtb"
     )
-    .len()] = *include_bytes!("../../boards/jh7110-starfive-visionfive-2-v1.3b.dtb");
+    .len()] = *include_bytes!("../../boards/vf2/jh7110-starfive-visionfive-2-v1.3b.dtb");
 
     unsafe extern "C" {
         static __UART: u8;
