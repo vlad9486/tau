@@ -41,7 +41,7 @@ static BOOT_READY: AtomicUsize = AtomicUsize::new(0);
 #[unsafe(link_section = ".data.boot")]
 static BOOT_HART: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-// tau-builder supplies this file through TAU_SBI_PAYLOAD. Keeping the bytes in
+// The tau tool supplies this file through TAU_SBI_PAYLOAD. Keeping the bytes in
 // their own section makes both the ELF and an objcopy-produced raw image carry
 // the supervisor payload at __PAYLOAD.
 #[used]

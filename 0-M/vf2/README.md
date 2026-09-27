@@ -1,6 +1,6 @@
 # VisionFive 2 Rust SPL
 
-This package builds a raw SPL image for a VisionFive 2 v1.3b with **8 GiB LPDDR4**, booting from **microSD**. From the workspace root, run `cargo build --release -p tau-visionfive2-spl`, then use `rust-objcopy -O binary target/riscv64imac-unknown-none-elf/release/tau-visionfive2-spl target/riscv64imac-unknown-none-elf/release/tau-visionfive2-spl.bin`. The separate `tau-builder` repository also builds this package with `tau-builder build --vf2` and adds the 0x400-byte StarFive header when writing the GPT image.
+This package builds the SPL ELF for a VisionFive 2 v1.3b with **8 GiB LPDDR4**, booting from **microSD**. From the workspace root, run `cargo build --release -p tau-visionfive2-spl`. The separate `tau-tool` repository provides `tau build --vf2` to build both SPL and firmware. `tau format` converts the ELFs into raw images in memory and adds the 0x400-byte StarFive header when writing the SD card.
 
 The ROM loads the SPL at `0x08000000`. Hart 1 configures the PLLs, 8 GiB LPDDR4, UART0 and SDIO1. The SPL reads the first 4 MiB of GPT partition 2 into `0x40000000` using four-bit SD mode and 64-sector reads, then releases harts 1–4 into Tau's SBI firmware. UART0 reports the main stages at 115200 baud:
 

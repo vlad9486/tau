@@ -236,6 +236,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "system-test"
+version = "0.1.0"
+dependencies = [
+ "tau",
+]
+
+[[package]]
 name = "tau"
 version = "0.1.0"
 

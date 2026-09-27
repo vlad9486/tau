@@ -26,15 +26,16 @@ Tau is optimized for 64+ core systems, ensuring superior scalability compared to
 
 Tau is currently under development and not yet ready for general use.
 
-## Builder
+## Tooling
 
-The builder is not part of this repository, `tau-builder` crate is required to build the system and firmware.
-Install the builder from separate repository.
-This workspace provides `tau-firmware` in `0-M` with `tau-qemu` and `tau-visionfive2` binary targets, plus `tau-visionfive2-spl` in `0-M/vf2` for the board's first boot stage. The supervisor package lives in `2-S`, and the system package lives in `3-U/system`. The builder uses the binary target names when selecting and locating firmware images.
+The separate `tau-tool` repository provides the `tau` command for building firmware,
+running OS tests, and preparing SD cards. Install it from the `tau-tool` checkout:
 
 ```
 cargo install --path .
 ```
+
+This workspace provides `tau-firmware` in `0-M` with `tau-qemu` and `tau-visionfive2` binary targets, plus `tau-visionfive2-spl` in `0-M/vf2` for the board's first boot stage. The supervisor package lives in `2-S`, and the system package lives in `3-U/system`. The tool uses the binary target names when selecting and locating firmware images.
 
 ## Build for Vision Five 2
 
@@ -47,7 +48,7 @@ apt install -y make clang llvm lld device-tree-compiler u-boot-tools
 Build the Rust SPL, firmware and Tau with:
 
 ```
-tau-builder build --vf2
+tau build --vf2
 ```
 
 Format the SD card. The command will ask root password. Double check device path,
@@ -56,13 +57,13 @@ Then it will create GPT on the device and write the Rust SPL, rustsbi-based firm
 and tau on the corresponding partitions.
 
 ```
-tau-builder format --path=/dev/sdX
+tau format --path=/dev/sdX
 ```
 
 In order to update only tau itself, keeping existing SPL and firmware, use this command:
 
 ```
-tau-builder update --path=/dev/disk/by-partlabel/starfive_visionfive_2_tau
+tau update --path=/dev/disk/by-partlabel/starfive_visionfive_2_tau
 ```
 
 ## Build for another computer
@@ -72,6 +73,15 @@ You need the device tree and firmware for the specific computer.
 ## Qemu
 
 ```
-tau-builder build --qemu
+tau build --qemu
 qemu-system-riscv64 -M virt -smp 4 -m 4G -nographic -bios target/riscv64imac-unknown-none-elf/release/tau-qemu
 ```
+
+## OS integration tests
+
+Run `tau test` to build and boot the [system-test payload](3-U/test/README.md)
+with the normal supervisor. Use `tau test --list` to list scenarios or
+`tau test timer` to select one. Tests require QEMU and `gdb-multiarch`;
+all host code lives in the separate `tau-tool` repository. Builds use the
+default `target` directory; test logs live under `target/tau-test`. Run
+`tau build --qemu` to switch the firmware back to the normal system payload.

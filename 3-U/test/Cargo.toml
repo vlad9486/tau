@@ -1,0 +1,13 @@
+[package]
+name = "system-test"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "system-test"
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+tau = { path = "../../tau" }

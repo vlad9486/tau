@@ -6,7 +6,7 @@
         {
             "label": "build-vf2",
             "type": "shell",
-            "command": "tau-builder",
+            "command": "tau",
             "args": [
                 "build",
                 "--vf2"
