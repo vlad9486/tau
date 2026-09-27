@@ -1,0 +1,101 @@
+// description from the perspective of user of the interface
+// `producer` is prosucer's part, `consumer` is consumer's part of spsc ring buffer
+// AF_XDP style
+interface PacketLink {
+    // `fill` is a hint and can be omited
+    fill: producer { offset: 0, size: 2 },
+    receive: consumer { offset: 2, size: 2 },
+    transmit: producer { offset: 4, size: 2 },
+    complete: consumer { offset: 6, size: 2 },
+    umem: region { offset: 8, size: 64, readonly: false },
+
+    send: call { slot: 0, in: 0, out: 0 },  // doorbell
+
+    // we shouldn't have this
+    // instead we should have global `wait` of all or any subset of
+    // channels that the caller's role context has access to
+    // poll: call { slot: 1, in: 1, out: 1 },
+}
+
+interface NetworkInfo {
+    status: region { offset: 0, size: 1, readonly: true },
+}
+
+interface Run {
+    stdin: producer { offset: 0, size: 4 },
+    stdout: consumer { offset: 4, size: 4 },
+    // 6 is maximal number of arguments passed in registers
+    main: call { slot: 0, in: 6, out: 6 },
+}
+
+class EthernetDriver {
+    // role context
+    worker: {
+        provides PacketLink {
+            offset: 0,
+            slot: 0,
+            limit: 1,
+        },
+
+        // slot must start at 1 or further,
+        // memory offset must start at 72 or further,
+        // because some slots and memory occupied by previous interface
+        provides NetworkInfo {
+            // probably, we should be able to omit this
+            // derive `offset` and `slot` automatically
+            offset: 72,
+            slot: 1,
+            // unlimited number of clients
+            limit: 0,
+        },
+
+        // let's have here link to DTB
+        access "/soc/ethernet@16030000",
+        access "/soc/ethernet@16040000",
+    }
+
+    // another role context that doesn't have access to the ethernet device
+    // but has access to some UART, so the driver can spawn another thread
+    // the context doesn't provide any interface, but it could
+    // logger: {
+    //     access "/soc/serial@10000000";
+    // }
+}
+
+// in this simplified example of application that directly uses `EthernetDriver`
+// in real system there should be some network service that
+// uses `PacketLink` and `NetworkInfo`,
+// provides `Udp` and more
+class NetworkApplication {
+    run: {
+        provides Run {
+            offset: 0,
+            slot: 0,
+            // application can have arbitrary many instances
+            limit: 0,
+        },
+
+        uses PacketLink {
+            offset: 0,
+            slot: 0,
+        },
+    }
+}
+
+// the ELF file which implements a class will have `Manifest` structure as an entry point
+// the manifest will declare where shared memory regions should be mapped
+//
+// ```Rust
+// pub struct Manifest {
+//     pub this: ModuleId,
+//     pub class: ClassId,
+//     // first argument is slot id, and probably some flags
+//     pub entry: extern "C" fn(usize, usize, usize, usize, usize, usize) ->
+//         (usize, usize, usize, usize, usize, usize),
+//     pub dependencies: &'static [InterfaceId],
+//     // this specifies virtual addresses for each used interface region
+//     // we should remove it from the manifest and need to provide a way
+//     // to instantiate endpoints of the interface in runtime
+//     // pub mapped_regions: &'static [MappedRegion],
+// }
+// ```
