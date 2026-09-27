@@ -12,6 +12,24 @@ pub struct Context {
     pub base_addr: usize,
 }
 
+const INTERRUPT_BIT: usize = 1 << (usize::BITS - 1);
+const SUPERVISOR_TIMER: usize = 5;
+const SUPERVISOR_EXTERNAL: usize = 9;
+const PENDING_TIMER: usize = 1;
+const PENDING_EXTERNAL: usize = 2;
+
+fn take_pending_interrupt(thread: &mut Thread) -> Option<tau::Event> {
+    if thread.pending_interrupts & PENDING_EXTERNAL != 0 {
+        thread.pending_interrupts &= !PENDING_EXTERNAL;
+        Some(tau::Event::Interrupt { id: 0 })
+    } else if thread.pending_interrupts & PENDING_TIMER != 0 {
+        thread.pending_interrupts &= !PENDING_TIMER;
+        Some(tau::Event::Timeout)
+    } else {
+        None
+    }
+}
+
 impl Context {
     pub fn page(&self, hart_id: usize) -> Result<usize, llfree::Error> {
         let frame = self.allocator.alloc(hart_id, 0)?.0;
@@ -272,15 +290,20 @@ pub fn syscall(
             // TODO:
         }
         Ok(tau::Call::Wait) => {
+            if let Some(event) = take_pending_interrupt(thread) {
+                msg[0] = event.encode();
+                return msg;
+            }
             if msg[1] != 0 {
                 sbi::set_timer(msg[1]).unwrap_or_default();
             }
             let cause = wait();
-            let event = if cause == (1 << 63) + 5 {
+            let event = if cause == (INTERRUPT_BIT | SUPERVISOR_TIMER) {
                 sbi::set_timer(usize::MAX).unwrap_or_default();
                 // sbi::Printer.ch(*b"SU: timer\r\n");
                 tau::Event::Timeout
-            } else if cause == (1 << 63) + 9 {
+            } else if cause == (INTERRUPT_BIT | SUPERVISOR_EXTERNAL) {
+                cpu::csrrc!("sie", 1 << SUPERVISOR_EXTERNAL);
                 // sbi::Printer.ch(*b"SU: interrupt\r\n");
                 tau::Event::Interrupt { id: 0 }
             } else if cause == (1 << 63) + 1 {
@@ -371,8 +394,6 @@ fn wait() -> usize {
             "nop",
             "li t1, 0x120",
             "csrrc t0, sstatus, t1",
-            "li t1, 0x220",
-            "csrrc t0, sie, t1",
             "csrw sepc, t2",
             "csrw stvec, t3",
             "csrr {0}, scause",
@@ -385,7 +406,7 @@ fn wait() -> usize {
 }
 
 #[inline(always)]
-pub fn exception(cause: isize) {
+pub fn handle_non_syscall_trap(cause: isize, thread: &mut Thread) {
     use core::fmt::Write;
 
     if cause >= 0 {
@@ -399,6 +420,19 @@ pub fn exception(cause: isize) {
         .unwrap_or_default();
         tau::asm::dbg([0xdeadbeef]);
     } else {
-        sbi::Printer.ch(*b"SU: miss interrupt\r\n");
+        match (cause as usize) & !INTERRUPT_BIT {
+            SUPERVISOR_TIMER => {
+                sbi::set_timer(usize::MAX).unwrap_or_default();
+                thread.pending_interrupts |= PENDING_TIMER;
+            }
+            SUPERVISOR_EXTERNAL => {
+                // Keep the level interrupt gated until userspace drains the PLIC.
+                cpu::csrrc!("sie", 1 << SUPERVISOR_EXTERNAL);
+                thread.pending_interrupts |= PENDING_EXTERNAL;
+            }
+            _ => {
+                sbi::Printer.ch(*b"SU: unexpected interrupt\r\n");
+            }
+        };
     }
 }

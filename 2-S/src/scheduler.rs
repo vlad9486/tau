@@ -1,7 +1,8 @@
 #[repr(C)]
 pub struct Thread {
-    pub registers: [usize; 64],
+    pub registers: [usize; 32],
     pub sepc: usize,
+    pub pending_interrupts: usize,
 }
 
 impl Thread {
