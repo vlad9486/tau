@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Vladyslav Melnyk
+// SPDX-License-Identifier: GPL-3.0-or-later
+// See LICENSE for the full license text.
+
 // description from the perspective of user of the interface
 // `producer` is prosucer's part, `consumer` is consumer's part of spsc ring buffer
 // AF_XDP style

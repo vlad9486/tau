@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Vladyslav Melnyk
+// SPDX-License-Identifier: GPL-3.0-or-later
+// See LICENSE for the full license text.
+
 use core::fmt;
 
 use super::{HUGE_FRAMES, BITFIELD_ROW, TREE_FRAMES, TREE_HUGE, ROWS};

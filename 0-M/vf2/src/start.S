@@ -1,4 +1,10 @@
-/* SPDX-License-Identifier: GPL-2.0+ */
+/*
+ * SPDX-FileCopyrightText: 2026 Vladyslav Melnyk
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Upstream license: GPL-2.0-or-later.
+ * See LICENSE for the full license text.
+ */
+
 /* Hart 1 initializes the board; the other U74 harts wait for firmware. */
     csrw mie, zero
     csrci mstatus, 8

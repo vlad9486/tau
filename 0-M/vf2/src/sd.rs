@@ -1,4 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0+
+// SPDX-FileCopyrightText: 2026 Vladyslav Melnyk
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Upstream license: GPL-2.0-or-later.
+// See LICENSE for the full license text.
+
 // Minimal DW MMC PIO boot path for the VisionFive 2 microSD slot.
 
 use super::{

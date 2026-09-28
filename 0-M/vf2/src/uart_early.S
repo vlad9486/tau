@@ -1,4 +1,10 @@
-/* SPDX-License-Identifier: GPL-2.0+ */
+/*
+ * SPDX-FileCopyrightText: 2026 Vladyslav Melnyk
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Upstream license: GPL-2.0-or-later.
+ * See LICENSE for the full license text.
+ */
+
 /* Initialize UART0 before Rust uses the SRAM stack or shared data.
  * The macro clobbers t0-t3 only. It needs no calls, stack, gp, or atomics.
  */

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025-2026 Vladyslav Melnyk
+// SPDX-License-Identifier: GPL-3.0-or-later
+// See LICENSE for the full license text.
+
 #![no_std]
 #![no_main]
 #![cfg_attr(

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Vladyslav Melnyk
+// SPDX-License-Identifier: GPL-3.0-or-later
+// See LICENSE for the full license text.
+
 //! DWMAC4/5 register layout used by the Ethernet driver.
 
 use crate::register::Register;

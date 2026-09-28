@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Vladyslav Melnyk
+// SPDX-License-Identifier: GPL-3.0-or-later
+// See LICENSE for the full license text.
+
 /// One complete Ethernet frame, without FCS. The caller owns the DMA mapping.
 /// Keep the buffer valid and untouched until completion.
 #[derive(Clone, Copy, Debug)]

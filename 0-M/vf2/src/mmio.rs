@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Vladyslav Melnyk
+// SPDX-License-Identifier: GPL-3.0-or-later
+// See LICENSE for the full license text.
+
 pub fn read(address: usize) -> u32 {
     unsafe { (address as *const u32).read_volatile() }
 }

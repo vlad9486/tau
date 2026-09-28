@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025-2026 Vladyslav Melnyk
+# SPDX-License-Identifier: GPL-3.0-or-later
+# See LICENSE for the full license text.
+
 [workspace]
 members = ["0-M", "0-M/vf2", "2-S", "3-U/system", "3-U/test", "tau"]
 resolver = "3"

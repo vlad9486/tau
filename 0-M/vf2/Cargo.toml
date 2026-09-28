@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 Vladyslav Melnyk
+# SPDX-License-Identifier: GPL-3.0-or-later
+# See LICENSE for the full license text.
+
 [package]
 name = "tau-visionfive2-spl"
 version = "0.1.0"

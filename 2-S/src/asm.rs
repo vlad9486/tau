@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025-2026 Vladyslav Melnyk
+// SPDX-License-Identifier: GPL-3.0-or-later
+// See LICENSE for the full license text.
+
 #[inline(always)]
 pub fn sfence_vma(addr: Option<usize>, asid: Option<u16>) {
     use core::arch;

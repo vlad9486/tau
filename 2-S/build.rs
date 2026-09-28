@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2025-2026 Vladyslav Melnyk
+// SPDX-License-Identifier: GPL-3.0-or-later
+// See LICENSE for the full license text.
+
 fn main() {
     let manifest_dir = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
     for (bin, script) in [("loader", "loader.lds"), ("supervisor", "supervisor.lds")] {

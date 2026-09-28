@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Vladyslav Melnyk
+// SPDX-License-Identifier: GPL-3.0-or-later
+// See LICENSE for the full license text.
+
 //! Single-buffer receive contract and DWMAC4/5 write-back validation.
 pub const BUFFER_SIZE: u16 = 2048;
 

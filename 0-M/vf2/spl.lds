@@ -1,3 +1,9 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Vladyslav Melnyk
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * See LICENSE for the full license text.
+ */
+
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 MEMORY { sram (rwx) : ORIGIN = 0x08000000, LENGTH = 0x00040000 }
