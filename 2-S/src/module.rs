@@ -18,24 +18,30 @@ pub struct Dependency {
     pub stem: usize,
 }
 
-pub struct Invocation(pub vmem::Root);
-
 /// Supervisor-only state private to one single-threaded module context.
-/// Its caller is independent of the module-wide registry of suspended waiters.
+/// The saved registers and PC resume this context after a dependency returns.
+/// The caller's satp implicitly links invocations; no invocation list is needed.
+/// Dependency stems describe potential callees, not live child threads.
 #[repr(C)]
 pub struct ModuleContext {
-    caller: Option<Invocation>,
+    pub registers: [usize; 32],
+    pub sepc: usize,
+    caller: Option<vmem::Root>,
 }
 
 impl ModuleContext {
     /// # Safety
     /// `this` must point to writable, aligned storage with exclusive access
     /// until initialization completes.
-    pub unsafe fn init_at(this: *mut Self, caller: Option<Invocation>) {
-        unsafe { core::ptr::addr_of_mut!((*this).caller).write(caller) };
+    pub unsafe fn init_at(this: *mut Self, caller: Option<vmem::Root>) {
+        unsafe {
+            core::ptr::addr_of_mut!((*this).registers).write([0; 32]);
+            core::ptr::addr_of_mut!((*this).sepc).write(0);
+            core::ptr::addr_of_mut!((*this).caller).write(caller);
+        }
     }
 
-    pub fn take_caller(&mut self) -> Option<Invocation> {
+    pub fn take_caller(&mut self) -> Option<vmem::Root> {
         self.caller.take()
     }
 }

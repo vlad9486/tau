@@ -239,9 +239,11 @@ pub fn syscall(
             write!(sbi::Console, "respond code={code}\r\n").unwrap_or_default();
             msg[0] = code as usize;
 
-            if let Some(inv) = module.take_caller() {
+            if let Some(caller) = module.take_caller() {
+                // The same virtual __MODULE_CONTEXT address now exposes the
+                // caller's saved registers and PC to restore_syscall.
                 // isn't it easy!
-                cpu::csrw!("satp", inv.0.0.get())
+                cpu::csrw!("satp", caller.0.get())
             } else {
                 write!(sbi::Console, "no caller for this context\r\n").unwrap_or_default();
                 sbi::hart_stop().unwrap_or_default();

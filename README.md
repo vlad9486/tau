@@ -17,6 +17,22 @@ Tau is optimized for 64+ core systems, ensuring superior scalability compared to
 * Each thread has its own address space, improving security and reducing the need for locks during memory allocation.
 * Tagged MMU support enables lightweight and efficient context switching, improving performance for high-load applications.
 
+### Local execution state
+
+A thread's `__THREAD` mapping holds local thread metadata. Parent/child lifetime
+information for spawn and join belongs there; saved registers belong to each
+`__MODULE_CONTEXT`, together with its resume PC and caller's `satp`. Contexts
+executing the same thread share its thread metadata, while each context keeps
+its own register storage.
+
+The invocation chain is implicit in the address spaces: each context links back
+to its caller through `satp`, and module dependency tables hold shared stems from
+which new callee address spaces can be built. A dependency stem is a possible
+call destination, not an existing invocation or child thread. No separate thread
+control block or thread list is needed; the scheduler is the only owner of a
+global task registry. Invocation creation, spawn/join, and that registry are
+still under development.
+
 ### Lock-Free Kernel Components
 
 * **Lock-free page frame allocation** for efficient memory management.

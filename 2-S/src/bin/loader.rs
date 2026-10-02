@@ -232,11 +232,11 @@ fn init_memory(
     // memory map for SV39:
     // 0x0000_0040_0000_0000 .. 0xffff_ffc0_0000_0000 (unavailable)
     // 0xffff_ffc0_0000_0000 .. 0xffff_ffc0_0020_0000 (2 MiB, per cpu, window, stack)
-    // 0xffff_ffc0_0020_0000 .. 0xffff_ffc0_0040_0000 (2 MiB, registers and module metadata)
-    // Registers remain in __THREAD for now, this is wrong; __MODULE_CONTEXT is private to the
-    // active context. __MODULE holds shared dependency templates and reserved
-    // waiter storage, mapped during supervisor bootstrap. Future contexts must
-    // reuse the module's backing pages.
+    // 0xffff_ffc0_0020_0000 .. 0xffff_ffc0_0040_0000 (2 MiB, thread and module metadata)
+    // __THREAD holds local thread metadata, shared across its module contexts.
+    // __MODULE_CONTEXT holds private saved registers, PC, and the caller's satp.
+    // __MODULE holds shared dependency stems and reserved waiter storage, mapped
+    // during supervisor bootstrap. Future contexts reuse those module pages.
     // 0xffff_ffc0_0040_0000 .. 0xffff_ffc0_0060_0000 (2 MiB, global, scheduler)
     // 0xffff_ffc0_0060_0000 .. 0xffff_ffc0_006e_0000 (896 kiB, global, context and supervisor image)
     // 0xffff_ffc0_006e_0000 .. 0xffff_ffc0_0100_0000 (9 MiB 128 kiB, global, llfree allocator)
