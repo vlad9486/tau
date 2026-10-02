@@ -108,6 +108,13 @@ extern "C" fn inner(
             }
         }
     } else {
+        // Additional harts enter through the loader with the bootstrap satp in
+        // opaque. Reuse it so they see the same mappings as the boot hart when
+        // enabling address translation and entering the supervisor, including
+        // its already initialized system-wide data. This shared bootstrap root
+        // is intentional; it does not define the eventual runtime storage scope.
+        // Per-hart windows and supervisor stacks must be made private before
+        // concurrent use. The runtime mapping transition is not yet implemented.
         (opaque, 0, 0, 0, 0)
     };
 
@@ -225,7 +232,11 @@ fn init_memory(
     // memory map for SV39:
     // 0x0000_0040_0000_0000 .. 0xffff_ffc0_0000_0000 (unavailable)
     // 0xffff_ffc0_0000_0000 .. 0xffff_ffc0_0020_0000 (2 MiB, per cpu, window, stack)
-    // 0xffff_ffc0_0020_0000 .. 0xffff_ffc0_0040_0000 (2 MiB, per thread, registers)
+    // 0xffff_ffc0_0020_0000 .. 0xffff_ffc0_0040_0000 (2 MiB, registers and module metadata)
+    // Registers remain in __THREAD for now, this is wrong; __MODULE_CONTEXT is private to the
+    // active context. __MODULE holds shared dependency templates and reserved
+    // waiter storage, mapped during supervisor bootstrap. Future contexts must
+    // reuse the module's backing pages.
     // 0xffff_ffc0_0040_0000 .. 0xffff_ffc0_0060_0000 (2 MiB, global, scheduler)
     // 0xffff_ffc0_0060_0000 .. 0xffff_ffc0_006e_0000 (896 kiB, global, context and supervisor image)
     // 0xffff_ffc0_006e_0000 .. 0xffff_ffc0_0100_0000 (9 MiB 128 kiB, global, llfree allocator)

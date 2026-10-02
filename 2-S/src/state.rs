@@ -6,7 +6,7 @@ use core::{arch, hint, num::NonZeroUsize, slice, ptr};
 
 use super::{
     vmem::{Window, Mapping},
-    module::{ModuleTables, Invocation},
+    module::{ModuleContext, ModuleTables},
     scheduler::Thread,
     llfree, vmem, sbi, cpu, layout,
 };
@@ -55,11 +55,14 @@ pub enum InitError {
 }
 
 /// # Safety
-/// `module` must be external static
+/// Both pointers must denote aligned linker-provided bootstrap addresses which
+/// this function maps and initializes with exclusive access. Shared tables must
+/// be initialized only once for this module.
 pub unsafe fn init(
     window: &mut Window,
     thread: &mut Thread,
-    module: *mut ModuleTables,
+    module: &mut ModuleContext,
+    tables: *mut ModuleTables,
     context: &Context,
 ) -> Result<(vmem::Root, usize, tau::Event), InitError> {
     let root = Window::current_root();
@@ -67,8 +70,8 @@ pub unsafe fn init(
     window.init(Window::current_root());
 
     let mapping = Mapping {
-        addr_virtual: module.addr(),
-        virtual_pages: size_of::<ModuleTables>() >> 12,
+        addr_virtual: ptr::from_mut(module).addr(),
+        virtual_pages: size_of::<ModuleContext>().div_ceil(0x1000),
         addr_physical: None,
         physical_pages: 0,
         flags: *b"rw---",
@@ -78,10 +81,23 @@ pub unsafe fn init(
         .map(asid, mapping, || context.page(thread.hart_id()))
         .map_err(|_| tau::AllocError::OutOfMemory)
         .map_err(InitError::Alloc)?;
-    unsafe { module.write_bytes(0, 1) };
+    // The mapping is fresh; initialize the complete context value before access.
+    unsafe { ModuleContext::init_at(module, None) };
 
-    let module = unsafe { &*module };
-    module.init();
+    // Bootstrap constructs the initial module tables once. Future context
+    // creation must reuse their backing pages, not allocate/reset these tables.
+    let mapping = Mapping {
+        addr_virtual: tables.addr(),
+        virtual_pages: size_of::<ModuleTables>().div_ceil(0x1000),
+        addr_physical: None,
+        physical_pages: 0,
+        flags: *b"rw---",
+    };
+    window
+        .map(asid, mapping, || context.page(thread.hart_id()))
+        .map_err(|_| tau::AllocError::OutOfMemory)
+        .map_err(InitError::Alloc)?;
+    unsafe { ModuleTables::init_at(tables) };
 
     let elf_base = context.base_addr + (layout::SYSTEM_OFFSET << 12);
     let data = ptr::from_mut(window).cast::<u8>().with_addr(elf_base);
@@ -161,7 +177,7 @@ pub unsafe fn init(
         };
         let module_id = unsafe { *dep_repr.as_ptr().cast::<tau::ModuleId>() };
         // TODO: find the module and put in the table
-        // module.insert_dependency(...);
+        // tables.insert_dependency(...);
         let _ = module_id;
     }
 
@@ -188,19 +204,9 @@ pub unsafe fn init(
         .map_err(InitError::Alloc)?;
     }
 
-    let inv = unsafe {
-        module
-            .insert_invocation(Invocation::Supervisor)
-            .unwrap_unchecked()
-    };
-
     let sepc = read_usize(memoffset::offset_of!(tau::Manifest, entry));
     let satp = Window::current_root();
-    let inv = tau::Event::Invocation {
-        inv,
-        share: false,
-        arg: 0,
-    };
+    let inv = tau::Event::Invocation { arg: 0 };
 
     Ok((satp, sepc, inv))
 }
@@ -209,43 +215,36 @@ pub unsafe fn init(
 pub fn syscall(
     window: &mut Window,
     thread: &mut Thread,
-    module: &ModuleTables,
+    module: &mut ModuleContext,
+    tables: &ModuleTables,
     context: &Context,
     mut msg: [usize; 6],
 ) -> [usize; 6] {
     use core::fmt::Write;
 
     match tau::Call::decode(msg[0]) {
-        Ok(tau::Call::Invoke { slot, share, arg }) => {
+        Ok(tau::Call::Invoke { slot, arg }) => {
             write!(sbi::Console, "invoke: {slot}\r\n").unwrap_or_default();
 
-            if let Some(dependency) = module.get_dependency(slot) {
+            if let Some(dependency) = tables.get_dependency(slot) {
                 // TODO:
-                // prepare address space of the dependency and invoke
-                let _ = (dependency, share, arg);
+                // Construct a fresh root using the shared dependency stem, add
+                // private context mappings, then enter its entry point.
+                let _ = (dependency, arg);
             } else {
                 write!(sbi::Console, "no such dependency: {slot}\r\n").unwrap_or_default();
             }
         }
-        Ok(tau::Call::Respond { inv, accept, code }) => {
-            write!(
-                sbi::Console,
-                "respond inv={inv}, accept={accept}, code={code}\r\n"
-            )
-            .unwrap_or_default();
+        Ok(tau::Call::Respond { code }) => {
+            write!(sbi::Console, "respond code={code}\r\n").unwrap_or_default();
+            msg[0] = code as usize;
 
-            if let Some(inv) = module.remove_invocation(inv) {
-                match inv {
-                    // special case, nowhere to return
-                    Invocation::Supervisor => loop {
-                        sbi::hart_stop().unwrap_or_default();
-                        hint::spin_loop();
-                    },
-                    // isn't it easy!
-                    Invocation::Regular { root } => cpu::csrw!("satp", root.0.get()),
-                }
+            if let Some(inv) = module.take_caller() {
+                // isn't it easy!
+                cpu::csrw!("satp", inv.0.0.get())
             } else {
-                write!(sbi::Console, "no such invocation: {inv}\r\n").unwrap_or_default();
+                write!(sbi::Console, "no caller for this context\r\n").unwrap_or_default();
+                sbi::hart_stop().unwrap_or_default();
                 loop {
                     hint::spin_loop();
                 }
@@ -293,7 +292,13 @@ pub fn syscall(
         Ok(tau::Call::Unmap) => {
             // TODO:
         }
-        Ok(tau::Call::Wait) => {
+        Ok(tau::Call::Wait | tau::Call::Notify) => {
+            // Phase-one ABI only. Do not pretend to park, notify, or bind an
+            // interrupt until scheduler and waiter lifetime support exist.
+            msg[0] = tau::WaitError::Unsupported as usize;
+            msg[1] = 0;
+        }
+        Ok(tau::Call::WaitExternal) => {
             if let Some(event) = take_pending_interrupt(thread) {
                 msg[0] = event.encode();
                 return msg;
@@ -313,11 +318,9 @@ pub fn syscall(
             } else if cause == (1 << 63) + 1 {
                 // sbi::Printer.ch(*b"SU: software interrupt\r\n");
                 // TODO:
-                tau::Event::Invocation {
-                    inv: 0,
-                    share: false,
-                    arg: 0,
-                }
+                // An IPI is not an entry-point invocation. Scheduler/IPI
+                // handling is still TODO; report generic readiness for now.
+                tau::Event::Notified
             } else if cause & (1 << 63) != 0 {
                 sbi::Printer.ch(*b"SU: unexpected interrupt\r\n");
                 tau::Event::Interrupt { id: 0 }

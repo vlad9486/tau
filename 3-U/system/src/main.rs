@@ -51,23 +51,23 @@ extern "C" fn main(
     _: usize,
     _: usize,
 ) -> ! {
-    let Ok(tau::Event::Invocation { inv, .. }) = tau::Event::decode(a0) else {
+    let Ok(tau::Event::Invocation { .. }) = tau::Event::decode(a0) else {
         tau::Ubi::exit([1]);
     };
 
     let len = info_pages << 12;
     let raw = tau::Area::new(info, len).sl();
     let Ok((dtb, _)) = tau::Dtb::new(raw) else {
-        tau::Ubi::respond(inv, 1, []);
+        tau::Ubi::respond(1, []);
     };
 
     // The dummy SDIO module is exposed as ELF bytes for future module loading.
     let Some(sdio_image) = dtb.boot_module("sdio") else {
-        tau::Ubi::respond(inv, 7, []);
+        tau::Ubi::respond(7, []);
     };
     let sdio_bytes = sdio_image.sl::<u8>();
     if sdio_bytes.get(..4) != Some(b"\x7fELF") {
-        tau::Ubi::respond(inv, 7, []);
+        tau::Ubi::respond(7, []);
     }
 
     let Some((cpu_props, cpu_path)) = dtb
@@ -79,18 +79,18 @@ extern "C" fn main(
             (tau::to_size(reg) == hart_id).then_some((props, path))
         })
     else {
-        tau::Ubi::respond(inv, 2, []);
+        tau::Ubi::respond(2, []);
     };
     let Some((cpu_interrupt_props, _)) = dtb.iter().find(|(_, path)| {
         path.len() == 4 && path[2] == cpu_path[2] && path[3].starts_with("interrupt-controller")
     }) else {
-        tau::Ubi::respond(inv, 3, []);
+        tau::Ubi::respond(3, []);
     };
     let Some(handle) = cpu_interrupt_props
         .find_int(|name| name.starts_with("phandle"))
         .and_then(|x| x.first().copied().map(u32::to_be))
     else {
-        tau::Ubi::respond(inv, 4, []);
+        tau::Ubi::respond(4, []);
     };
 
     // STATUS: can use it
@@ -99,21 +99,21 @@ extern "C" fn main(
     let Some(plic_config) = dtb.iter().find_map(|(props, path)| {
         (path[1] == "soc" && path[2].starts_with("plic")).then_some(props)
     }) else {
-        tau::Ubi::respond(inv, 5, []);
+        tau::Ubi::respond(5, []);
     };
 
     let Some(ie) = plic_config.find_int(|name| name.starts_with("interrupts-extended")) else {
-        tau::Ubi::respond(inv, 6, []);
+        tau::Ubi::respond(6, []);
     };
     let Some(context_id) = ie
         .chunks(2)
         .position(|sl| sl[0].to_be() == handle && sl[1].to_be() == 9)
     else {
-        tau::Ubi::respond(inv, 7, []);
+        tau::Ubi::respond(7, []);
     };
 
     let Some(plic_area) = plic_config.find_reg() else {
-        tau::Ubi::respond(inv, 8, []);
+        tau::Ubi::respond(8, []);
     };
 
     let plic = tau::Area::new(plic_area.base, 0x2000).r();
@@ -128,5 +128,5 @@ extern "C" fn main(
 
     scheduler::Tasks::new(&dtb, plic, plic_e, context_id).run(plic_ctx);
 
-    tau::Ubi::respond(inv, 0, [])
+    tau::Ubi::respond(0, [])
 }

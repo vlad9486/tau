@@ -28,12 +28,29 @@ fn panic_handler(_info: &core::panic::PanicInfo) -> ! {
 }
 
 unsafe extern "C" {
+    // Fixed virtual addresses supplied by build.rs. Their scope is determined by
+    // the physical pages mapped there, not by these external static declarations.
+
+    // Intended per-hart mapping window; the supervisor stack is also per hart.
     static __WINDOW: UnsafeCell<vmem::Window>;
+    // Saved execution state, historically per thread. In the module-context
+    // design, each context needs its own saved registers and pc so a call can
+    // suspend its caller. Thread identity and scheduling state are separate.
     static __THREAD: UnsafeCell<scheduler::Thread>;
+    // Context-private caller link, accessed by one thread.
+    // Linker-provided Rust storage, not a foreign-language representation.
+    #[allow(improper_ctypes)]
+    static __MODULE_CONTEXT: UnsafeCell<module::ModuleContext>;
+    // Module-wide privileged tables shared across its contexts: synchronized
+    // dependency stems/templates and reserved storage for the waiter registry.
     static __MODULE: UnsafeCell<module::ModuleTables>;
+    // Intended system-wide scheduling state; its mapping is not yet implemented.
     static __SCHEDULER: UnsafeCell<scheduler::Scheduler>;
+    // System-wide physical-memory allocator metadata, shared between harts.
     static __ALLOCATOR: UnsafeCell<[usize; 0o1000]>;
 
+    // System-wide allocator access and physical-memory base, initialized by the
+    // boot hart. Despite its name, this is not a thread's module context.
     #[allow(improper_ctypes)]
     static __CONTEXT: UnsafeCell<MaybeUninit<state::Context>>;
 }
@@ -71,7 +88,8 @@ extern "C" fn init(
 
     let window = unsafe { &mut *__WINDOW.get() };
     let thread = unsafe { &mut *__THREAD.get() };
-    let module = unsafe { __MODULE.get() };
+    let module = unsafe { &mut *__MODULE_CONTEXT.get() };
+    let tables = unsafe { __MODULE.get() };
 
     if cores != 0 {
         let frames = unsafe { NonZero::new_unchecked(frames) };
@@ -91,7 +109,7 @@ extern "C" fn init(
     let context = unsafe { (*__CONTEXT.get()).assume_init_ref() };
     thread.set_hart_id(hart_id);
 
-    match unsafe { state::init(window, thread, module, context) } {
+    match unsafe { state::init(window, thread, module, tables, context) } {
         Ok((satp, sepc, inv)) => unsafe {
             arch::asm! {
                 "li t0, 0x100",
@@ -264,10 +282,17 @@ extern "C" fn handle_non_syscall_trap(cause: isize) -> ! {
 extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
     let window = unsafe { &mut *__WINDOW.get() };
     let thread = unsafe { &mut *__THREAD.get() };
-    let module = unsafe { &*__MODULE.get() };
+    let module = unsafe { &mut *__MODULE_CONTEXT.get() };
+    let tables = unsafe { &*__MODULE.get() };
     let context = unsafe { (*__CONTEXT.get()).assume_init_ref() };
-    let [a0, a1, a2, a3, a4, a5] =
-        state::syscall(window, thread, module, context, [a0, a1, a2, a3, a4, a5]);
+    let [a0, a1, a2, a3, a4, a5] = state::syscall(
+        window,
+        thread,
+        module,
+        tables,
+        context,
+        [a0, a1, a2, a3, a4, a5],
+    );
     restore_syscall(a0, a1, a2, a3, a4, a5)
 }
 

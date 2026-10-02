@@ -5,7 +5,7 @@
 use core::{hint, num::NonZeroUsize};
 
 use super::{
-    common::{Call, Entry, Event},
+    common::{Call, Entry, Event, WaitError},
     asm,
 };
 
@@ -50,6 +50,15 @@ fn ubi<const I: usize, const O: usize>(call: Call, arg: [usize; I]) -> (usize, [
                 options(nostack),
             )
         },
+        (2, 1) => unsafe {
+            arch::asm!(
+                "ecall",
+                inout("a0") a0 => r0,
+                inout("a1") arg[0] => output[0],
+                in("a2") arg[1],
+                options(nostack),
+            )
+        },
         (3, 0) => unsafe {
             arch::asm!(
                 "ecall",
@@ -78,8 +87,7 @@ impl Ubi {
         arg: u16,
         msg: [usize; I],
     ) -> Result<[usize; O], NonZeroUsize> {
-        let share = false;
-        let (r0, msg) = ubi(Call::Invoke { slot, share, arg }, msg);
+        let (r0, msg) = ubi(Call::Invoke { slot, arg }, msg);
         if let Some(error) = NonZeroUsize::new(r0) {
             Err(error)
         } else {
@@ -87,9 +95,8 @@ impl Ubi {
         }
     }
 
-    pub fn respond<const O: usize>(inv: u16, code: u16, msg: [usize; O]) -> ! {
-        let accept = false;
-        let (_, []) = ubi(Call::Respond { inv, accept, code }, msg);
+    pub fn respond<const O: usize>(code: u16, msg: [usize; O]) -> ! {
+        let (_, []) = ubi(Call::Respond { code }, msg);
         unsafe { hint::unreachable_unchecked() }
     }
 
@@ -136,11 +143,30 @@ impl Ubi {
         }
     }
 
-    pub fn wait(deadline: Option<NonZeroUsize>) -> Event {
+    /// Bootstrap-only interrupt wait.
+    /// TODO: unify with ordinary `wait`.
+    pub fn wait_external(deadline: Option<NonZeroUsize>) -> Event {
         let t = deadline.map(NonZeroUsize::get).unwrap_or_default();
-        let (a0, []) = ubi(Call::Wait, [t]);
+        let (a0, []) = ubi(Call::WaitExternal, [t]);
         // supervisor will not send invalid value
         unsafe { Event::decode(a0).unwrap_unchecked() }
+    }
+
+    /// Consume readiness or suspend this thread, resuming here in this context.
+    /// Shared-state publication/checking still needs module synchronization.
+    pub fn wait(deadline: Option<NonZeroUsize>) -> Result<Event, WaitError> {
+        let deadline = deadline.map(NonZeroUsize::get).unwrap_or_default();
+        let (status, [event]) = ubi(Call::Wait, [deadline]);
+        wait_status(status)?;
+        Event::decode(event).map_err(|_| WaitError::Unsupported)
+    }
+
+    /// Record coalesced readiness for a waiter in this module. Does not transfer
+    /// this thread or execute code in the receiver's context.
+    /// `waiter` is thread id, TODO: define thread id
+    pub fn notify(waiter: usize) -> Result<(), WaitError> {
+        let (status, []) = ubi(Call::Notify, [waiter]);
+        wait_status(status)
     }
 
     /// Print a diagnostic checkpoint and one machine-word value through the
@@ -185,5 +211,17 @@ impl FreeError {
             1 => Self::AlreadyFree,
             _ => unsafe { hint::unreachable_unchecked() },
         }
+    }
+}
+
+fn wait_status(status: usize) -> Result<(), WaitError> {
+    match status {
+        0 => Ok(()),
+        1 => Err(WaitError::Unsupported),
+        2 => Err(WaitError::InvalidWaiter),
+        3 => Err(WaitError::AccessDenied),
+        4 => Err(WaitError::Busy),
+        5 => Err(WaitError::OutOfMemory),
+        _ => Err(WaitError::Unsupported),
     }
 }

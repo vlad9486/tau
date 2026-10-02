@@ -127,7 +127,8 @@ fn main() {
 
     println!("cargo:rustc-link-arg-bin=supervisor=--defsym=__WINDOW=0xffffffc000000000");
     println!("cargo:rustc-link-arg-bin=supervisor=--defsym=__THREAD=0xffffffc000200000");
-    println!("cargo:rustc-link-arg-bin=supervisor=--defsym=__MODULE=0xffffffc000210000");
+    println!("cargo:rustc-link-arg-bin=supervisor=--defsym=__MODULE_CONTEXT=0xffffffc000210000");
+    println!("cargo:rustc-link-arg-bin=supervisor=--defsym=__MODULE=0xffffffc000220000");
     println!("cargo:rustc-link-arg-bin=supervisor=--defsym=__SCHEDULER=0xffffffc000400000");
     println!("cargo:rustc-link-arg-bin=supervisor=--defsym=__CONTEXT=0xffffffc000600000");
     println!("cargo:rustc-link-arg-bin=supervisor=--defsym=__ALLOCATOR=0xffffffc0006e0000");

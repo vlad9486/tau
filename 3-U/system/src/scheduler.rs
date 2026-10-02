@@ -203,8 +203,8 @@ impl Tasks {
                 .map(|d| d.val)
                 .min();
 
-            match tau::Ubi::wait(deadline) {
-                tau::Event::Invocation { .. } => continue,
+            match tau::Ubi::wait_external(deadline) {
+                tau::Event::Invocation { .. } | tau::Event::Notified => continue,
                 tau::Event::Interrupt { .. } => {
                     while let Some(id) = plic.next() {
                         handle(self.uart.as_mut(), shared, &id);

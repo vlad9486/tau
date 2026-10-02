@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-// description from the perspective of user of the interface
-// `producer` is prosucer's part, `consumer` is consumer's part of spsc ring buffer
+// System description: interface and class contracts fixed until reboot.
+// Concrete ELF modules and their dependencies are declared separately.
+
+// Resources are described from the interface user's perspective.
+// `producer` and `consumer` name the user's side of an SPSC ring buffer.
 // AF_XDP style
 interface PacketLink {
-    // `fill` is a hint and can be omited
+    // `fill` is a hint and can be omitted
     fill: producer { offset: 0, size: 2 },
     receive: consumer { offset: 2, size: 2 },
     transmit: producer { offset: 4, size: 2 },
@@ -66,40 +69,15 @@ class EthernetDriver {
     // }
 }
 
-// in this simplified example of application that directly uses `EthernetDriver`
-// in real system there should be some network service that
-// uses `PacketLink` and `NetworkInfo`,
-// provides `Udp` and more
-class NetworkApplication {
+// Applications provide the same contract regardless of what they use.
+// Each concrete ELF declares its own dependencies outside this description.
+class Application {
     run: {
         provides Run {
             offset: 0,
             slot: 0,
-            // application can have arbitrary many instances
+            // application can have arbitrarily many instances
             limit: 0,
-        },
-
-        uses PacketLink {
-            offset: 0,
-            slot: 0,
         },
     }
 }
-
-// the ELF file which implements a class will have `Manifest` structure as an entry point
-// the manifest will declare where shared memory regions should be mapped
-//
-// ```Rust
-// pub struct Manifest {
-//     pub this: ModuleId,
-//     pub class: ClassId,
-//     // first argument is slot id, and probably some flags
-//     pub entry: extern "C" fn(usize, usize, usize, usize, usize, usize) ->
-//         (usize, usize, usize, usize, usize, usize),
-//     pub dependencies: &'static [InterfaceId],
-//     // this specifies virtual addresses for each used interface region
-//     // we should remove it from the manifest and need to provide a way
-//     // to instantiate endpoints of the interface in runtime
-//     // pub mapped_regions: &'static [MappedRegion],
-// }
-// ```

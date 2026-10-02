@@ -129,7 +129,7 @@ extern "C" fn main(event: usize, hart: usize, info: usize, pages: usize, _: usiz
             // elapsed guest ticks, never debugger-sensitive wall-clock timing.
             let start = tau::asm::read_time();
             let deadline = start.checked_add(1_000_000).unwrap();
-            let event = tau::Ubi::wait(NonZeroUsize::new(deadline));
+            let event = tau::Ubi::wait_external(NonZeroUsize::new(deadline));
             if !matches!(event, tau::Event::Timeout) {
                 tau_test_failed(case, 5, event.encode());
             }

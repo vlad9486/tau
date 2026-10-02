@@ -43,11 +43,18 @@ impl MappedRegion {
 }
 
 #[must_use]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Timeout,
-    Interrupt { id: u16 },
-    Invocation { inv: u16, share: bool, arg: u16 },
+    Interrupt {
+        id: u16,
+    },
+    /// Entry-point dispatch, not a wakeup of a suspended context.
+    Invocation {
+        arg: u16,
+    },
+    /// A coalesced readiness notification; inspect shared state after waking.
+    Notified,
 }
 
 impl fmt::Display for Event {
@@ -55,9 +62,8 @@ impl fmt::Display for Event {
         match self {
             Self::Timeout => write!(f, "timeout"),
             Self::Interrupt { id } => write!(f, "int={id:04x}"),
-            Self::Invocation { inv, share, arg } => {
-                write!(f, "inv={inv}, share={share}, arg={arg}")
-            }
+            Self::Invocation { arg } => write!(f, "invocation arg={arg}"),
+            Self::Notified => write!(f, "notified"),
         }
     }
 }
@@ -67,55 +73,37 @@ impl Event {
         match self {
             Self::Timeout => 0,
             Self::Interrupt { id } => ((id as usize) << 16) + 1,
-            Self::Invocation { inv, share, arg } => {
-                ((arg as usize) << 16)
-                    + (((inv & 0xfff) as usize) << 4)
-                    + ((share as usize) << 3)
-                    + 2
-            }
+            Self::Invocation { arg } => ((arg as usize) << 16) + 2,
+            Self::Notified => 3,
         }
     }
 
     pub const fn decode(a0: usize) -> Result<Self, usize> {
-        let inv = ((a0 & 0xfff0) >> 4) as u16;
         let arg = ((a0 & 0xffff0000) >> 16) as u16;
-        let share = (a0 & 0b1000) != 0;
         match a0 & 0b111 {
-            0 => Ok(Self::Timeout),
-            1 => Ok(Self::Interrupt { id: arg }),
-            2 => Ok(Self::Invocation { inv, share, arg }),
+            0 if a0 == 0 => Ok(Self::Timeout),
+            1 if a0 == ((arg as usize) << 16) + 1 => Ok(Self::Interrupt { id: arg }),
+            2 if a0 == ((arg as usize) << 16) + 2 => Ok(Self::Invocation { arg }),
+            3 if a0 == 3 => Ok(Self::Notified),
             _ => Err(a0),
         }
     }
 }
 
-/// The interface of the supervisor
-/// The `Call` is submitted along with a message, which is few machine words passed thru registers.
+/// The supervisor interface. Additional machine words are passed in registers.
+/// Shared mappings are established declaratively by the loader, not by calls.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Call {
-    /// Invokes a module. Continue execute in the module address space
-    /// where it is waiting for events or at its entry point.
-    /// Blocking until the module call `respond`.
-    ///
-    /// If `share` parameter is true, share memory with a module.
-    /// The message must specify the address and size to share.
-    ///
-    /// # Parameters
-    /// - `slot`: The slot of the module in the dependencies table to invoke.
-    /// - `share`: Whether share memory or not.
-    /// - `arg`: A small argument passed to the invoked module.
-    Invoke { slot: u16, share: bool, arg: u16 },
-    /// Sends a response to the caller that invoked this module.
-    /// Never returns, the current thread cease to exist and execution continues at caller's point.
-    ///
-    /// Accept or reject the shared memory.
-    /// The message must specify the address where to put the shared memory.
-    ///
-    /// # Parameters
-    /// - `inv`: The ID of the invocation to respond to.
-    /// - `accept`: Whether accept or reject shared memory.
-    /// - `code`: The response error code to send back.
-    Respond { inv: u16, accept: bool, code: u16 },
-    /// Spawns a thread. This will create a new module from the same ELF file.
+    /// Save the caller and transfer this thread to another module context's
+    /// entry point. The caller remains suspended until `Respond` restores it.
+    /// This does not resume a waiting context or create a thread.
+    /// `slot` selects a dependency; `arg` is a small dispatch argument.
+    Invoke { slot: u16, arg: u16 },
+    /// Return this thread to its previous module context with the response code
+    /// and message. Never returns in the callee; the thread continues in its
+    /// caller. Zero is success. No invocation ID is needed.
+    Respond { code: u16 },
+    /// Spawns a thread with its own context in the same ELF module.
     /// The new thread will run in the specified entry point with the given message.
     ///
     /// # Parameters
@@ -138,8 +126,19 @@ pub enum Call {
     /// Unmap the physical memory from the virtual address space of the thread.
     /// The message must provide the virtual address and the number of pages.
     Unmap,
-    /// Wait an external interrupt. The message may provide a timeout.
+    /// Transitional bootstrap operation: wait for an external interrupt or
+    /// deadline (a1, zero for none). Blocks the hart, not a scheduled thread.
+    /// Superseded by a registered waiter bound to the hart's external interrupt.
+    WaitExternal,
+    /// Wait on this thread's registered waiter (ID in a1, deadline in a2;
+    /// zero means no deadline). Consume pending readiness or park this thread.
+    /// Resume after this call in the same context. Return status in a0 and an
+    /// encoded `Event` in a1. A timeout does not consume a pending notification.
     Wait,
+    /// Notify a waiter in the current module (ID in a1). Coalesce readiness and
+    /// make its thread runnable if parked; continue executing in this context.
+    /// Notification before wait is remembered. No handler is invoked.
+    Notify,
     /// Emit a diagnostic checkpoint through the supervisor console.
     Debug,
 }
@@ -148,21 +147,19 @@ impl Call {
     #[inline]
     pub const fn encode(self) -> usize {
         match self {
-            Self::Invoke { slot, share, arg } => {
-                let share = if share { 1 } else { 0 };
-                ((arg as usize) << 16) + (((slot & 0xfff) as usize) << 4) + (share << 1) + 0b0001
+            Self::Invoke { slot, arg } => {
+                ((arg as usize) << 16) + (((slot & 0xfff) as usize) << 4) + 0b0001
             }
-            Self::Respond { inv, accept, code } => {
-                let accept = if accept { 1 } else { 0 };
-                ((code as usize) << 16) + (((inv & 0xfff) as usize) << 4) + (accept << 1) + 0b0101
-            }
+            Self::Respond { code } => ((code as usize) << 16) + 0b0101,
             Self::Spawn { entry } => entry,
             Self::Exit => 0b1001,
             Self::Join { thread_id } => ((thread_id as usize) << 16) + (1 << 4) + 0b1001,
             Self::Map => (2 << 4) + 0b1001,
             Self::Unmap => (3 << 4) + 0b1001,
-            Self::Wait => (4 << 4) + 0b1001,
+            Self::WaitExternal => (4 << 4) + 0b1001,
             Self::Debug => (5 << 4) + 0b1001,
+            Self::Wait => (6 << 4) + 0b1001,
+            Self::Notify => (7 << 4) + 0b1001,
         }
     }
 
@@ -172,36 +169,42 @@ impl Call {
             let entry = a0;
             Ok(Self::Spawn { entry })
         } else {
-            let flag = ((a0 & 0b0010) >> 1) != 0;
+            // The old share/accept flag is reserved; do not decode old calls.
+            if a0 & 0b0010 != 0 {
+                return Err(a0);
+            }
             let discriminant = (a0 & 0b1100) >> 2;
             let id = ((a0 & 0xfff0) >> 4) as u16;
             let arg = ((a0 & 0xffff0000) >> 16) as u16;
             match discriminant {
-                0b00 => {
-                    let slot = id;
-                    let share = flag;
-                    Ok(Self::Invoke { slot, share, arg })
-                }
-                0b01 => {
-                    let inv = id;
-                    let accept = flag;
-                    let code = arg;
-                    Ok(Self::Respond { inv, accept, code })
-                }
+                0b00 => Ok(Self::Invoke { slot: id, arg }),
+                0b01 if id == 0 => Ok(Self::Respond { code: arg }),
                 0b10 => match id {
                     0 => Ok(Self::Exit),
                     1 => {
-                        let thread_id = id;
+                        let thread_id = arg;
                         Ok(Self::Join { thread_id })
                     }
                     2 => Ok(Self::Map),
                     3 => Ok(Self::Unmap),
-                    4 => Ok(Self::Wait),
+                    4 => Ok(Self::WaitExternal),
                     5 => Ok(Self::Debug),
+                    6 => Ok(Self::Wait),
+                    7 => Ok(Self::Notify),
                     _ => Err(a0),
                 },
                 _ => Err(a0),
             }
         }
     }
+}
+
+#[repr(usize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitError {
+    Unsupported = 1,
+    InvalidWaiter = 2,
+    AccessDenied = 3,
+    Busy = 4,
+    OutOfMemory = 5,
 }

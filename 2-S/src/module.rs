@@ -3,174 +3,142 @@
 // See LICENSE for the full license text.
 
 use core::{
-    num::NonZero,
-    sync::atomic::{AtomicUsize, Ordering},
+    hint,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use super::vmem;
 
-enum TableCell<const SIZE: usize> {
-    /// The first and only invocation is from supervisor
-    Supervisor,
-    /// The address space root of the invocation
-    Root(vmem::Root),
-    /// The stem physical page of the dependency
-    Stem(usize),
-    /// The index of next free entries in the table
-    Index(u16),
-    /// No more free entries in the table
-    IndexLast,
-}
-
-impl<const SIZE: usize> TableCell<SIZE> {
-    const fn encode(self) -> usize {
-        match self {
-            // correspond to root with physical page zero, which is not used
-            Self::Supervisor => 9 << 60,
-            Self::Root(root) => root.0.get(),
-            // last bit of physical address is not used
-            Self::Stem(addr) => (1 << 63) + addr,
-            Self::Index(idx) => idx as usize,
-            Self::IndexLast => SIZE,
-        }
-    }
-
-    const fn decode(v: usize) -> Self {
-        if v == 9 << 60 {
-            Self::Supervisor
-        } else if v & (1 << 63) != 0 {
-            Self::Stem(v ^ (1 << 63))
-        } else if v == SIZE {
-            Self::IndexLast
-        } else if v < SIZE {
-            Self::Index(v as u16)
-        } else {
-            Self::Root(vmem::Root(unsafe { NonZero::new_unchecked(v) }))
-        }
-    }
-}
-
-#[repr(C)]
-pub struct Table<const SIZE: usize>([AtomicUsize; SIZE]);
-
-impl<const SIZE: usize> Table<SIZE> {
-    fn init(&self) {
-        self.head()
-            .store(TableCell::<SIZE>::Index(1).encode(), Ordering::Relaxed);
-        for i in 1..(SIZE - 1) {
-            let cell = TableCell::<SIZE>::Index(i as u16 + 1);
-            self.0[i].store(cell.encode(), Ordering::Relaxed);
-        }
-        // the end of the list
-        self.0[SIZE - 1].store(TableCell::<SIZE>::IndexLast.encode(), Ordering::Relaxed);
-    }
-
-    fn head(&self) -> &AtomicUsize {
-        &self.0[0]
-    }
-
-    fn insert(&self, cell: TableCell<SIZE>) -> Option<u16> {
-        loop {
-            let head_ptr = self.head().load(Ordering::Acquire);
-            if head_ptr == TableCell::<SIZE>::IndexLast.encode() {
-                // the table is full
-                return None;
-            }
-
-            let next = self.0.get(head_ptr)?.load(Ordering::Relaxed);
-            if self
-                .head()
-                .compare_exchange(head_ptr, next, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                self.0
-                    .get(head_ptr)?
-                    .store(cell.encode(), Ordering::Release);
-                return Some(head_ptr as u16);
-            }
-        }
-    }
-
-    fn remove(&self, id: u16) -> Option<TableCell<SIZE>> {
-        let v = self.0[id as usize].load(Ordering::Relaxed);
-        let cell = TableCell::<SIZE>::decode(v);
-        if matches!(cell, TableCell::Index(_) | TableCell::IndexLast) {
-            return None;
-        }
-        loop {
-            let head_ptr = self.head().load(Ordering::Acquire);
-            self.0[id as usize].store(head_ptr, Ordering::Relaxed);
-            if self
-                .head()
-                .compare_exchange(head_ptr, id as usize, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                break Some(cell);
-            }
-        }
-    }
-
-    fn get(&self, id: u16) -> Option<TableCell<SIZE>> {
-        let v = self.0.get(id as usize)?.load(Ordering::Relaxed);
-        let cell = TableCell::<SIZE>::decode(v);
-        if matches!(cell, TableCell::Index(_) | TableCell::IndexLast) {
-            return None;
-        }
-        Some(cell)
-    }
-}
-
+/// Dependency template shared by all contexts of the calling module.
+/// `stem` is the physical address of the destination module's Sv39 branch below
+/// the root, covering a 1 GiB virtual range of shared ELF/heap mappings. A call
+/// uses this branch to construct a fresh root with private context mappings.
+/// Entry-point, role, and declarative binding metadata remain TODO.
 pub struct Dependency {
     pub stem: usize,
 }
 
-pub enum Invocation {
-    Supervisor,
-    Regular { root: vmem::Root },
+pub struct Invocation(pub vmem::Root);
+
+/// Supervisor-only state private to one single-threaded module context.
+/// Its caller is independent of the module-wide registry of suspended waiters.
+#[repr(C)]
+pub struct ModuleContext {
+    caller: Option<Invocation>,
 }
 
-#[repr(C)]
+impl ModuleContext {
+    /// # Safety
+    /// `this` must point to writable, aligned storage with exclusive access
+    /// until initialization completes.
+    pub unsafe fn init_at(this: *mut Self, caller: Option<Invocation>) {
+        unsafe { core::ptr::addr_of_mut!((*this).caller).write(caller) };
+    }
+
+    pub fn take_caller(&mut self) -> Option<Invocation> {
+        self.caller.take()
+    }
+}
+
+/// Supervisor-only metadata shared by all contexts of one module.
+/// Dependency templates identify reusable shared branches, not thread contexts.
+#[repr(C, align(4096))]
 pub struct ModuleTables {
-    invocations: Table<0x800>,
-    dependencies: Table<0x800>,
+    dependency_lock: AtomicBool,
+    // Slot zero is the free-list head. Free entries contain the next slot;
+    // occupied entries contain a tagged physical stem address.
+    dependencies: [AtomicUsize; 0x800],
+    // Phase two will define the protected waiter records and their generations.
+    waiters_reserved: [AtomicUsize; 4096 / size_of::<AtomicUsize>()],
 }
 
 impl ModuleTables {
-    pub fn init(&self) {
-        self.invocations.init();
-        self.dependencies.init();
+    const END: usize = 0x800;
+    const OCCUPIED: usize = 1 << (usize::BITS - 1);
+
+    /// Initialize the module's shared tables once, before exposing its contexts.
+    /// Write in place to avoid a large temporary on the supervisor stack.
+    ///
+    /// # Safety
+    /// `this` must point to writable, aligned storage with exclusive access
+    /// until initialization completes. Existing shared tables must not be reset
+    /// when preparing another context of the same module.
+    pub unsafe fn init_at(this: *mut Self) {
+        unsafe { core::ptr::addr_of_mut!((*this).dependency_lock).write(AtomicBool::new(false)) };
+        let dependencies =
+            unsafe { core::ptr::addr_of_mut!((*this).dependencies).cast::<AtomicUsize>() };
+        for index in 0..Self::END {
+            unsafe { dependencies.add(index).write(AtomicUsize::new(index + 1)) };
+        }
+        let waiters =
+            unsafe { core::ptr::addr_of_mut!((*this).waiters_reserved).cast::<AtomicUsize>() };
+        for index in 0..4096 / size_of::<AtomicUsize>() {
+            unsafe { waiters.add(index).write(AtomicUsize::new(0)) };
+        }
+    }
+
+    fn lock_dependencies(&self) -> DependencyGuard<'_> {
+        // Serialize the whole free-list operation, including publication of a
+        // slot. Individual atomic cells alone do not make the free list safe.
+        while self
+            .dependency_lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            hint::spin_loop();
+        }
+        DependencyGuard(&self.dependency_lock)
     }
 
     pub fn insert_dependency(&self, dep: Dependency) -> Option<u16> {
-        self.dependencies.insert(TableCell::Stem(dep.stem))
+        // Physical addresses must leave the tag bit unused.
+        if dep.stem & Self::OCCUPIED != 0 {
+            return None;
+        }
+        let _guard = self.lock_dependencies();
+        let slot = self.dependencies[0].load(Ordering::Relaxed);
+        if slot == Self::END {
+            return None;
+        }
+        self.dependencies[0].store(
+            self.dependencies[slot].load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.dependencies[slot].store(dep.stem | Self::OCCUPIED, Ordering::Relaxed);
+        Some(slot as u16)
     }
 
     pub fn remove_dependency(&self, slot: u16) {
-        self.dependencies.remove(slot);
+        let _guard = self.lock_dependencies();
+        if self.get_dependency_locked(slot).is_some() {
+            self.dependencies[slot as usize].store(
+                self.dependencies[0].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.dependencies[0].store(slot as usize, Ordering::Relaxed);
+        }
     }
 
     pub fn get_dependency(&self, slot: u16) -> Option<Dependency> {
-        let cell = self.dependencies.get(slot)?;
-        if let TableCell::Stem(stem) = cell {
-            Some(Dependency { stem })
-        } else {
-            None
-        }
+        let _guard = self.lock_dependencies();
+        self.get_dependency_locked(slot)
     }
 
-    pub fn insert_invocation(&self, inv: Invocation) -> Option<u16> {
-        let v = match inv {
-            Invocation::Supervisor => TableCell::Supervisor,
-            Invocation::Regular { root } => TableCell::Root(root),
-        };
-        self.invocations.insert(v)
+    fn get_dependency_locked(&self, slot: u16) -> Option<Dependency> {
+        let value = self
+            .dependencies
+            .get(slot as usize)?
+            .load(Ordering::Relaxed);
+        (slot != 0 && value & Self::OCCUPIED != 0).then_some(Dependency {
+            stem: value & !Self::OCCUPIED,
+        })
     }
+}
 
-    pub fn remove_invocation(&self, inv: u16) -> Option<Invocation> {
-        match self.invocations.get(inv)? {
-            TableCell::Root(root) => Some(Invocation::Regular { root }),
-            TableCell::Supervisor => Some(Invocation::Supervisor),
-            _ => None,
-        }
+struct DependencyGuard<'a>(&'a AtomicBool);
+
+impl Drop for DependencyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }

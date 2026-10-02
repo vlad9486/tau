@@ -1,2 +1,4 @@
 /target
-/docs
+/docs/*
+# not published yet
+/tests
