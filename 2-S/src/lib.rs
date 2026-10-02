@@ -26,3 +26,6 @@ pub mod module;
 pub mod scheduler;
 
 pub mod state;
+
+/// Static image layout generated from modules.toml.
+pub mod layout;

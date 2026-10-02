@@ -8,7 +8,7 @@ use super::{
     vmem::{Window, Mapping},
     module::{ModuleTables, Invocation},
     scheduler::Thread,
-    llfree, vmem, sbi, cpu,
+    llfree, vmem, sbi, cpu, layout,
 };
 
 pub struct Context {
@@ -83,9 +83,9 @@ pub unsafe fn init(
     let module = unsafe { &*module };
     module.init();
 
-    let elf_base = context.base_addr + (tau::loader::SYSTEM_OFFSET << 12);
+    let elf_base = context.base_addr + (layout::SYSTEM_OFFSET << 12);
     let data = ptr::from_mut(window).cast::<u8>().with_addr(elf_base);
-    let data = unsafe { slice::from_raw_parts(data, tau::loader::SYSTEM_SIZE << 12) };
+    let data = unsafe { slice::from_raw_parts(data, layout::SYSTEM_SIZE << 12) };
 
     use elf::{
         ElfBytes,

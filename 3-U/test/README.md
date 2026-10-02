@@ -1,6 +1,7 @@
 # OS test payload
 
-`system-test` replaces the `system` ELF when `tau test` builds test firmware.
+`system-test` is packed alongside `system` and `sdio`. `tau test` enables the
+loader’s `system-test` feature to choose the initial U-mode program.
 It uses the normal manifest/entry convention and supervisor. All host code lives
 in the separate `tau-tool` repository, keeping this workspace RISC-V-only.
 
@@ -14,7 +15,8 @@ tau test --list
 
 The runner builds in the default `target` directory and starts a fresh four-hart
 QEMU VM for each scenario. `system` and `system-test` are separate binaries, while
-`target/tau` and `tau-qemu` contain the most recently selected payload. Run
+`target/riscv64imac-unknown-none-elf/release/tau` and `tau-qemu` contain all
+static modules, with the most recently selected loader. Run
 `tau build --qemu` to rebuild normal system firmware. Test logs stay under
 `target/tau-test`. The runner reports results and diagnostic paths and returns a
 nonzero exit status on failure.
@@ -40,12 +42,12 @@ the argument registers at their exact symbol addresses:
 Readiness and progress return; pass and failure loop until the host stops the VM.
 No guest shutdown syscall is required. Failure codes are `0` unknown scenario,
 `1` panic (detail is source line), `2` invalid initial event, `3` invalid boot
-DTB/arguments, `4` map error, `5` unexpected wait event, and `6` missing expected
+boot resources/arguments, `4` map error, `5` unexpected wait event, and `6` missing expected
 fault.
 
 | ID | Scenario | Progress values |
 | --- | --- | --- |
-| 1 | `boot` | None; validates invocation and DTB, then passes with hart ID |
+| 1 | `boot` | None; validates invocation and DTB arguments, then discovers and maps all three U-mode ELFs, then passes with hart ID |
 | 2 | `mapping` | Mapped address, page count; host checks contents and PTEs |
 | 3 | `timer` | Requested deadline, observed time; uses QEMU virt's 10 MHz timebase |
 | 4 | `fault` | Fault address, zero; host validates S-mode trap entry instead of waiting for pass |

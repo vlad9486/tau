@@ -169,6 +169,19 @@ impl<'a> Dtb<'a> {
             cursor: Cursor::empty(),
         }
     }
+
+    /// Find a boot module's physical byte range supplied by the loader.
+    /// Mapping that range remains an explicit U-mode `Area::sl` operation.
+    pub fn boot_module(&self, name: &str) -> Option<Area> {
+        self.iter().find_map(|(props, path)| {
+            (path.len() == 4
+                && path[1] == "chosen"
+                && path[2] == "tau,modules"
+                && props.find_str(|property| property == "tau,name") == Some(name))
+            .then(|| props.find_reg())
+            .flatten()
+        })
+    }
 }
 
 impl Iterator for DtbRsv<'_> {

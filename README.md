@@ -35,7 +35,8 @@ running OS tests, and preparing SD cards. Install it from the `tau-tool` checkou
 cargo install --path .
 ```
 
-This workspace provides `tau-firmware` in `0-M` with `tau-qemu` and `tau-visionfive2` binary targets, plus `tau-visionfive2-spl` in `0-M/vf2` for the board's first boot stage. The supervisor package lives in `2-S`, and the system package lives in `3-U/system`. The tool uses the binary target names when selecting and locating firmware images.
+This workspace provides `tau-firmware` in `0-M` with `tau-qemu` and `tau-visionfive2` binary targets, plus `tau-visionfive2-spl` in `0-M/vf2` for the board's first boot stage. The supervisor package lives in `2-S`; U-mode modules live in `3-U/system`,
+`3-U/test`, and `3-U/sdio`. Their static image layout is defined in `2-S/modules.toml`. The tool uses the binary target names when selecting and locating firmware images.
 
 ## Build for Vision Five 2
 
@@ -85,3 +86,12 @@ with the normal supervisor. Use `tau test --list` to list scenarios or
 all host code lives in the separate `tau-tool` repository. Builds use the
 default `target` directory; test logs live under `target/tau-test`. Run
 `tau build --qemu` to switch the firmware back to the normal system payload.
+
+The image contains both `system` and `system-test`, plus a dummy `sdio` module.
+`tau test` selects `system-test` through a loader feature. U-mode ELF copies are
+stripped during composition; the original build artifacts retain debug info.
+The loader copies the firmware DTB into a reserved 64 KiB buffer and adds
+`/chosen/tau,modules` with U-mode module names, physical addresses, and reserved
+byte lengths. Supervisor retains ELF and module initialization and forwards the
+DTB address and page count using the original boot arguments. User programs find
+modules with `Dtb::boot_module` and map them through `Area::sl`.

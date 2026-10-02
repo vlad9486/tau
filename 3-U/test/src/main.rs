@@ -93,8 +93,17 @@ extern "C" fn main(event: usize, hart: usize, info: usize, pages: usize, _: usiz
                 tau_test_failed(case, 3, info);
             }
             let raw = tau::Area::new(info, pages << 12).sl();
-            if tau::Dtb::new(raw).is_err() {
+            let Ok((dtb, _)) = tau::Dtb::new(raw) else {
                 tau_test_failed(case, 3, info);
+            };
+            for name in ["system", "system-test", "sdio"] {
+                let Some(module) = dtb.boot_module(name) else {
+                    tau_test_failed(case, 3, info);
+                };
+                let bytes = module.sl::<u8>();
+                if bytes.get(..4) != Some(b"\x7fELF") {
+                    tau_test_failed(case, 3, bytes.as_ptr().addr());
+                }
             }
             tau_test_passed(case, hart)
         }

@@ -62,6 +62,6 @@ SECTIONS
 		ASSERT(SIZEOF(.sbss) == 0, "Error: .sbss section is not empty");
 	}
 
-    ASSERT(SIZEOF(.text) + SIZEOF(.rodata) <= 0x4000, "Error: Total section size exceeds 16 KiB!")
+    ASSERT(SIZEOF(.text) + SIZEOF(.rodata) + 0x1000 <= __LOADER_SIZE, "Error: loader and stack exceed modules.toml capacity")
 	/DISCARD/ : { *(.comment) *(.gnu*) *(.note*) *(.eh_frame*) }
 }

@@ -16,6 +16,10 @@ use core::{arch, cell::UnsafeCell, hint, mem::MaybeUninit, num::NonZero, slice};
 
 use supervisor::{
     llfree::{Error, Allocator, FrameId},
+    layout::{
+        MODULES, DTB_OFFSET, DTB_PAGES, SUPERVISOR_OFFSET, SUPERVISOR_SIZE, SYSTEM_OFFSET,
+        SYSTEM_SIZE, HEAP_START, HEAP_END,
+    },
     sbi, vmem,
 };
 
@@ -78,10 +82,23 @@ extern "C" fn inner(
             }
         };
 
+        // Build a writable boot DTB in reserved RAM, without a heap allocator.
+        let source = unsafe { slice::from_raw_parts(dtb_addr.cast::<u8>(), size) };
+        let buffer = unsafe {
+            slice::from_raw_parts_mut(st.cast::<u8>().add(DTB_OFFSET << 12), DTB_PAGES << 12)
+        };
+        let modules = MODULES.iter().filter(|m| m.user);
+        let Ok(boot_size) = boot_dtb::with_modules(source, buffer, st.addr(), modules) else {
+            sbi::Printer.ch(*b"bad boot dtb\r\n");
+            loop {
+                hint::spin_loop();
+            }
+        };
+        let boot_addr = buffer.as_ptr().addr();
         match init_memory(hart_id, dtb_addr.addr(), dtb, st, ro, hp) {
             Ok((satp, cores, frames)) => {
                 sbi::Printer.ch(*b"success\r\n");
-                (satp, opaque, size.div_ceil(0x1000), cores, frames)
+                (satp, boot_addr, boot_size.div_ceil(0x1000), cores, frames)
             }
             Err(_err) => {
                 sbi::Printer.ch(*b"failed\r\n");
@@ -130,10 +147,6 @@ fn init_memory(
     ro: *mut MaybeUninit<[usize; 512]>,
     hp: *mut MaybeUninit<[usize; 512]>,
 ) -> Result<(usize, usize, usize), Error> {
-    use tau::loader::{
-        SUPERVISOR_OFFSET, SUPERVISOR_SIZE, SYSTEM_OFFSET, SYSTEM_SIZE, HEAP_START, HEAP_END,
-    };
-
     let mut cores = 0;
     let mut memory_size = 0;
     for (props, path) in dtb.iter() {
@@ -268,4 +281,290 @@ fn init_memory(
     // xp/8gx 0x80200000
 
     Ok(((vmem::SV39 << 60) | (root_table >> 12), cores, frames.get()))
+}
+
+mod boot_dtb {
+    //! Copy a firmware FDT and add /chosen/tau,modules in caller-reserved memory.
+    //! No allocation, ELF parsing, or page-table operations are needed here.
+
+    use supervisor::layout::StaticModule;
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum Error {
+        Invalid,
+        NoSpace,
+        ExistingModules,
+    }
+
+    const BEGIN_NODE: u32 = 1;
+    const END_NODE: u32 = 2;
+    const PROP: u32 = 3;
+    const NOP: u32 = 4;
+    const END: u32 = 9;
+    const NAMES: &[u8] = b"#address-cells\0#size-cells\0tau,name\0reg\0";
+
+    fn word(bytes: &[u8], at: usize) -> Result<u32, Error> {
+        let bytes = bytes
+            .get(at..at.checked_add(4).ok_or(Error::Invalid)?)
+            .ok_or(Error::Invalid)?;
+        Ok(u32::from_be_bytes(
+            bytes.try_into().map_err(|_| Error::Invalid)?,
+        ))
+    }
+
+    fn span(bytes: &[u8], start: usize, len: usize) -> Result<&[u8], Error> {
+        bytes
+            .get(start..start.checked_add(len).ok_or(Error::Invalid)?)
+            .ok_or(Error::Invalid)
+    }
+
+    fn padded(len: usize) -> Result<usize, Error> {
+        Ok(len.checked_add(3).ok_or(Error::Invalid)? & !3)
+    }
+
+    struct Writer<'a> {
+        bytes: &'a mut [u8],
+        pos: usize,
+    }
+
+    impl Writer<'_> {
+        fn bytes(&mut self, value: &[u8]) -> Result<(), Error> {
+            let end = self.pos.checked_add(value.len()).ok_or(Error::NoSpace)?;
+            self.bytes
+                .get_mut(self.pos..end)
+                .ok_or(Error::NoSpace)?
+                .copy_from_slice(value);
+            self.pos = end;
+            Ok(())
+        }
+
+        fn word(&mut self, value: u32) -> Result<(), Error> {
+            self.bytes(&value.to_be_bytes())
+        }
+
+        fn align(&mut self) -> Result<(), Error> {
+            while self.pos & 3 != 0 {
+                self.bytes(&[0])?;
+            }
+            Ok(())
+        }
+
+        fn node(&mut self, name: &[u8]) -> Result<(), Error> {
+            self.word(BEGIN_NODE)?;
+            self.bytes(name)?;
+            self.bytes(&[0])?;
+            self.align()
+        }
+
+        fn property(&mut self, name: u32, value: &[u8]) -> Result<(), Error> {
+            self.word(PROP)?;
+            self.word(u32::try_from(value.len()).map_err(|_| Error::NoSpace)?)?;
+            self.word(name)?;
+            self.bytes(value)?;
+            self.align()
+        }
+
+        fn modules<'a>(
+            &mut self,
+            strings: u32,
+            base: usize,
+            modules: &mut impl Iterator<Item = &'a StaticModule>,
+        ) -> Result<(), Error> {
+            self.node(b"tau,modules")?;
+            self.property(strings, &2u32.to_be_bytes())?;
+            self.property(strings + 15, &2u32.to_be_bytes())?;
+            for m in modules {
+                let (name, address, len) = {
+                    let len = m.name.iter().position(|&c| c == 0).unwrap_or(m.name.len());
+                    (
+                        &m.name[..len],
+                        (base + (m.offset << 12)) as u64,
+                        (m.pages << 12) as u64,
+                    )
+                };
+                if name.is_empty()
+                    || name.contains(&0)
+                    || len == 0
+                    || address.checked_add(len).is_none()
+                {
+                    return Err(Error::Invalid);
+                }
+                self.word(BEGIN_NODE)?;
+                self.bytes(b"module@")?;
+                let mut leading = true;
+                for shift in (0..16).rev() {
+                    let digit = ((address >> (shift * 4)) & 15) as u8;
+                    if digit != 0 || shift == 0 {
+                        leading = false;
+                    }
+                    if !leading {
+                        self.bytes(&[if digit < 10 {
+                            b'0' + digit
+                        } else {
+                            b'a' + digit - 10
+                        }])?;
+                    }
+                }
+                self.bytes(&[0])?;
+                self.align()?;
+                // A string property includes its terminating NUL in its length.
+                self.word(PROP)?;
+                self.word(u32::try_from(name.len() + 1).map_err(|_| Error::Invalid)?)?;
+                self.word(strings + 27)?;
+                self.bytes(name)?;
+                self.bytes(&[0])?;
+                self.align()?;
+                let mut reg = [0; 16];
+                reg[..8].copy_from_slice(&address.to_be_bytes());
+                reg[8..].copy_from_slice(&len.to_be_bytes());
+                self.property(strings + 36, &reg)?;
+                self.word(END_NODE)?;
+            }
+            self.word(END_NODE)
+        }
+    }
+
+    /// Preserve the input tree and reservations, adding named physical byte ranges.
+    /// The source must be a v17-compatible FDT. Existing /chosen properties and
+    /// children are preserved; a preexisting tau,modules subtree is rejected.
+    /// On error the destination is unspecified; the source is never modified.
+    pub fn with_modules<'a>(
+        source: &[u8],
+        destination: &mut [u8],
+        base: usize,
+        mut modules: impl Iterator<Item = &'a StaticModule>,
+    ) -> Result<usize, Error> {
+        if word(source, 0)? != 0xd00d_feed || word(source, 20)? < 17 || word(source, 24)? > 17 {
+            return Err(Error::Invalid);
+        }
+        let source = span(source, 0, word(source, 4)? as usize)?;
+        let structure_offset = word(source, 8)? as usize;
+        let strings_offset = word(source, 12)? as usize;
+        let reserve_offset = word(source, 16)? as usize;
+        let strings = span(source, strings_offset, word(source, 32)? as usize)?;
+        let structure = span(source, structure_offset, word(source, 36)? as usize)?;
+        if reserve_offset < 40 || reserve_offset & 7 != 0 || structure_offset & 3 != 0 {
+            return Err(Error::Invalid);
+        }
+        let mut reserve_end = reserve_offset;
+        loop {
+            let entry = span(source, reserve_end, 16)?;
+            reserve_end += 16;
+            if entry.iter().all(|&byte| byte == 0) {
+                break;
+            }
+        }
+        // v17 block order: header, reservations, structure, strings.
+        if reserve_end > structure_offset || structure_offset + structure.len() > strings_offset {
+            return Err(Error::Invalid);
+        }
+        let names = u32::try_from(strings.len()).map_err(|_| Error::Invalid)?;
+        names
+            .checked_add(NAMES.len() as u32)
+            .ok_or(Error::Invalid)?;
+        let mut output = Writer {
+            bytes: destination,
+            pos: 0,
+        };
+        output.bytes(span(source, 0, 40)?)?;
+        output.bytes(span(source, reserve_offset, reserve_end - reserve_offset)?)?;
+        let new_structure = output.pos;
+        let mut cursor = 0;
+        let mut depth = 0usize;
+        let mut root = false;
+        let mut chosen = false;
+        let mut in_chosen = false;
+        loop {
+            let start = cursor;
+            let token = word(structure, cursor)?;
+            cursor += 4;
+            match token {
+                BEGIN_NODE => {
+                    let tail = structure.get(cursor..).ok_or(Error::Invalid)?;
+                    let len = tail.iter().position(|&b| b == 0).ok_or(Error::Invalid)?;
+                    let name = span(structure, cursor, len)?;
+                    if depth == 0 {
+                        if root || !name.is_empty() {
+                            return Err(Error::Invalid);
+                        }
+                        root = true;
+                    }
+                    if depth == 1 && name == b"chosen" {
+                        if chosen {
+                            return Err(Error::Invalid);
+                        }
+                        chosen = true;
+                        in_chosen = true;
+                    }
+                    if depth == 2 && in_chosen && name == b"tau,modules" {
+                        return Err(Error::ExistingModules);
+                    }
+                    cursor = cursor.checked_add(padded(len + 1)?).ok_or(Error::Invalid)?;
+                    depth += 1;
+                }
+                END_NODE => {
+                    if depth == 0 {
+                        return Err(Error::Invalid);
+                    }
+                    if depth == 2 && in_chosen {
+                        output.modules(names, base, &mut modules)?;
+                        in_chosen = false;
+                    } else if depth == 1 && !chosen {
+                        output.node(b"chosen")?;
+                        output.modules(names, base, &mut modules)?;
+                        output.word(END_NODE)?;
+                    }
+                    depth -= 1;
+                }
+                PROP => {
+                    if depth == 0 {
+                        return Err(Error::Invalid);
+                    }
+                    let len = word(structure, cursor)? as usize;
+                    let name = word(structure, cursor + 4)? as usize;
+                    if !strings.get(name..).ok_or(Error::Invalid)?.contains(&0) {
+                        return Err(Error::Invalid);
+                    }
+                    cursor = cursor
+                        .checked_add(8)
+                        .and_then(|v| v.checked_add(padded(len).ok()?))
+                        .ok_or(Error::Invalid)?;
+                }
+                NOP => {}
+                END => {
+                    if !root || depth != 0 || cursor != structure.len() {
+                        return Err(Error::Invalid);
+                    }
+                }
+                _ => return Err(Error::Invalid),
+            }
+            output.bytes(span(structure, start, cursor - start)?)?;
+            if token == END {
+                break;
+            }
+        }
+        let new_strings = output.pos;
+        output.bytes(strings)?;
+        output.bytes(NAMES)?;
+        output.align()?;
+        let total = output.pos;
+        for (at, value) in [
+            (4, total),
+            (8, new_structure),
+            (12, new_strings),
+            (16, 40),
+            (20, 17),
+            (24, 16),
+            (32, total - new_strings),
+            (36, new_strings - new_structure),
+        ] {
+            let value = u32::try_from(value).map_err(|_| Error::NoSpace)?;
+            output
+                .bytes
+                .get_mut(at..at + 4)
+                .ok_or(Error::NoSpace)?
+                .copy_from_slice(&value.to_be_bytes());
+        }
+        Ok(total)
+    }
 }

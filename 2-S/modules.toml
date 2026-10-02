@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2026 Vladyslav Melnyk
+# SPDX-License-Identifier: GPL-3.0-or-later
+# See LICENSE for the full license text.
+
+# Offsets and reserved capacities are in 0x1000-byte pages.
+# Entries are ordered and non-overlapping. Composition rejects oversized modules.
+# Loader capacity includes its temporary stack; user capacities hold stripped ELFs.
+
+[[module]]
+name = "loader"
+offset = 0
+size = 16
+
+[[module]]
+name = "supervisor"
+offset = 16
+size = 11
+
+[[module]]
+name = "system"
+offset = 27
+size = 48
+
+[[module]]
+name = "system-test"
+offset = 75
+size = 12
+
+[[module]]
+name = "sdio"
+offset = 87
+size = 8

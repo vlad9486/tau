@@ -16,8 +16,6 @@ pub mod asm;
 mod common;
 pub use self::common::*;
 
-pub mod loader;
-
 mod ubi;
 pub use self::ubi::{Ubi, FreeError, AllocError};
 

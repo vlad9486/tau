@@ -61,6 +61,15 @@ extern "C" fn main(
         tau::Ubi::respond(inv, 1, []);
     };
 
+    // The dummy SDIO module is exposed as ELF bytes for future module loading.
+    let Some(sdio_image) = dtb.boot_module("sdio") else {
+        tau::Ubi::respond(inv, 7, []);
+    };
+    let sdio_bytes = sdio_image.sl::<u8>();
+    if sdio_bytes.get(..4) != Some(b"\x7fELF") {
+        tau::Ubi::respond(inv, 7, []);
+    }
+
     let Some((cpu_props, cpu_path)) = dtb
         .iter()
         .filter(|(_, path)| path[1] == "cpus" && path[2].starts_with("cpu@") && path.len() == 3)

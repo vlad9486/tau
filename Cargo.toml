@@ -3,7 +3,7 @@
 # See LICENSE for the full license text.
 
 [workspace]
-members = ["0-M", "0-M/vf2", "2-S", "3-U/system", "3-U/test", "tau"]
+members = ["0-M", "0-M/vf2", "2-S", "3-U/system", "3-U/test", "3-U/sdio", "tau"]
 resolver = "3"
 
 [profile.release]
