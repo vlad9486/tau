@@ -249,9 +249,13 @@ fn init_memory(
 
     let l2 = gfp();
     // the branch of the cpu context
-    l1[0o000] = (l2.as_mut_ptr().addr() >> 2) + 1;
+    // Identical per-hart window and stack in every runtime root.
+    l1[0o000] = (l2.as_mut_ptr().addr() >> 2) + 1 + 32;
     // loop
     l2[0o000] = (l2.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
+
+    let hart_mmu = gfp();
+    l2[0o006] = (hart_mmu.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
 
     // STATUS: size of the kernel stack is 1 page, increase if needed
     let stack = gfp();

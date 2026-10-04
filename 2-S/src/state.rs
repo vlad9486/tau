@@ -14,6 +14,8 @@ use super::{
 pub struct Context {
     pub allocator: llfree::Lower<'static>,
     pub base_addr: usize,
+    /// Kept independently of the active satp for later loader/hart startup.
+    pub bootstrap_root: vmem::Root,
 }
 
 const INTERRUPT_BIT: usize = 1 << (usize::BITS - 1);
@@ -35,14 +37,30 @@ fn take_pending_interrupt(thread: &mut Thread) -> Option<tau::Event> {
 }
 
 impl Context {
-    pub fn page(&self, hart_id: usize) -> Result<usize, llfree::Error> {
-        let frame = self.allocator.alloc(hart_id, 0)?.0;
+    pub fn block(&self, hart_id: usize, order: usize) -> Result<usize, llfree::Error> {
+        let frame = self.allocator.alloc(hart_id, order)?.0;
         Ok(self.base_addr + (frame << 12))
     }
 
+    pub fn page(&self, hart_id: usize) -> Result<usize, llfree::Error> {
+        self.block(hart_id, 0)
+    }
+
+    pub fn free_block(
+        &self,
+        hart_id: usize,
+        page: usize,
+        order: usize,
+    ) -> Result<(), llfree::Error> {
+        self.allocator.put(
+            hart_id,
+            llfree::FrameId((page - self.base_addr) >> 12),
+            order,
+        )
+    }
+
     pub fn free(&self, hart_id: usize, page: usize) -> Result<(), llfree::Error> {
-        let frame = (page - self.base_addr) >> 12;
-        self.allocator.put(hart_id, llfree::FrameId(frame), 0)
+        self.free_block(hart_id, page, 0)
     }
 }
 
@@ -61,16 +79,14 @@ pub enum InitError {
 pub unsafe fn init(
     window: &mut Window,
     thread: &mut Thread,
-    module: &mut ModuleContext,
+    module: *mut ModuleContext,
     tables: *mut ModuleTables,
     context: &Context,
 ) -> Result<(vmem::Root, usize, tau::Event), InitError> {
     let root = Window::current_root();
-    let asid = root.asid();
-    window.init(Window::current_root());
 
     let mapping = Mapping {
-        addr_virtual: ptr::from_mut(module).addr(),
+        addr_virtual: module.addr(),
         virtual_pages: size_of::<ModuleContext>().div_ceil(0x1000),
         addr_physical: None,
         physical_pages: 0,
@@ -78,11 +94,11 @@ pub unsafe fn init(
     };
 
     window
-        .map(asid, mapping, || context.page(thread.hart_id()))
+        .map(root, mapping, || context.page(thread.hart_id()))
         .map_err(|_| tau::AllocError::OutOfMemory)
         .map_err(InitError::Alloc)?;
     // The mapping is fresh; initialize the complete context value before access.
-    unsafe { ModuleContext::init_at(module, None) };
+    unsafe { ModuleContext::init_at(module, root, 0, root.page(), usize::MAX) };
 
     // Bootstrap constructs the initial module tables once. Future context
     // creation must reuse their backing pages, not allocate/reset these tables.
@@ -94,10 +110,10 @@ pub unsafe fn init(
         flags: *b"rw---",
     };
     window
-        .map(asid, mapping, || context.page(thread.hart_id()))
+        .map(root, mapping, || context.page(thread.hart_id()))
         .map_err(|_| tau::AllocError::OutOfMemory)
         .map_err(InitError::Alloc)?;
-    unsafe { ModuleTables::init_at(tables) };
+    unsafe { ModuleTables::init_at(tables, true) };
 
     let elf_base = context.base_addr + (layout::SYSTEM_OFFSET << 12);
     let data = ptr::from_mut(window).cast::<u8>().with_addr(elf_base);
@@ -140,7 +156,7 @@ pub unsafe fn init(
             };
 
             window
-                .map(0, mapping, || context.page(thread.hart_id()))
+                .map(root, mapping, || context.page(thread.hart_id()))
                 .map_err(InitError::Allocator)?;
         }
     }
@@ -211,7 +227,22 @@ pub unsafe fn init(
     Ok((satp, sepc, inv))
 }
 
-#[inline(always)]
+/// A switch is performed after Rust references to context/module storage have
+/// expired. The caller/callee metadata has different backing at the same VA.
+pub struct Outcome {
+    pub message: [usize; 6],
+    pub root: Option<vmem::Root>,
+}
+
+impl From<[usize; 6]> for Outcome {
+    fn from(message: [usize; 6]) -> Self {
+        Self {
+            message,
+            root: None,
+        }
+    }
+}
+
 pub fn syscall(
     window: &mut Window,
     thread: &mut Thread,
@@ -219,31 +250,57 @@ pub fn syscall(
     tables: &ModuleTables,
     context: &Context,
     mut msg: [usize; 6],
-) -> [usize; 6] {
+) -> Outcome {
     use core::fmt::Write;
 
     match tau::Call::decode(msg[0]) {
+        Ok(tau::Call::PrepareModule) => {
+            match super::loading::prepare(window, context, thread.hart_id(), tables, msg[1], msg[2])
+            {
+                Ok(slot) => {
+                    msg[0] = 0;
+                    msg[1] = slot as usize;
+                }
+                Err(error) => {
+                    msg[0] = error as usize;
+                    msg[1] = 0;
+                }
+            }
+        }
         Ok(tau::Call::Invoke { slot, arg }) => {
-            write!(sbi::Console, "invoke: {slot}\r\n").unwrap_or_default();
-
-            if let Some(dependency) = tables.get_dependency(slot) {
-                // TODO:
-                // Construct a fresh root using the shared dependency stem, add
-                // private context mappings, then enter its entry point.
-                let _ = (dependency, arg);
-            } else {
-                write!(sbi::Console, "no such dependency: {slot}\r\n").unwrap_or_default();
+            let result = tables
+                .get_dependency(slot)
+                .ok_or(tau::ModuleError::InvalidDependency)
+                .and_then(|descriptor| {
+                    super::loading::invoke(
+                        window,
+                        context,
+                        thread.hart_id(),
+                        module,
+                        slot,
+                        descriptor,
+                    )
+                });
+            match result {
+                Ok(root) => {
+                    msg[0] = tau::Event::Invocation { arg }.encode();
+                    return Outcome {
+                        message: msg,
+                        root: Some(root),
+                    };
+                }
+                Err(error) => {
+                    msg[0] = error as usize;
+                }
             }
         }
         Ok(tau::Call::Respond { code }) => {
-            write!(sbi::Console, "respond code={code}\r\n").unwrap_or_default();
             msg[0] = code as usize;
-
             if let Some(caller) = module.take_caller() {
-                // The same virtual __MODULE_CONTEXT address now exposes the
-                // caller's saved registers and PC to restore_syscall.
-                // isn't it easy!
-                cpu::csrw!("satp", caller.0.get())
+                return Outcome {
+                    message: msg,
+                    root: Some(caller),
+                };
             } else {
                 write!(sbi::Console, "no caller for this context\r\n").unwrap_or_default();
                 sbi::hart_stop().unwrap_or_default();
@@ -279,20 +336,35 @@ pub fn syscall(
             }
         }
         Ok(tau::Call::Map) => {
-            msg[0] = match alloc_pages(
-                window,
-                thread,
-                context,
-                NonZeroUsize::new(msg[1]),
-                msg[2],
-                msg[3],
-            ) {
-                Ok(()) => 0,
-                Err(err) => err as usize,
+            msg[0] = if (msg[1] != 0 && !tables.loader_authority)
+                || overlaps_stem(module, msg[2], msg[3])
+            {
+                tau::AllocError::AccessDenied as usize
+            } else {
+                match alloc_pages(
+                    window,
+                    thread,
+                    context,
+                    NonZeroUsize::new(msg[1]),
+                    msg[2],
+                    msg[3],
+                ) {
+                    Ok(()) => 0,
+                    Err(error) => error as usize,
+                }
             };
         }
         Ok(tau::Call::Unmap) => {
-            // TODO:
+            if !valid_pages(msg[1], msg[2]) || overlaps_stem(module, msg[1], msg[2]) {
+                msg[0] = tau::FreeError::AlreadyFree as usize;
+            } else {
+                for i in 0..msg[2] {
+                    let _ = window.unmap(Window::current_root(), msg[1] + i * 4096, |page| {
+                        context.free(thread.hart_id(), page)
+                    });
+                }
+                msg[0] = 0;
+            }
         }
         Ok(tau::Call::Wait | tau::Call::Notify) => {
             // Phase-one ABI only. Do not pretend to park, notify, or bind an
@@ -303,7 +375,7 @@ pub fn syscall(
         Ok(tau::Call::WaitExternal) => {
             if let Some(event) = take_pending_interrupt(thread) {
                 msg[0] = event.encode();
-                return msg;
+                return msg.into();
             }
             if msg[1] != 0 {
                 sbi::set_timer(msg[1]).unwrap_or_default();
@@ -355,7 +427,30 @@ pub fn syscall(
         }
     }
 
-    msg
+    msg.into()
+}
+
+fn valid_pages(address: usize, pages: usize) -> bool {
+    address & 0xfff == 0
+        && pages
+            .checked_mul(4096)
+            .is_some_and(|bytes| vmem::user_range(address, bytes))
+}
+
+fn overlaps_stem(module: &ModuleContext, address: usize, pages: usize) -> bool {
+    if module.shared_index == usize::MAX {
+        return false;
+    }
+    let Some(last) = pages
+        .checked_mul(4096)
+        .and_then(|bytes| bytes.checked_sub(1))
+        .and_then(|n| address.checked_add(n))
+    else {
+        return false;
+    };
+    let first_index = (address >> 30) & 511;
+    let last_index = (last >> 30) & 511;
+    first_index <= module.shared_index && module.shared_index <= last_index
 }
 
 pub fn alloc_pages(
@@ -366,6 +461,26 @@ pub fn alloc_pages(
     virtual_addr: usize,
     number_of_pages: usize,
 ) -> Result<(), tau::AllocError> {
+    if !valid_pages(virtual_addr, number_of_pages)
+        || physical_addr.is_some_and(|p| {
+            p.get() & 0xfff != 0
+                || number_of_pages
+                    .checked_mul(4096)
+                    .and_then(|n| p.get().checked_add(n))
+                    .is_none()
+        })
+    {
+        return Err(tau::AllocError::InvalidAddress);
+    }
+    // Check the whole range first so a duplicate mapping cannot partially replace it.
+    for i in 0..number_of_pages {
+        if window
+            .resolve(Window::current_root(), virtual_addr + i * 4096)
+            .is_some()
+        {
+            return Err(tau::AllocError::AlreadyAllocated);
+        }
+    }
     let mapping = Mapping {
         addr_virtual: virtual_addr,
         virtual_pages: number_of_pages,
@@ -374,10 +489,22 @@ pub fn alloc_pages(
         flags: *b"rw-u-",
     };
 
-    let asid = Window::current_root().asid();
-    window
-        .map(asid, mapping, || context.page(thread.hart_id()))
-        .map_err(|_| tau::AllocError::OutOfMemory)
+    let root = Window::current_root();
+    if let Err(error) = window.map(root, mapping, || context.page(thread.hart_id())) {
+        // Roll back pages allocated by this failed request; source physical
+        // mappings are borrowed and are never returned to the allocator.
+        for i in 0..number_of_pages {
+            let _ = window.unmap(root, virtual_addr + i * 4096, |page| {
+                context.free(thread.hart_id(), page)
+            });
+        }
+        return Err(match error {
+            llfree::Error::Address => tau::AllocError::InvalidAddress,
+            llfree::Error::InvalidArgument => tau::AllocError::AlreadyAllocated,
+            _ => tau::AllocError::OutOfMemory,
+        });
+    }
+    Ok(())
 }
 
 fn wait() -> usize {

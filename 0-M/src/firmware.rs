@@ -249,10 +249,10 @@ fn configure_hart() {
         asm!("csrw medeleg, {0}", in(reg) 0xb109usize);
         asm!("csrw mideleg, {0}", in(reg) 0x222usize);
         asm!("csrw mie, {0}", in(reg) MTIE);
-        // Tau reads time from both S-mode and U-mode. Both counter gates must
-        // permit the TIME CSR; resetting satp does not initialize these CSRs.
-        asm!("csrw mcounteren, {0}", in(reg) 2usize);
-        asm!("csrw scounteren, {0}", in(reg) 2usize);
+        // Tau reads cycle and time from both S-mode and U-mode. Both counter
+        // gates must permit them; resetting satp does not initialize these CSRs.
+        asm!("csrw mcounteren, {0}", in(reg) 3usize);
+        asm!("csrw scounteren, {0}", in(reg) 3usize);
 
         // One TOR entry grants S-mode access to the complete physical address
         // space. Platform-specific PMP policy can replace this for real boards.

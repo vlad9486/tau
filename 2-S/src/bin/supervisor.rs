@@ -14,7 +14,7 @@
 
 use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem::MaybeUninit, num::NonZero};
 
-use supervisor::{llfree::Allocator, module, sbi, scheduler, state, vmem};
+use supervisor::{llfree::Allocator, module, sbi, scheduler, state, vmem, mmu};
 
 #[cfg(all(not(debug_assertions), feature = "panic-never"))]
 use panic_never as _;
@@ -36,7 +36,7 @@ unsafe extern "C" {
     // Local thread metadata shared by this thread's module contexts; parent/child
     // lifetime information belongs here, without a separate thread collection.
     static __THREAD: UnsafeCell<scheduler::Thread>;
-    // Context-private registers, PC, and caller satp, accessed by one thread.
+    // Context-private root, dependency roots, and active invocation state.
     // Linker-provided Rust storage, not a foreign-language representation.
     #[allow(improper_ctypes)]
     static __MODULE_CONTEXT: UnsafeCell<module::ModuleContext>;
@@ -79,18 +79,20 @@ extern "C" fn init(
     cores: usize,
     frames: usize,
 ) -> ! {
-    writeln!(
-        sbi::Console,
-        "SU: init hart={hart_id} cores={cores} frames=0x{frames:016x}\r"
-    )
-    .unwrap_or_default();
-
     let window = unsafe { &mut *__WINDOW.get() };
     let thread = unsafe { &mut *__THREAD.get() };
-    let module = unsafe { &mut *__MODULE_CONTEXT.get() };
+    let module = unsafe { __MODULE_CONTEXT.get() };
     let tables = unsafe { __MODULE.get() };
 
+    // `cores != 0` means this is first run on the bootstrap core
+    // otherwise this is additional core bring up
     if cores != 0 {
+        writeln!(
+            sbi::Console,
+            "SU: init hart={hart_id} cores={cores} frames=0x{frames:016x}\r"
+        )
+        .unwrap_or_default();
+
         let frames = unsafe { NonZero::new_unchecked(frames) };
         let allocator = unsafe {
             Allocator::new(frames, __ALLOCATOR.get().cast())
@@ -102,12 +104,21 @@ extern "C" fn init(
             __CONTEXT.get().write(MaybeUninit::new(state::Context {
                 allocator,
                 base_addr,
-            }))
-        };
+                bootstrap_root: vmem::Window::current_root(),
+            }));
+        }
+        unsafe { mmu::init() };
+        writeln!(
+            sbi::Console,
+            "SU: ASID mask=0x{:04x} force_flush={}\r",
+            mmu::asid_mask(),
+            mmu::force_flush()
+        )
+        .unwrap_or_default();
     }
-    let context = unsafe { (*__CONTEXT.get()).assume_init_ref() };
     thread.set_hart_id(hart_id);
 
+    let context = unsafe { (*__CONTEXT.get()).assume_init_ref() };
     match unsafe { state::init(window, thread, module, tables, context) } {
         Ok((satp, sepc, inv)) => unsafe {
             arch::asm! {
@@ -293,7 +304,7 @@ extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5:
     let module = unsafe { &mut *__MODULE_CONTEXT.get() };
     let tables = unsafe { &*__MODULE.get() };
     let context = unsafe { (*__CONTEXT.get()).assume_init_ref() };
-    let [a0, a1, a2, a3, a4, a5] = state::syscall(
+    let outcome = state::syscall(
         window,
         thread,
         module,
@@ -301,6 +312,12 @@ extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5:
         context,
         [a0, a1, a2, a3, a4, a5],
     );
+    if let Some(root) = outcome.root {
+        // The per-hart window/stack and global supervisor code retain the same
+        // backing in both roots. No context/module reference is used past here.
+        unsafe { mmu::switch(root, mmu::force_flush()) };
+    }
+    let [a0, a1, a2, a3, a4, a5] = outcome.message;
     restore_syscall(a0, a1, a2, a3, a4, a5)
 }
 
@@ -321,6 +338,13 @@ extern "C" fn restore_syscall(
             "ld gp, {gp}(tp)",
             "mv t0, zero",
             "mv t1, zero",
+            "mv t2, zero",
+            "mv t3, zero",
+            "mv t4, zero",
+            "mv t5, zero",
+            "mv t6, zero",
+            "mv a6, zero",
+            "mv a7, zero",
             "ld ra, {ra}(tp)",
             "ld sp, {sp}(tp)",
             "ld s0, {s0}(tp)",

@@ -6,20 +6,21 @@
 pub fn sfence_vma(addr: Option<usize>, asid: Option<u16>) {
     use core::arch;
 
-    // Safety: `sfence.vma` does nothing if argument is invalid
+    // Keep a compiler memory barrier as well as the hardware fence: page-table
+    // stores must be visible before subsequent address translations.
     unsafe {
         match (addr, asid) {
             (None, None) => {
-                arch::asm!("sfence.vma zero, zero", options(nostack, nomem))
+                arch::asm!("sfence.vma zero, zero", options(nostack))
             }
             (None, Some(asid)) => {
-                arch::asm!("sfence.vma zero, a1", in("a1") asid, options(nostack, nomem))
+                arch::asm!("sfence.vma zero, a1", in("a1") asid, options(nostack))
             }
             (Some(addr), None) => {
-                arch::asm!("sfence.vma a0, zero", in("a0") addr, options(nostack, nomem))
+                arch::asm!("sfence.vma a0, zero", in("a0") addr, options(nostack))
             }
             (Some(addr), Some(asid)) => {
-                arch::asm!("sfence.vma a0, a1", in("a0") addr, in("a1") asid, options(nostack, nomem))
+                arch::asm!("sfence.vma a0, a1", in("a0") addr, in("a1") asid, options(nostack))
             }
         }
     }

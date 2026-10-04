@@ -21,7 +21,11 @@ pub mod llfree;
 
 pub mod vmem;
 
+pub mod mmu;
+
 pub mod module;
+
+pub mod loading;
 
 pub mod scheduler;
 

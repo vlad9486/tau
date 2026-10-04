@@ -12,9 +12,9 @@ use core::{
 
 use super::ubi::Ubi;
 
-// STATUS: starts at 0x0100_0000 = 16 MiB
+// Private heap starts at 4 GiB, outside the default ELF stem (the first 1 GiB).
 #[global_allocator]
-static ALLOCATOR: Bump = Bump::new(0x0100_0000);
+static ALLOCATOR: Bump = Bump::new(0x1_0000_0000);
 
 // TODO: need proper allocator
 struct Bump {

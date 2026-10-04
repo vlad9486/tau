@@ -61,7 +61,7 @@ extern "C" fn main(
         tau::Ubi::respond(1, []);
     };
 
-    // The dummy SDIO module is exposed as ELF bytes for future module loading.
+    // Prepare the dummy SDIO service from the DTB-provided ELF image.
     let Some(sdio_image) = dtb.boot_module("sdio") else {
         tau::Ubi::respond(7, []);
     };
@@ -69,6 +69,9 @@ extern "C" fn main(
     if sdio_bytes.get(..4) != Some(b"\x7fELF") {
         tau::Ubi::respond(7, []);
     }
+
+    let slot = tau::Ubi::prepare_module(sdio_bytes).expect("prepare dummy sdio");
+    tau::Ubi::debug(0x5344_494f, slot as usize);
 
     let Some((cpu_props, cpu_path)) = dtb
         .iter()
@@ -126,7 +129,7 @@ extern "C" fn main(
         .r::<plic::PlicCtx>();
     plic_ctx.set_threshold(plic::InterruptPriority::_0);
 
-    scheduler::Tasks::new(&dtb, plic, plic_e, context_id).run(plic_ctx);
+    scheduler::Tasks::new(&dtb, plic, plic_e, context_id).run(plic_ctx, slot);
 
     tau::Ubi::respond(0, [])
 }

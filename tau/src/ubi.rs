@@ -2,86 +2,56 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{hint, num::NonZeroUsize};
+use core::{arch, hint, num::NonZeroUsize};
 
 use super::{
-    common::{Call, Entry, Event, WaitError},
-    asm,
+    common::{Call, Entry, Event, WaitError, ModuleError},
 };
 
 // TODO: investigate it
 #[inline(never)]
 fn ubi<const I: usize, const O: usize>(call: Call, arg: [usize; I]) -> (usize, [usize; O]) {
-    use core::arch;
-
-    let a0 = call.encode();
-    let mut output = [0; O];
-    let r0;
-    match (I, O) {
-        (0, 0) => unsafe {
-            arch::asm!(
-                "ecall",
-                inout("a0") a0 => r0,
-                options(nostack),
-            )
-        },
-        (0, 1) => unsafe {
-            arch::asm!(
-                "ecall",
-                inout("a0") a0 => r0,
-                out("a1") output[0],
-                options(nostack),
-            )
-        },
-        (1, 0) => unsafe {
-            arch::asm!(
-                "ecall",
-                inout("a0") a0 => r0,
-                in("a1") arg[0],
-                options(nostack),
-            )
-        },
-        (2, 0) => unsafe {
-            arch::asm!(
-                "ecall",
-                inout("a0") a0 => r0,
-                in("a1") arg[0],
-                in("a2") arg[1],
-                options(nostack),
-            )
-        },
-        (2, 1) => unsafe {
-            arch::asm!(
-                "ecall",
-                inout("a0") a0 => r0,
-                inout("a1") arg[0] => output[0],
-                in("a2") arg[1],
-                options(nostack),
-            )
-        },
-        (3, 0) => unsafe {
-            arch::asm!(
-                "ecall",
-                inout("a0") a0 => r0,
-                in("a1") arg[0],
-                in("a2") arg[1],
-                in("a3") arg[2],
-                options(nostack),
-            )
-        },
-        _ => {
-            asm::dbg([I, O, 0xdeadbeef]);
-            unsafe { hint::unreachable_unchecked() };
-        }
+    const {
+        assert!(I <= 5 && O <= 5);
     }
-
-    (r0, output)
+    let mut words = [0; 5];
+    words[..I].copy_from_slice(&arg);
+    let status;
+    unsafe {
+        arch::asm!(
+            "ecall",
+            inout("a0") call.encode() => status,
+            inout("a1") words[0],
+            inout("a2") words[1],
+            inout("a3") words[2],
+            inout("a4") words[3],
+            inout("a5") words[4],
+            clobber_abi("C"),
+            options(nostack),
+        );
+    }
+    let mut output = [0; O];
+    output.copy_from_slice(&words[..O]);
+    (status, output)
 }
 
 /// The system interface (User Binary Interface).
 pub struct Ubi;
 
 impl Ubi {
+    /// Prepare a reusable module template from ELF bytes in this address space.
+    /// Only the bootstrap loader module has this authority.
+    pub fn prepare_module(image: &[u8]) -> Result<u16, ModuleError> {
+        let (status, [slot]) = ubi(Call::PrepareModule, [image.as_ptr().addr(), image.len()]);
+        match status {
+            0 => Ok(slot as u16),
+            1 => Err(ModuleError::AccessDenied),
+            3 => Err(ModuleError::OutOfMemory),
+            4 => Err(ModuleError::NoSlots),
+            _ => Err(ModuleError::InvalidImage),
+        }
+    }
+
     pub fn invoke<const I: usize, const O: usize>(
         slot: u16,
         arg: u16,
@@ -181,6 +151,8 @@ impl Ubi {
 pub enum AllocError {
     AlreadyAllocated = 1,
     OutOfMemory = 2,
+    AccessDenied = 3,
+    InvalidAddress = 4,
 }
 
 impl AllocError {
@@ -191,6 +163,8 @@ impl AllocError {
         match code.get() {
             1 => Self::AlreadyAllocated,
             2 => Self::OutOfMemory,
+            3 => Self::AccessDenied,
+            4 => Self::InvalidAddress,
             _ => unsafe { hint::unreachable_unchecked() },
         }
     }

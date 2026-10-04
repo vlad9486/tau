@@ -23,6 +23,16 @@ pub fn read_time() -> usize {
 }
 
 #[inline(always)]
+pub fn read_cycle() -> usize {
+    let v: usize;
+    unsafe {
+        // Keep a compiler memory barrier around measured work.
+        arch::asm!("csrr {0}, cycle", out(reg) v, options(nostack));
+    }
+    v
+}
+
+#[inline(always)]
 pub fn dbg<const I: usize>(arg: [usize; I]) {
     use core::arch::asm;
 

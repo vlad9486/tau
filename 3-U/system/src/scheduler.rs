@@ -51,8 +51,12 @@ impl Shared {
     }
 
     pub fn write(&mut self, args: fmt::Arguments<'_>) {
-        let nanos = ((tau::asm::read_time() as u128) * 1_000_000_000) / self.freq;
+        let nanos = self.nanos(tau::asm::read_time());
         self.uart_out.write(nanos, args);
+    }
+
+    pub fn nanos(&self, ticks: usize) -> u128 {
+        ((ticks as u128) * 1_000_000_000) / self.freq
     }
 }
 
@@ -123,6 +127,7 @@ pub struct Tasks {
     uart: Option<Driver<uart::State>>,
     sdio: Option<Driver<sdio::State>>,
     ethernet: SmallVec<[Driver<ethernet::State>; 4]>,
+    freq: u128,
 }
 
 impl Tasks {
@@ -132,6 +137,21 @@ impl Tasks {
         plic_e: &PlicEnable,
         context_id: usize,
     ) -> Tasks {
+        let freq = dtb
+            .iter()
+            .find_map(|(props, path)| {
+                if path.len() != 2 || path[1] != "cpus" {
+                    return None;
+                }
+                props
+                    .find_int(|name| name == "timebase-frequency")?
+                    .first()
+                    .copied()
+                    .map(u32::to_be)
+                    .filter(|&freq| freq != 0)
+            })
+            .map(u128::from)
+            .unwrap_or(4_000_000);
         let uart = dtb
             .iter()
             .find(|(_, path)| path[1] == "soc" && path[2].starts_with("serial@"))
@@ -162,10 +182,11 @@ impl Tasks {
             uart,
             sdio,
             ethernet,
+            freq,
         }
     }
 
-    pub fn run(&mut self, plic: &PlicCtx) {
+    pub fn run(&mut self, plic: &PlicCtx, sdio_slot: u16) {
         let shared = UnsafeCell::new(Shared {
             uart_out: uart::Buffer::default(),
             uart_in: uart::Buffer::default(),
@@ -177,15 +198,24 @@ impl Tasks {
             ethernet_rx_done: [None; 2],
             terminate: false,
             deadline: [None; 8],
-            // TODO: take from dts
-            freq: 4_000_000_u128,
+            freq: self.freq,
         });
-        let mut user = user::State::new(&shared, self.sdio.is_some(), !self.ethernet.is_empty());
+        let mut user = user::State::new(
+            &shared,
+            self.sdio.is_some(),
+            !self.ethernet.is_empty(),
+            sdio_slot,
+        );
 
         let shared = unsafe { &mut *shared.get() };
 
-        user.step();
         if let Some(driver) = self.uart.as_mut() {
+            driver.state.handle(shared, tau::Event::Timeout);
+        }
+        user.step();
+        if !shared.uart_out.is_empty()
+            && let Some(driver) = self.uart.as_mut()
+        {
             driver.state.handle(shared, tau::Event::Timeout);
         }
         if let Some(driver) = self.sdio.as_mut() {

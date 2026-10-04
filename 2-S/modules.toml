@@ -14,19 +14,19 @@ size = 16
 [[module]]
 name = "supervisor"
 offset = 16
-size = 11
+size = 16
 
 [[module]]
 name = "system"
-offset = 27
+offset = 32
 size = 48
 
 [[module]]
 name = "system-test"
-offset = 75
-size = 12
+offset = 80
+size = 20
 
 [[module]]
 name = "sdio"
-offset = 87
+offset = 100
 size = 8

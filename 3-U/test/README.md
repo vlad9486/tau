@@ -43,13 +43,19 @@ Readiness and progress return; pass and failure loop until the host stops the VM
 No guest shutdown syscall is required. Failure codes are `0` unknown scenario,
 `1` panic (detail is source line), `2` invalid initial event, `3` invalid boot
 boot resources/arguments, `4` map error, `5` unexpected wait event, and `6` missing expected
-fault.
+fault, and `7` module invocation validation.
 
 | ID | Scenario | Progress values |
 | --- | --- | --- |
 | 1 | `boot` | None; validates invocation and DTB arguments, then discovers and maps all three U-mode ELFs, then passes with hart ID |
 | 2 | `mapping` | Mapped address, page count; host checks contents and PTEs |
 | 3 | `timer` | Requested deadline, observed time; uses QEMU virt's 10 MHz timebase |
+| 5 | `invocation` | Two prepared dependency slots, rollback and warm checkpoints; verifies lazy construction, stable roots/ASIDs, private dependency caches and mappings retained across 128 calls, nested context paths sharing ELF globals, reentrancy rejection, fresh entry registers, caller restoration, permissions, source unmapping, failed-construction/preparation rollback, and both switch policies |
+
+The invocation harness temporarily exhausts the ASID allocator and supplies
+protected `A -> B` and `B -> A` fixture bindings. Loader dependency wiring is
+not implemented yet. Direct and nested B calls share module globals while using
+different retained roots; attempting `A -> B -> A` must fail.
 | 4 | `fault` | Fault address, zero; host validates S-mode trap entry instead of waiting for pass |
 
 The fault scenario performs a load at the exported

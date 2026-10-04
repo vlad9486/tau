@@ -47,6 +47,6 @@ SECTIONS
 		ASSERT(SIZEOF(.sbss) == 0, "Error: .sbss section is not empty");
 	}
 
-    ASSERT(SIZEOF(.text) + SIZEOF(.rodata) <= 0xb000, "Error: Total section size exceeds 44 KiB!")
+    ASSERT(SIZEOF(.text) + SIZEOF(.rodata) <= 0x10000, "Error: Total section size exceeds 64 KiB!")
 	/DISCARD/ : { *(.comment) *(.gnu*) *(.note*) *(.eh_frame*) }
 }

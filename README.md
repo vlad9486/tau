@@ -26,12 +26,12 @@ executing the same thread share its thread metadata, while each context keeps
 its own register storage.
 
 The invocation chain is implicit in the address spaces: each context links back
-to its caller through `satp`, and module dependency tables hold shared stems from
-which new callee address spaces can be built. A dependency stem is a possible
-call destination, not an existing invocation or child thread. No separate thread
-control block or thread list is needed; the scheduler is the only owner of a
-global task registry. Invocation creation, spawn/join, and that registry are
-still under development.
+to its caller through `satp`. Shared module tables hold prepared ELF templates;
+each context's private dependency slots cache callee roots constructed on first
+use. Returns retain roots, private mappings, and stable hart-local ASIDs. These
+roots form a context tree without a separate context registry. The scheduler is
+the only owner of a global task registry. Synchronous invocation and return are implemented for the dummy `sdio` module;
+spawn/join and that registry are still under development.
 
 ### Lock-Free Kernel Components
 

@@ -141,6 +141,9 @@ pub enum Call {
     Notify,
     /// Emit a diagnostic checkpoint through the supervisor console.
     Debug,
+    /// Loader-only: prepare an ELF image at (a1, a2), returning status in a0
+    /// and a dependency slot in a1. Does not create an invocation.
+    PrepareModule,
 }
 
 impl Call {
@@ -160,6 +163,7 @@ impl Call {
             Self::Debug => (5 << 4) + 0b1001,
             Self::Wait => (6 << 4) + 0b1001,
             Self::Notify => (7 << 4) + 0b1001,
+            Self::PrepareModule => (8 << 4) + 0b1001,
         }
     }
 
@@ -191,6 +195,7 @@ impl Call {
                     5 => Ok(Self::Debug),
                     6 => Ok(Self::Wait),
                     7 => Ok(Self::Notify),
+                    8 => Ok(Self::PrepareModule),
                     _ => Err(a0),
                 },
                 _ => Err(a0),
@@ -207,4 +212,17 @@ pub enum WaitError {
     AccessDenied = 3,
     Busy = 4,
     OutOfMemory = 5,
+}
+
+/// Construction/invocation status. Module authority is granted by bootstrap,
+/// never inferred from an ELF's name or inherited from the invoking thread.
+#[repr(usize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModuleError {
+    AccessDenied = 1,
+    InvalidImage = 2,
+    OutOfMemory = 3,
+    NoSlots = 4,
+    InvalidDependency = 5,
+    Reentrant = 6,
 }

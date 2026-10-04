@@ -21,9 +21,14 @@ pub struct State<'a> {
 }
 
 impl<'a> State<'a> {
-    pub fn new(shared: &'a UnsafeCell<Shared>, has_sdio: bool, has_ethernet: bool) -> Self {
+    pub fn new(
+        shared: &'a UnsafeCell<Shared>,
+        has_sdio: bool,
+        has_ethernet: bool,
+        sdio_slot: u16,
+    ) -> Self {
         State {
-            fut: Box::pin(run(shared, has_sdio, has_ethernet)),
+            fut: Box::pin(run(shared, has_sdio, has_ethernet, sdio_slot)),
         }
     }
 
@@ -34,7 +39,30 @@ impl<'a> State<'a> {
     }
 }
 
-async fn run(shared: &UnsafeCell<Shared>, has_sdio: bool, has_ethernet: bool) {
+fn measure_roundtrips(shared: &UnsafeCell<Shared>, slot: u16) {
+    let mut samples = [0; 8];
+    for (index, cycles) in samples.iter_mut().enumerate() {
+        let value = index + 1;
+        let start = tau::asm::read_cycle();
+        let response = tau::Ubi::invoke::<1, 2>(slot, 0, [value]);
+        *cycles = tau::asm::read_cycle().wrapping_sub(start);
+        let [reply, count] = response.expect("invoke dummy sdio");
+        assert_eq!(reply, value.rotate_left(7) ^ 0x5344_494f);
+        assert_eq!(count, value);
+    }
+    // Format and queue UART output only after collecting all measurements.
+    let shared = unsafe { &mut *shared.get() };
+    for (index, cycles) in samples.into_iter().enumerate() {
+        let round = index + 1;
+        let context = if index == 0 { "first" } else { "reused" };
+        shared.write(format_args!(
+            "sdio roundtrip {round} ({context}): {cycles} cycles"
+        ));
+    }
+}
+
+async fn run(shared: &UnsafeCell<Shared>, has_sdio: bool, has_ethernet: bool, sdio_slot: u16) {
+    measure_roundtrips(shared, sdio_slot);
     if has_sdio {
         // TODO: allocator for DMA
         let phys = 0x7000_1000_u32;
