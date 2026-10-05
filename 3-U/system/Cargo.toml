@@ -18,6 +18,6 @@ nightly = []
 
 [dependencies]
 tau = { path = "../../tau" }
-bitflags = { version = "2.11" }
+bitflags = { version = "2.13" }
 noop-waker = { version = "0.1.0" }
-smallvec = { version = "1.15.1" }
+smallvec = { version = "1.16.2" }

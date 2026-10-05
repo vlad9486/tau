@@ -9,7 +9,7 @@
     feature(custom_test_frameworks),
     test_runner(tau::tester::test_runner),
     feature(strict_provenance_lints),
-    warn(fuzzy_provenance_casts)
+    warn(implicit_provenance_casts)
 )]
 
 use core::{arch, cell::UnsafeCell, hint, mem::MaybeUninit, num::NonZero, slice};
@@ -141,7 +141,7 @@ extern "C" fn inner(
             in("a5") frames,
             satp = in(reg) satp,
             sepc = const { 0x_ffff_ffc0_0060_1000_usize },
-            ctx = const { 0x_ffff_ffc0_0020_0000_usize },
+            ctx = const { vmem::THREAD },
         }
     }
 }
@@ -255,7 +255,7 @@ fn init_memory(
     l2[0o000] = (l2.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
 
     let hart_mmu = gfp();
-    l2[0o006] = (hart_mmu.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
+    l2[vmem::HART_SLOT] = (hart_mmu.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
 
     // STATUS: size of the kernel stack is 1 page, increase if needed
     let stack = gfp();

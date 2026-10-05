@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{arch, hint, num::NonZeroUsize, slice, ptr};
+use core::{arch, hint, num::NonZeroUsize, slice, ptr, mem};
 
 use super::{
-    vmem::{Window, Mapping},
+    vmem::{Window, WindowAccess, Mapping},
     module::{ModuleContext, ModuleTables},
     scheduler::Thread,
     llfree, vmem, sbi, cpu, layout,
@@ -77,7 +77,7 @@ pub enum InitError {
 /// this function maps and initializes with exclusive access. Shared tables must
 /// be initialized only once for this module.
 pub unsafe fn init(
-    window: &mut Window,
+    window: &mut WindowAccess,
     thread: &mut Thread,
     module: *mut ModuleContext,
     tables: *mut ModuleTables,
@@ -180,7 +180,7 @@ pub unsafe fn init(
         usize::from_ne_bytes(entry.try_into().unwrap_unchecked())
     };
 
-    let sl = memoffset::offset_of!(tau::Manifest, dependencies);
+    let sl = mem::offset_of!(tau::Manifest, dependencies);
     let deps_vaddr = read_usize(sl);
     let deps_num = read_usize(sl + size_of::<usize>());
 
@@ -197,7 +197,7 @@ pub unsafe fn init(
         let _ = module_id;
     }
 
-    let sl = memoffset::offset_of!(tau::Manifest, mapped_regions);
+    let sl = mem::offset_of!(tau::Manifest, mapped_regions);
     let ranges_vaddr = read_usize(sl);
     let ranges_num = read_usize(sl + size_of::<usize>());
 
@@ -220,7 +220,7 @@ pub unsafe fn init(
         .map_err(InitError::Alloc)?;
     }
 
-    let sepc = read_usize(memoffset::offset_of!(tau::Manifest, entry));
+    let sepc = read_usize(mem::offset_of!(tau::Manifest, entry));
     let satp = Window::current_root();
     let inv = tau::Event::Invocation { arg: 0 };
 
@@ -244,7 +244,7 @@ impl From<[usize; 6]> for Outcome {
 }
 
 pub fn syscall(
-    window: &mut Window,
+    window: &mut WindowAccess,
     thread: &mut Thread,
     module: &mut ModuleContext,
     tables: &ModuleTables,
@@ -454,7 +454,7 @@ fn overlaps_stem(module: &ModuleContext, address: usize, pages: usize) -> bool {
 }
 
 pub fn alloc_pages(
-    window: &mut Window,
+    window: &mut WindowAccess,
     thread: &mut Thread,
     context: &Context,
     physical_addr: Option<NonZeroUsize>,

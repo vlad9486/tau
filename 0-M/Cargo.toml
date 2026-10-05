@@ -27,4 +27,4 @@ rustsbi = { version = "=0.4.1", features = ["machine"] }
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }
-toml = { version = "0.9.12" }
+toml = { version = "1.1.8" }

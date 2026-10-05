@@ -23,12 +23,15 @@ mod board {
     const RDTIME_MASK: usize = 0xffff_f07f;
     const RDTIME_INSTRUCTION: usize = 0xc010_2073;
 
+    macro_rules! dtb_path {
+        () => {
+            "../../boards/vf2/jh7110-starfive-visionfive-2-v1.3b.dtb"
+        };
+    }
+
     #[used]
     #[unsafe(link_section = ".dtb")]
-    pub(super) static DTB: [u8; include_bytes!(
-        "../../boards/vf2/jh7110-starfive-visionfive-2-v1.3b.dtb"
-    )
-    .len()] = *include_bytes!("../../boards/vf2/jh7110-starfive-visionfive-2-v1.3b.dtb");
+    pub(super) static DTB: [u8; include_bytes!(dtb_path!()).len()] = *include_bytes!(dtb_path!());
 
     unsafe extern "C" {
         static __UART: u8;

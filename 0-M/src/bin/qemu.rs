@@ -20,10 +20,15 @@ mod board {
     const RESET_SHUTDOWN: u32 = 0x5555;
     const RESET_REBOOT: u32 = 0x7777;
 
+    macro_rules! dtb_path {
+        () => {
+            "../../boards/qemu/virt.dtb"
+        };
+    }
+
     #[used]
     #[unsafe(link_section = ".dtb")]
-    pub(super) static DTB: [u8; include_bytes!("../../boards/qemu/virt.dtb").len()] =
-        *include_bytes!("../../boards/qemu/virt.dtb");
+    pub(super) static DTB: [u8; include_bytes!(dtb_path!()).len()] = *include_bytes!(dtb_path!());
 
     unsafe extern "C" {
         static __UART: u8;

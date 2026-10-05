@@ -9,10 +9,10 @@
     feature(custom_test_frameworks),
     test_runner(tau::tester::test_runner),
     feature(strict_provenance_lints),
-    warn(fuzzy_provenance_casts)
+    warn(implicit_provenance_casts)
 )]
 
-use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem::MaybeUninit, num::NonZero};
+use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem, num::NonZero};
 
 use supervisor::{llfree::Allocator, module, sbi, scheduler, state, vmem, mmu};
 
@@ -31,8 +31,8 @@ unsafe extern "C" {
     // Fixed virtual addresses supplied by build.rs. Their scope is determined by
     // the physical pages mapped there, not by these external static declarations.
 
-    // Intended per-hart mapping window; the supervisor stack is also per hart.
-    static __WINDOW: UnsafeCell<vmem::Window>;
+    // Per-hart sparse window and stack; pass its pointer without a whole borrow.
+    static __WINDOW: vmem::Window;
     // Local thread metadata shared by this thread's module contexts; parent/child
     // lifetime information belongs here, without a separate thread collection.
     static __THREAD: UnsafeCell<scheduler::Thread>;
@@ -51,7 +51,7 @@ unsafe extern "C" {
     // System-wide allocator access and physical-memory base, initialized by the
     // boot hart. Despite its name, this is not a thread's module context.
     #[allow(improper_ctypes)]
-    static __CONTEXT: UnsafeCell<MaybeUninit<state::Context>>;
+    static __CONTEXT: UnsafeCell<mem::MaybeUninit<state::Context>>;
 }
 
 #[unsafe(link_section = ".text.init")]
@@ -67,7 +67,7 @@ extern "C" fn _start() -> ! {
         "j {init}",
         trap_entry = sym trap_entry,
         init = sym init,
-        stack = const { 0x_ffff_ffc0_0020_0000_usize },
+        stack = const { vmem::WINDOW_END },
     }
 }
 
@@ -79,7 +79,7 @@ extern "C" fn init(
     cores: usize,
     frames: usize,
 ) -> ! {
-    let window = unsafe { &mut *__WINDOW.get() };
+    let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
     let thread = unsafe { &mut *__THREAD.get() };
     let module = unsafe { __MODULE_CONTEXT.get() };
     let tables = unsafe { __MODULE.get() };
@@ -101,25 +101,25 @@ extern "C" fn init(
         };
 
         unsafe {
-            __CONTEXT.get().write(MaybeUninit::new(state::Context {
+            __CONTEXT.get().write(mem::MaybeUninit::new(state::Context {
                 allocator,
                 base_addr,
                 bootstrap_root: vmem::Window::current_root(),
             }));
         }
-        unsafe { mmu::init() };
+        unsafe { mmu::init(&mut window) };
         writeln!(
             sbi::Console,
             "SU: ASID mask=0x{:04x} force_flush={}\r",
-            mmu::asid_mask(),
-            mmu::force_flush()
+            mmu::asid_mask(&window),
+            mmu::force_flush(&window)
         )
         .unwrap_or_default();
     }
     thread.set_hart_id(hart_id);
 
     let context = unsafe { (*__CONTEXT.get()).assume_init_ref() };
-    match unsafe { state::init(window, thread, module, tables, context) } {
+    match unsafe { state::init(&mut window, thread, module, tables, context) } {
         Ok((satp, sepc, inv)) => unsafe {
             arch::asm! {
                 "li t0, 0x100",
@@ -200,40 +200,40 @@ extern "C" fn trap_entry() -> ! {
         "li sp, {stack}",
         "j {non_syscall_trap}",
 
-        ra  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o010 },
-        sp  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o020 },
-        gp  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o030 },
-        tp  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o040 },
-        t0  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o050 },
-        t1  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o060 },
-        t2  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o070 },
-        s0  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o100 },
-        s1  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o110 },
-        a0  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o120 },
-        a1  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o130 },
-        a2  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o140 },
-        a3  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o150 },
-        a4  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o160 },
-        a5  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o170 },
-        a6  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o200 },
-        a7  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o210 },
-        s2  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o220 },
-        s3  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o230 },
-        s4  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o240 },
-        s5  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o250 },
-        s6  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o260 },
-        s7  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o270 },
-        s8  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o300 },
-        s9  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o310 },
-        s10 = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o320 },
-        s11 = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o330 },
-        t3  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o340 },
-        t4  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o350 },
-        t5  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o360 },
-        t6  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o370 },
-        pc = const { memoffset::offset_of!(module::ModuleContext, sepc) },
+        ra  = const { mem::offset_of!(module::ModuleContext, registers) + 0o010 },
+        sp  = const { mem::offset_of!(module::ModuleContext, registers) + 0o020 },
+        gp  = const { mem::offset_of!(module::ModuleContext, registers) + 0o030 },
+        tp  = const { mem::offset_of!(module::ModuleContext, registers) + 0o040 },
+        t0  = const { mem::offset_of!(module::ModuleContext, registers) + 0o050 },
+        t1  = const { mem::offset_of!(module::ModuleContext, registers) + 0o060 },
+        t2  = const { mem::offset_of!(module::ModuleContext, registers) + 0o070 },
+        s0  = const { mem::offset_of!(module::ModuleContext, registers) + 0o100 },
+        s1  = const { mem::offset_of!(module::ModuleContext, registers) + 0o110 },
+        a0  = const { mem::offset_of!(module::ModuleContext, registers) + 0o120 },
+        a1  = const { mem::offset_of!(module::ModuleContext, registers) + 0o130 },
+        a2  = const { mem::offset_of!(module::ModuleContext, registers) + 0o140 },
+        a3  = const { mem::offset_of!(module::ModuleContext, registers) + 0o150 },
+        a4  = const { mem::offset_of!(module::ModuleContext, registers) + 0o160 },
+        a5  = const { mem::offset_of!(module::ModuleContext, registers) + 0o170 },
+        a6  = const { mem::offset_of!(module::ModuleContext, registers) + 0o200 },
+        a7  = const { mem::offset_of!(module::ModuleContext, registers) + 0o210 },
+        s2  = const { mem::offset_of!(module::ModuleContext, registers) + 0o220 },
+        s3  = const { mem::offset_of!(module::ModuleContext, registers) + 0o230 },
+        s4  = const { mem::offset_of!(module::ModuleContext, registers) + 0o240 },
+        s5  = const { mem::offset_of!(module::ModuleContext, registers) + 0o250 },
+        s6  = const { mem::offset_of!(module::ModuleContext, registers) + 0o260 },
+        s7  = const { mem::offset_of!(module::ModuleContext, registers) + 0o270 },
+        s8  = const { mem::offset_of!(module::ModuleContext, registers) + 0o300 },
+        s9  = const { mem::offset_of!(module::ModuleContext, registers) + 0o310 },
+        s10 = const { mem::offset_of!(module::ModuleContext, registers) + 0o320 },
+        s11 = const { mem::offset_of!(module::ModuleContext, registers) + 0o330 },
+        t3  = const { mem::offset_of!(module::ModuleContext, registers) + 0o340 },
+        t4  = const { mem::offset_of!(module::ModuleContext, registers) + 0o350 },
+        t5  = const { mem::offset_of!(module::ModuleContext, registers) + 0o360 },
+        t6  = const { mem::offset_of!(module::ModuleContext, registers) + 0o370 },
+        pc = const { mem::offset_of!(module::ModuleContext, sepc) },
 
-        stack = const { 0x_ffff_ffc0_0020_0000_usize },
+        stack = const { vmem::WINDOW_END },
         handle_syscall = sym handle_syscall,
         non_syscall_trap = sym handle_non_syscall_trap,
     }
@@ -268,26 +268,26 @@ extern "C" fn handle_syscall() -> ! {
         "li sp, {stack}",
         "j {syscall}",
 
-        pc  = const { memoffset::offset_of!(module::ModuleContext, sepc) },
-        ra  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o010 },
-        sp  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o020 },
-        gp  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o030 },
-        tp  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o040 },
+        pc  = const { mem::offset_of!(module::ModuleContext, sepc) },
+        ra  = const { mem::offset_of!(module::ModuleContext, registers) + 0o010 },
+        sp  = const { mem::offset_of!(module::ModuleContext, registers) + 0o020 },
+        gp  = const { mem::offset_of!(module::ModuleContext, registers) + 0o030 },
+        tp  = const { mem::offset_of!(module::ModuleContext, registers) + 0o040 },
 
-        s0  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o100 },
-        s1  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o110 },
-        s2  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o220 },
-        s3  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o230 },
-        s4  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o240 },
-        s5  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o250 },
-        s6  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o260 },
-        s7  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o270 },
-        s8  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o300 },
-        s9  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o310 },
-        s10 = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o320 },
-        s11 = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o330 },
+        s0  = const { mem::offset_of!(module::ModuleContext, registers) + 0o100 },
+        s1  = const { mem::offset_of!(module::ModuleContext, registers) + 0o110 },
+        s2  = const { mem::offset_of!(module::ModuleContext, registers) + 0o220 },
+        s3  = const { mem::offset_of!(module::ModuleContext, registers) + 0o230 },
+        s4  = const { mem::offset_of!(module::ModuleContext, registers) + 0o240 },
+        s5  = const { mem::offset_of!(module::ModuleContext, registers) + 0o250 },
+        s6  = const { mem::offset_of!(module::ModuleContext, registers) + 0o260 },
+        s7  = const { mem::offset_of!(module::ModuleContext, registers) + 0o270 },
+        s8  = const { mem::offset_of!(module::ModuleContext, registers) + 0o300 },
+        s9  = const { mem::offset_of!(module::ModuleContext, registers) + 0o310 },
+        s10 = const { mem::offset_of!(module::ModuleContext, registers) + 0o320 },
+        s11 = const { mem::offset_of!(module::ModuleContext, registers) + 0o330 },
 
-        stack = const { 0x_ffff_ffc0_0020_0000_usize },
+        stack = const { vmem::WINDOW_END },
         syscall = sym syscall,
     }
 }
@@ -299,13 +299,13 @@ extern "C" fn handle_non_syscall_trap(cause: isize) -> ! {
 }
 
 extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
-    let window = unsafe { &mut *__WINDOW.get() };
+    let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
     let thread = unsafe { &mut *__THREAD.get() };
     let module = unsafe { &mut *__MODULE_CONTEXT.get() };
     let tables = unsafe { &*__MODULE.get() };
     let context = unsafe { (*__CONTEXT.get()).assume_init_ref() };
     let outcome = state::syscall(
-        window,
+        &mut window,
         thread,
         module,
         tables,
@@ -315,7 +315,7 @@ extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5:
     if let Some(root) = outcome.root {
         // The per-hart window/stack and global supervisor code retain the same
         // backing in both roots. No context/module reference is used past here.
-        unsafe { mmu::switch(root, mmu::force_flush()) };
+        unsafe { mmu::switch(root, mmu::force_flush(&window)) };
     }
     let [a0, a1, a2, a3, a4, a5] = outcome.message;
     restore_syscall(a0, a1, a2, a3, a4, a5)
@@ -368,24 +368,24 @@ extern "C" fn restore_syscall(
             in("a3") a3,
             in("a4") a4,
             in("a5") a5,
-            pc  = const { memoffset::offset_of!(module::ModuleContext, sepc) },
-            gp  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o030 },
-            tp  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o040 },
-            ra  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o010 },
-            sp  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o020 },
+            pc  = const { mem::offset_of!(module::ModuleContext, sepc) },
+            gp  = const { mem::offset_of!(module::ModuleContext, registers) + 0o030 },
+            tp  = const { mem::offset_of!(module::ModuleContext, registers) + 0o040 },
+            ra  = const { mem::offset_of!(module::ModuleContext, registers) + 0o010 },
+            sp  = const { mem::offset_of!(module::ModuleContext, registers) + 0o020 },
 
-            s0  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o100 },
-            s1  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o110 },
-            s2  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o220 },
-            s3  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o230 },
-            s4  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o240 },
-            s5  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o250 },
-            s6  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o260 },
-            s7  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o270 },
-            s8  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o300 },
-            s9  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o310 },
-            s10 = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o320 },
-            s11 = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o330 },
+            s0  = const { mem::offset_of!(module::ModuleContext, registers) + 0o100 },
+            s1  = const { mem::offset_of!(module::ModuleContext, registers) + 0o110 },
+            s2  = const { mem::offset_of!(module::ModuleContext, registers) + 0o220 },
+            s3  = const { mem::offset_of!(module::ModuleContext, registers) + 0o230 },
+            s4  = const { mem::offset_of!(module::ModuleContext, registers) + 0o240 },
+            s5  = const { mem::offset_of!(module::ModuleContext, registers) + 0o250 },
+            s6  = const { mem::offset_of!(module::ModuleContext, registers) + 0o260 },
+            s7  = const { mem::offset_of!(module::ModuleContext, registers) + 0o270 },
+            s8  = const { mem::offset_of!(module::ModuleContext, registers) + 0o300 },
+            s9  = const { mem::offset_of!(module::ModuleContext, registers) + 0o310 },
+            s10 = const { mem::offset_of!(module::ModuleContext, registers) + 0o320 },
+            s11 = const { mem::offset_of!(module::ModuleContext, registers) + 0o330 },
         }
     }
 }
@@ -430,38 +430,38 @@ extern "C" fn resume_after_interrupt() -> ! {
             "csrrw tp, sscratch, tp",
             "sret",
             options(noreturn),
-            ra  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o010 },
-            sp  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o020 },
-            tp  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o040 },
-            gp  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o030 },
-            t0  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o050 },
-            t1  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o060 },
-            t2  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o070 },
-            s0  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o100 },
-            s1  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o110 },
-            a0  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o120 },
-            a1  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o130 },
-            a2  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o140 },
-            a3  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o150 },
-            a4  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o160 },
-            a5  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o170 },
-            a6  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o200 },
-            a7  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o210 },
-            s2  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o220 },
-            s3  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o230 },
-            s4  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o240 },
-            s5  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o250 },
-            s6  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o260 },
-            s7  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o270 },
-            s8  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o300 },
-            s9  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o310 },
-            s10 = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o320 },
-            s11 = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o330 },
-            t3  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o340 },
-            t4  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o350 },
-            t5  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o360 },
-            t6  = const { memoffset::offset_of!(module::ModuleContext, registers) + 0o370 },
-            pc = const { memoffset::offset_of!(module::ModuleContext, sepc) },
+            ra  = const { mem::offset_of!(module::ModuleContext, registers) + 0o010 },
+            sp  = const { mem::offset_of!(module::ModuleContext, registers) + 0o020 },
+            tp  = const { mem::offset_of!(module::ModuleContext, registers) + 0o040 },
+            gp  = const { mem::offset_of!(module::ModuleContext, registers) + 0o030 },
+            t0  = const { mem::offset_of!(module::ModuleContext, registers) + 0o050 },
+            t1  = const { mem::offset_of!(module::ModuleContext, registers) + 0o060 },
+            t2  = const { mem::offset_of!(module::ModuleContext, registers) + 0o070 },
+            s0  = const { mem::offset_of!(module::ModuleContext, registers) + 0o100 },
+            s1  = const { mem::offset_of!(module::ModuleContext, registers) + 0o110 },
+            a0  = const { mem::offset_of!(module::ModuleContext, registers) + 0o120 },
+            a1  = const { mem::offset_of!(module::ModuleContext, registers) + 0o130 },
+            a2  = const { mem::offset_of!(module::ModuleContext, registers) + 0o140 },
+            a3  = const { mem::offset_of!(module::ModuleContext, registers) + 0o150 },
+            a4  = const { mem::offset_of!(module::ModuleContext, registers) + 0o160 },
+            a5  = const { mem::offset_of!(module::ModuleContext, registers) + 0o170 },
+            a6  = const { mem::offset_of!(module::ModuleContext, registers) + 0o200 },
+            a7  = const { mem::offset_of!(module::ModuleContext, registers) + 0o210 },
+            s2  = const { mem::offset_of!(module::ModuleContext, registers) + 0o220 },
+            s3  = const { mem::offset_of!(module::ModuleContext, registers) + 0o230 },
+            s4  = const { mem::offset_of!(module::ModuleContext, registers) + 0o240 },
+            s5  = const { mem::offset_of!(module::ModuleContext, registers) + 0o250 },
+            s6  = const { mem::offset_of!(module::ModuleContext, registers) + 0o260 },
+            s7  = const { mem::offset_of!(module::ModuleContext, registers) + 0o270 },
+            s8  = const { mem::offset_of!(module::ModuleContext, registers) + 0o300 },
+            s9  = const { mem::offset_of!(module::ModuleContext, registers) + 0o310 },
+            s10 = const { mem::offset_of!(module::ModuleContext, registers) + 0o320 },
+            s11 = const { mem::offset_of!(module::ModuleContext, registers) + 0o330 },
+            t3  = const { mem::offset_of!(module::ModuleContext, registers) + 0o340 },
+            t4  = const { mem::offset_of!(module::ModuleContext, registers) + 0o350 },
+            t5  = const { mem::offset_of!(module::ModuleContext, registers) + 0o360 },
+            t6  = const { mem::offset_of!(module::ModuleContext, registers) + 0o370 },
+            pc = const { mem::offset_of!(module::ModuleContext, sepc) },
         }
     }
 }

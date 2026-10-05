@@ -5,7 +5,7 @@
 //! ELF template preparation and lazy retained context construction. No language
 //! interpretation, global invocation registry, or thread control block.
 
-use core::{num::NonZeroUsize, ptr, slice};
+use core::{num::NonZeroUsize, ptr, slice, mem};
 
 use elf::{
     ElfBytes,
@@ -18,7 +18,7 @@ use super::{
     module::{Dependency, ModuleContext, ModuleTables, CONTEXT_PAGES, TABLE_ORDER, TABLE_PAGES},
     state::Context,
     llfree, mmu,
-    vmem::{self, Mapping, Root, Window, PAGE},
+    vmem::{self, Mapping, Root, Window, WindowAccess, PAGE},
 };
 
 fn memory(_: llfree::Error) -> ModuleError {
@@ -66,7 +66,7 @@ fn image_range<'a>(
 }
 
 fn load_elf(
-    window: &mut Window,
+    window: &mut WindowAccess,
     context: &Context,
     hart: usize,
     root: Root,
@@ -81,12 +81,12 @@ fn load_elf(
         return Err(ModuleError::InvalidImage);
     }
     let manifest = image_range(&elf, elf.ehdr.e_entry as usize, size_of::<tau::Manifest>())?;
-    let entry = word(manifest, memoffset::offset_of!(tau::Manifest, entry))?;
-    let deps = memoffset::offset_of!(tau::Manifest, dependencies);
+    let entry = word(manifest, mem::offset_of!(tau::Manifest, entry))?;
+    let deps = mem::offset_of!(tau::Manifest, dependencies);
     if word(manifest, deps + 8)? != 0 {
         return Err(ModuleError::InvalidImage);
     }
-    let regions = memoffset::offset_of!(tau::Manifest, mapped_regions);
+    let regions = mem::offset_of!(tau::Manifest, mapped_regions);
     // First iteration supports one private stack, not declarative device bindings.
     if word(manifest, regions + 8)? != 1 {
         return Err(ModuleError::InvalidImage);
@@ -96,15 +96,13 @@ fn load_elf(
         word(manifest, regions)?,
         size_of::<tau::MappedRegion>(),
     )?;
-    let stack_pages = word(stack, memoffset::offset_of!(tau::MappedRegion, pages))?;
+    let stack_pages = word(stack, mem::offset_of!(tau::MappedRegion, pages))?;
     if stack_pages == 0
         || stack_pages > 256
-        || word(stack, memoffset::offset_of!(tau::MappedRegion, phys_start))? != 0
-        || word(
-            stack,
-            memoffset::offset_of!(tau::MappedRegion, virtual_start),
-        )? != (stack_pages * PAGE).wrapping_neg()
-        || stack.get(memoffset::offset_of!(tau::MappedRegion, write)) != Some(&1)
+        || word(stack, mem::offset_of!(tau::MappedRegion, phys_start))? != 0
+        || word(stack, mem::offset_of!(tau::MappedRegion, virtual_start))?
+            != (stack_pages * PAGE).wrapping_neg()
+        || stack.get(mem::offset_of!(tau::MappedRegion, write)) != Some(&1)
     {
         return Err(ModuleError::InvalidImage);
     }
@@ -209,7 +207,7 @@ fn load_elf(
 }
 
 pub fn prepare(
-    window: &mut Window,
+    window: &mut WindowAccess,
     context: &Context,
     hart: usize,
     tables: &ModuleTables,
@@ -278,7 +276,7 @@ pub fn prepare(
 }
 
 pub fn invoke(
-    window: &mut Window,
+    window: &mut WindowAccess,
     context: &Context,
     hart: usize,
     module: &mut ModuleContext,
@@ -316,7 +314,7 @@ pub fn invoke(
 }
 
 fn construct(
-    window: &mut Window,
+    window: &mut WindowAccess,
     context: &Context,
     hart: usize,
     caller: Root,
@@ -367,7 +365,7 @@ fn construct(
         let private = window
             .mapped_block(root, vmem::MODULE_CONTEXT, CONTEXT_PAGES)
             .ok_or(ModuleError::InvalidImage)?;
-        let tag = mmu::allocate_tag().ok_or(ModuleError::OutOfMemory)?;
+        let tag = mmu::allocate_tag(window).ok_or(ModuleError::OutOfMemory)?;
         let root = Root::sv39(root.page(), tag);
         unsafe {
             ModuleContext::init_at(private.cast(), root, dep.entry, descriptor, dep.root_index);

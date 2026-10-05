@@ -3,6 +3,6 @@
 # See LICENSE for the full license text.
 
 [toolchain]
-components = ["clippy", "rustfmt", "llvm-tools"]
-channel = "1.98.1"
+components = ["clippy", "rustfmt"]
+channel = "1.99"
 targets = ["riscv64imac-unknown-none-elf"]

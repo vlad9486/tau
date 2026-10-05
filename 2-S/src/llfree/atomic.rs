@@ -42,9 +42,10 @@ impl<T: Atomic> Atom<T> {
         }
     }
 
+    // TODO: rename `fetch_update` -> `try_update`
     #[track_caller]
     pub fn fetch_update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
-        match self.0.fetch_update(|v| f(v.into()).map(Into::into)) {
+        match self.0.try_update(|v| f(v.into()).map(Into::into)) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
@@ -90,7 +91,7 @@ pub trait AtomicImpl: Sized {
 
     fn compare_exchange(&self, current: Self::V, new: Self::V) -> Result<Self::V, Self::V>;
 
-    fn fetch_update<F: FnMut(Self::V) -> Option<Self::V>>(&self, f: F) -> Result<Self::V, Self::V>;
+    fn try_update<F: FnMut(Self::V) -> Option<Self::V>>(&self, f: F) -> Result<Self::V, Self::V>;
 
     fn fetch_and(&self, v: Self::V) -> Self::V;
 
@@ -143,11 +144,11 @@ macro_rules! atomic_impl {
                 self.compare_exchange(current, new, Ordering::AcqRel, Ordering::Acquire)
             }
 
-            fn fetch_update<F: FnMut(Self::V) -> Option<Self::V>>(
+            fn try_update<F: FnMut(Self::V) -> Option<Self::V>>(
                 &self,
                 f: F,
             ) -> Result<Self::V, Self::V> {
-                self.fetch_update(Ordering::AcqRel, Ordering::Acquire, f)
+                self.try_update(Ordering::AcqRel, Ordering::Acquire, f)
             }
 
             atomic_trivial![

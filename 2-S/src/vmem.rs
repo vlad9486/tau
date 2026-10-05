@@ -2,12 +2,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{num::NonZeroUsize, ptr};
+use core::{
+    cell::UnsafeCell,
+    mem::{self, MaybeUninit},
+    num::NonZeroUsize,
+    ptr,
+};
 
-use super::{asm, cpu, llfree};
+use super::{asm, cpu, llfree, mmu::Hart};
 
 pub const SV39: usize = 8;
 pub const PAGE: usize = 4096;
+pub const WINDOW_END: usize = 0xffff_ffc0_0020_0000;
 pub const THREAD: usize = 0xffff_ffc0_0020_0000;
 pub const MODULE_CONTEXT: usize = 0xffff_ffc0_0021_0000;
 pub const MODULE: usize = 0xffff_ffc0_0022_0000;
@@ -74,25 +80,67 @@ fn branch(page: usize) -> usize {
     (page >> 2) | 1
 }
 
-/// The first page maps itself. Other pages in the 2 MiB window are temporary
-/// aliases, not Rust-owned fields. Slot 511 is the supervisor stack: never alias it.
+/// Linker-provided layout of the 2 MiB hart-local window. The first page maps
+/// itself, slot 6 holds MMU state, and slot 511 is the supervisor stack.
+/// Reserved bytes may be unmapped or temporarily aliased; never borrow or copy
+/// the whole structure. Access only mapped fields or use `WindowAccess`.
 #[repr(C)]
 pub struct Window {
-    table: [usize; 512],
+    table: UnsafeCell<[usize; 512]>,
+    _before_hart: UnsafeCell<[MaybeUninit<u8>; 5 * PAGE]>,
+    pub(super) hart: UnsafeCell<Hart>,
+    _after_hart: UnsafeCell<[MaybeUninit<u8>; 505 * PAGE - size_of::<Hart>()]>,
+    stack: UnsafeCell<[MaybeUninit<u8>; PAGE]>,
+}
+
+pub const HART_SLOT: usize = mem::offset_of!(Window, hart) / PAGE;
+
+const _: () = {
+    assert!(mem::offset_of!(Window, hart) == 6 * PAGE);
+    assert!(mem::offset_of!(Window, stack) == 511 * PAGE);
+    assert!(size_of::<Window>() == 512 * PAGE);
+};
+
+/// Exclusive access to a hart's page table, MMU state and temporary aliases.
+/// The handle retains the caller's pointer without borrowing the sparse window
+/// or its active stack.
+pub struct WindowAccess {
+    base: *const Window,
 }
 
 impl Window {
     pub fn current_root() -> Root {
         Root(unsafe { NonZeroUsize::new_unchecked(cpu::csrr!("satp")) })
     }
+}
+
+impl WindowAccess {
+    /// # Safety
+    /// `base` must be aligned and have provenance for the full window layout.
+    /// Its table and hart fields must be mapped and initialized (zeroed hart
+    /// storage is valid). This handle must have exclusive access to those fields
+    /// and the temporary aliases. Every root used while the handle is live must
+    /// retain the same window backing.
+    pub unsafe fn new(base: *const Window) -> Self {
+        Self { base }
+    }
+
+    pub(super) fn hart(&self) -> &Hart {
+        unsafe { &*UnsafeCell::raw_get(&raw const (*self.base).hart) }
+    }
+
+    pub(super) fn hart_mut(&mut self) -> &mut Hart {
+        unsafe { &mut *UnsafeCell::raw_get(&raw const (*self.base).hart) }
+    }
 
     fn alias(&mut self, slot: usize, physical: usize) -> *mut u8 {
-        debug_assert!(slot > 0 && slot < 511 && physical & 0xfff == 0);
+        debug_assert!(slot > 0 && slot < 511 && slot != HART_SLOT && physical & 0xfff == 0);
         let pte = (physical >> 2) | flags_new(b"rw---");
-        let target = ptr::from_mut(self).cast::<u8>().wrapping_add(slot * PAGE);
-        let cell = unsafe { self.table.get_unchecked_mut(slot) };
-        if *cell != pte {
-            unsafe { ptr::from_mut(cell).write_volatile(pte) };
+        let target = self.base.cast::<u8>().wrapping_add(slot * PAGE).cast_mut();
+        let table = unsafe { UnsafeCell::raw_get(&raw const (*self.base).table) };
+        let cell = unsafe { table.cast::<usize>().add(slot) };
+        if unsafe { cell.read_volatile() } != pte {
+            unsafe { cell.write_volatile(pte) };
             asm::sfence_vma(Some(target.addr()), None);
         }
         target
@@ -142,7 +190,7 @@ impl Window {
         for i in 0..pages {
             self.alias(16 + i, physical + i * PAGE);
         }
-        ptr::from_mut(self).cast::<u8>().wrapping_add(16 * PAGE)
+        self.base.cast::<u8>().wrapping_add(16 * PAGE).cast_mut()
     }
 
     pub fn page_pointer(&mut self, physical: usize) -> *mut u8 {
@@ -157,7 +205,7 @@ impl Window {
             let (physical, _) = self.resolve(root, address + i * PAGE)?;
             self.alias(16 + i, physical);
         }
-        Some(ptr::from_mut(self).cast::<u8>().wrapping_add(16 * PAGE))
+        Some(self.base.cast::<u8>().wrapping_add(16 * PAGE).cast_mut())
     }
 
     pub fn root_branch(&mut self, root: Root, index: usize) -> Option<usize> {
