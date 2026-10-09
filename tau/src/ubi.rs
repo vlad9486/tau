@@ -8,12 +8,12 @@ use super::{
     common::{Call, Entry, Event, WaitError, ModuleError},
 };
 
-// TODO: investigate it
-#[inline(never)]
+#[inline(always)]
 fn ubi<const I: usize, const O: usize>(call: Call, arg: [usize; I]) -> (usize, [usize; O]) {
     const {
         assert!(I <= 5 && O <= 5);
     }
+
     let mut words = [0; 5];
     words[..I].copy_from_slice(&arg);
     let status;

@@ -232,6 +232,8 @@ pub unsafe fn init(
 pub struct Outcome {
     pub message: [usize; 6],
     pub root: Option<vmem::Root>,
+    /// Initialize a fresh callee entry only after installing the destination root.
+    pub enter_from: Option<vmem::Root>,
 }
 
 impl From<[usize; 6]> for Outcome {
@@ -239,6 +241,7 @@ impl From<[usize; 6]> for Outcome {
         Self {
             message,
             root: None,
+            enter_from: None,
         }
     }
 }
@@ -275,7 +278,7 @@ pub fn syscall(
                     super::loading::invoke(
                         window,
                         context,
-                        thread.hart_id(),
+                        thread,
                         module,
                         slot,
                         descriptor,
@@ -287,6 +290,7 @@ pub fn syscall(
                     return Outcome {
                         message: msg,
                         root: Some(root),
+                        enter_from: Some(module.root),
                     };
                 }
                 Err(error) => {
@@ -300,6 +304,7 @@ pub fn syscall(
                 return Outcome {
                     message: msg,
                     root: Some(caller),
+                    enter_from: None,
                 };
             } else {
                 write!(sbi::Console, "no caller for this context\r\n").unwrap_or_default();

@@ -313,12 +313,67 @@ extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5:
         [a0, a1, a2, a3, a4, a5],
     );
     if let Some(root) = outcome.root {
+        let flush = mmu::switch_flush(&window, module.root, root);
         // The per-hart window/stack and global supervisor code retain the same
         // backing in both roots. No context/module reference is used past here.
-        unsafe { mmu::switch(root, mmu::force_flush(&window)) };
+        unsafe { mmu::switch(root, flush) };
+        if let Some(caller) = outcome.enter_from {
+            // Form a new pointer after the switch: this VA now names the callee.
+            unsafe { module::ModuleContext::enter_at(__MODULE_CONTEXT.get(), caller) };
+            let [a0, a1, a2, a3, a4, a5] = outcome.message;
+            enter_invocation(a0, a1, a2, a3, a4, a5)
+        }
     }
     let [a0, a1, a2, a3, a4, a5] = outcome.message;
     restore_syscall(a0, a1, a2, a3, a4, a5)
+}
+
+/// Enter a fresh invocation with only the message registers populated.
+/// The next user trap saves any register state required for resumption.
+#[inline(always)]
+fn enter_invocation(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
+    unsafe {
+        arch::asm! {
+            "ld t0, {pc}(tp)",
+            "csrw sepc, t0",
+            "csrw sscratch, zero",
+            "mv ra, zero",
+            "mv sp, zero",
+            "mv gp, zero",
+            "mv s0, zero",
+            "mv s1, zero",
+            "mv s2, zero",
+            "mv s3, zero",
+            "mv s4, zero",
+            "mv s5, zero",
+            "mv s6, zero",
+            "mv s7, zero",
+            "mv s8, zero",
+            "mv s9, zero",
+            "mv s10, zero",
+            "mv s11, zero",
+            "mv t0, zero",
+            "mv t1, zero",
+            "mv t2, zero",
+            "mv t3, zero",
+            "mv t4, zero",
+            "mv t5, zero",
+            "mv t6, zero",
+            "mv a6, zero",
+            "mv a7, zero",
+            // Install user tp = 0 and retain the context pointer in sscratch.
+            "csrrw tp, sscratch, tp",
+            "sret",
+            options(noreturn),
+            in("a0") a0,
+            in("a1") a1,
+            in("a2") a2,
+            in("a3") a3,
+            in("a4") a4,
+            in("a5") a5,
+            pc = const { mem::offset_of!(module::ModuleContext, sepc) },
+        }
+    }
 }
 
 extern "C" fn restore_syscall(

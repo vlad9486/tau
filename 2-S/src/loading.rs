@@ -16,6 +16,7 @@ use tau::ModuleError;
 
 use super::{
     module::{Dependency, ModuleContext, ModuleTables, CONTEXT_PAGES, TABLE_ORDER, TABLE_PAGES},
+    scheduler::Thread,
     state::Context,
     llfree, mmu,
     vmem::{self, Mapping, Root, Window, WindowAccess, PAGE},
@@ -278,7 +279,7 @@ pub fn prepare(
 pub fn invoke(
     window: &mut WindowAccess,
     context: &Context,
-    hart: usize,
+    thread: &Thread,
     module: &mut ModuleContext,
     slot: u16,
     descriptor: usize,
@@ -303,23 +304,24 @@ pub fn invoke(
     }
     let root = match module.dependency(slot) {
         Some(root) => root,
-        None => construct(window, context, hart, caller, descriptor)?,
+        None => construct(window, context, thread, caller, descriptor)?,
     };
-    let (physical, _) = window
-        .resolve(root, vmem::MODULE_CONTEXT)
-        .ok_or(ModuleError::InvalidImage)?;
-    unsafe { ModuleContext::enter_at(window.page_pointer(physical).cast(), caller) };
     module.retain_dependency(slot, root);
     Ok(root)
 }
 
+// Keep the hart-ID read and allocation code off the warm invocation path.
+// Inlining lets LLVM hoist the thread load ahead of the cached-root check.
+#[cold]
+#[inline(never)]
 fn construct(
     window: &mut WindowAccess,
     context: &Context,
-    hart: usize,
+    thread: &Thread,
     caller: Root,
     descriptor: usize,
 ) -> Result<Root, ModuleError> {
+    let hart = thread.hart_id();
     let dep = unsafe { window.page_pointer(descriptor).cast::<Dependency>().read() };
     let root = window.create(0, || context.page(hart)).map_err(memory)?;
     let result = (|| {
