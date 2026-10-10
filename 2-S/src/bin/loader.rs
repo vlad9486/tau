@@ -12,7 +12,7 @@
     warn(implicit_provenance_casts)
 )]
 
-use core::{arch, cell::UnsafeCell, hint, mem::MaybeUninit, num::NonZero, slice};
+use core::{arch, cell::UnsafeCell, hint, mem::MaybeUninit, num::NonZero, ops::Range, slice};
 
 use supervisor::{
     llfree::{Error, Allocator, FrameId},
@@ -75,7 +75,7 @@ extern "C" fn inner(
         let dtb_addr = st.cast::<u32>().with_addr(opaque);
         let size = u32::from_be(unsafe { *dtb_addr.add(1) }) as usize;
         let dtb = unsafe { slice::from_raw_parts(dtb_addr, size / size_of::<u32>()) };
-        let Ok((dtb, _)) = tau::Dtb::new(dtb) else {
+        let Ok((dtb, reservations)) = tau::Dtb::new(dtb) else {
             sbi::Printer.ch(*b"bad dtb\r\n");
             loop {
                 hint::spin_loop();
@@ -95,7 +95,8 @@ extern "C" fn inner(
             }
         };
         let boot_addr = buffer.as_ptr().addr();
-        match init_memory(hart_id, dtb_addr.addr(), dtb, st, ro, hp) {
+        let dtb_range = dtb_addr.addr()..dtb_addr.addr() + size;
+        match init_memory(hart_id, dtb_range, dtb, reservations, st, ro, hp) {
             Ok((satp, cores, frames)) => {
                 sbi::Printer.ch(*b"success\r\n");
                 (satp, boot_addr, boot_size.div_ceil(0x1000), cores, frames)
@@ -148,8 +149,9 @@ extern "C" fn inner(
 
 fn init_memory(
     hart_id: usize,
-    dtb_addr: usize,
+    dtb_range: Range<usize>,
     dtb: tau::Dtb<'_>,
+    reservations: tau::DtbRsv<'_>,
     st: *mut MaybeUninit<[usize; 512]>,
     ro: *mut MaybeUninit<[usize; 512]>,
     hp: *mut MaybeUninit<[usize; 512]>,
@@ -182,18 +184,41 @@ fn init_memory(
     allocator.reserve_all();
     let allocator = allocator.as_lower();
 
+    // Keep firmware reservations (including the VF2 scanout buffer) out of
+    // the allocator. Test overlaps, since a reservation need not start on a
+    // page or huge-page boundary. Area bases are physical; FrameId is relative.
+    let memory_base = st.addr();
+    let available = |frame: usize, pages: usize| {
+        let base = memory_base + (frame << 12);
+        let end = base + (pages << 12);
+        let overlaps =
+            |start: usize, len: usize| len != 0 && base < start.saturating_add(len) && start < end;
+        !(base < dtb_range.end && dtb_range.start < end)
+            && !reservations
+                .into_iter()
+                .any(|(start, len)| overlaps(start, len))
+            && !dtb.iter().any(|(props, path)| {
+                path.len() == 3
+                    && path[1] == "reserved-memory"
+                    && props
+                        .find_reg()
+                        .is_some_and(|area| overlaps(area.base, area.len))
+            })
+    };
+
     // beginning of free memory
     // `0x200` is opensbi size
     let mut frame = 0x200 + HEAP_END + pages;
     while frame & 0o777 != 0 {
         let core = ((frame >> 10) + hart_id) % cores;
-        allocator.put(core, FrameId(frame), 0)?;
+        if available(frame, 1) {
+            allocator.put(core, FrameId(frame), 0)?;
+        }
         frame += 1;
     }
     for big_frame in (frame / 0o1000)..(frames.get() / 0o1000) {
         let frame = big_frame << 9;
-        // TODO: handle reserved regions properly
-        if frame == dtb_addr >> 12 {
+        if !available(frame, 512) {
             continue;
         }
         let core = ((frame >> 10) + hart_id) % cores;

@@ -20,7 +20,7 @@ mod ubi;
 pub use self::ubi::{Ubi, FreeError, AllocError};
 
 mod dtb;
-pub use self::dtb::{Dtb, DtbProps, DtbHeaderError};
+pub use self::dtb::{Dtb, DtbProps, DtbHeaderError, DtbRsv};
 
 mod heap;
 pub use self::heap::Area;

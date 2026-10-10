@@ -74,6 +74,7 @@ impl<'a> Index<usize> for DtbPath<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct DtbRsv<'a>(&'a [u32]);
 
 pub struct DtbProps<'a> {
@@ -194,6 +195,7 @@ impl Iterator for DtbRsv<'_> {
         }
         let addr = ((hi_addr.to_be() as usize) << 32) + (lo_addr.to_be() as usize);
         let size = ((hi_size.to_be() as usize) << 32) + (lo_size.to_be() as usize);
+        self.0 = &self.0[4..];
         Some((addr, size))
     }
 }

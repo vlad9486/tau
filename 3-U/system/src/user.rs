@@ -14,7 +14,7 @@ use core::{
 
 use alloc::boxed::Box;
 
-use super::{ethernet, register::Register, scheduler::Shared, sdio};
+use super::{display, ethernet, register::Register, scheduler::Shared, sdio};
 
 pub struct State<'a> {
     fut: Pin<Box<dyn Future<Output = ()> + 'a>>,
@@ -25,10 +25,11 @@ impl<'a> State<'a> {
         shared: &'a UnsafeCell<Shared>,
         has_sdio: bool,
         has_ethernet: bool,
+        has_display: bool,
         sdio_slot: u16,
     ) -> Self {
         State {
-            fut: Box::pin(run(shared, has_sdio, has_ethernet, sdio_slot)),
+            fut: Box::pin(run(shared, has_sdio, has_ethernet, has_display, sdio_slot)),
         }
     }
 
@@ -59,8 +60,17 @@ fn measure_roundtrips(shared: &UnsafeCell<Shared>, slot: u16) {
     ));
 }
 
-async fn run(shared: &UnsafeCell<Shared>, has_sdio: bool, has_ethernet: bool, sdio_slot: u16) {
+async fn run(
+    shared: &UnsafeCell<Shared>,
+    has_sdio: bool,
+    has_ethernet: bool,
+    has_display: bool,
+    sdio_slot: u16,
+) {
     measure_roundtrips(shared, sdio_slot);
+    if has_display {
+        unsafe { &mut *shared.get() }.display_task = Some(display::Task::TestPattern);
+    }
     if has_sdio {
         // TODO: allocator for DMA
         let phys = 0x7000_1000_u32;
@@ -99,9 +109,17 @@ async fn run(shared: &UnsafeCell<Shared>, has_sdio: bool, has_ethernet: bool, sd
         }
     }
     let mut sequence = 0u32;
+    let mut display_pending = has_display;
     let mut cmd = [0; 1];
     loop {
         match wait_event(shared).await {
+            Event::Display => {
+                if let Some(done) = unsafe { &mut *shared.get() }.display_done.take() {
+                    display_pending = false;
+                    unsafe { &mut *shared.get() }
+                        .write(format_args!("display: user draw: {done:?}"));
+                }
+            }
             Event::Ethernet => {
                 for port in 0..2 {
                     let done = unsafe { &mut *shared.get() }.ethernet_tx_done[port].take();
@@ -147,6 +165,28 @@ async fn run(shared: &UnsafeCell<Shared>, has_sdio: bool, has_ethernet: bool, sd
                 let buf = &mut unsafe { &mut *shared.get() }.uart_in;
                 buf.rxs(&mut cmd);
                 match cmd[0] {
+                    b'f' | b'c' | b'r' if has_display => {
+                        let task = match cmd[0] {
+                            b'f' => display::Task::TestPattern,
+                            b'c' => display::Task::Clear { color: 0x102030 },
+                            _ => display::Task::FillRect {
+                                x: 320,
+                                y: 240,
+                                width: 640,
+                                height: 480,
+                                color: 0xff8000,
+                            },
+                        };
+                        let shared = unsafe { &mut *shared.get() };
+                        // Exactly one user request can be queued or in flight.
+                        // The completion is consumed by Event::Display.
+                        if !display_pending {
+                            shared.display_task = Some(task);
+                            display_pending = true;
+                        } else {
+                            shared.write(format_args!("display: draw busy"));
+                        }
+                    }
                     b'q' => {
                         unsafe { &mut *shared.get() }.terminate = true;
                         break;
@@ -190,6 +230,7 @@ fn post_receive(shared: &UnsafeCell<Shared>, port: usize, phys: u32) {
 enum Event {
     Uart,
     Ethernet,
+    Display,
 }
 
 async fn wait_event(shared: &UnsafeCell<Shared>) -> Event {
@@ -197,6 +238,9 @@ async fn wait_event(shared: &UnsafeCell<Shared>) -> Event {
         let shared = unsafe { &mut *shared.get() };
         if !shared.uart_in.is_empty() {
             return Poll::Ready(Event::Uart);
+        }
+        if shared.display_done.is_some() {
+            return Poll::Ready(Event::Display);
         }
         if shared.ethernet_rx_done.iter().any(Option::is_some)
             || shared.ethernet_tx_done.iter().any(Option::is_some)

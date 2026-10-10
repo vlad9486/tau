@@ -20,6 +20,7 @@ mod plic;
 mod uart;
 mod sdio;
 mod ethernet;
+mod display;
 mod user;
 
 #[cfg(not(test))]
@@ -57,7 +58,7 @@ extern "C" fn main(
 
     let len = info_pages << 12;
     let raw = tau::Area::new(info, len).sl();
-    let Ok((dtb, _)) = tau::Dtb::new(raw) else {
+    let Ok((dtb, reservations)) = tau::Dtb::new(raw) else {
         tau::Ubi::respond(1, []);
     };
 
@@ -129,7 +130,7 @@ extern "C" fn main(
         .r::<plic::PlicCtx>();
     plic_ctx.set_threshold(plic::InterruptPriority::_0);
 
-    scheduler::Tasks::new(&dtb, plic, plic_e, context_id).run(plic_ctx, slot);
+    scheduler::Tasks::new(&dtb, reservations, plic, plic_e, context_id).run(plic_ctx, slot);
 
     tau::Ubi::respond(0, [])
 }

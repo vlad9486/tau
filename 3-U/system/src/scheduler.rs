@@ -8,7 +8,7 @@ use core::{hint, fmt, num::NonZeroUsize, time::Duration};
 use smallvec::SmallVec;
 
 use super::plic::{PlicPriority, PlicEnable, PlicCtx, InterruptNumber, InterruptId, InterruptPriority};
-use super::{uart, sdio, ethernet, user};
+use super::{uart, sdio, ethernet, display, user};
 
 pub trait DriverState
 where
@@ -27,6 +27,8 @@ pub struct Shared {
     pub ethernet_tx_done: [Option<ethernet::TxDone>; 2],
     pub ethernet_rx_task: [Option<ethernet::RxTask>; 2],
     pub ethernet_rx_done: [Option<ethernet::RxDone>; 2],
+    pub display_task: Option<display::Task>,
+    pub display_done: Option<Result<(), display::Error>>,
     pub terminate: bool,
     deadline: [Option<Deadline>; 8],
     freq: u128,
@@ -127,12 +129,14 @@ pub struct Tasks {
     uart: Option<Driver<uart::State>>,
     sdio: Option<Driver<sdio::State>>,
     ethernet: SmallVec<[Driver<ethernet::State>; 4]>,
+    display: Option<display::State>,
     freq: u128,
 }
 
 impl Tasks {
     pub fn new(
         dtb: &tau::Dtb<'_>,
+        reservations: tau::DtbRsv<'_>,
         plic: &PlicPriority,
         plic_e: &PlicEnable,
         context_id: usize,
@@ -177,11 +181,15 @@ impl Tasks {
                 })
             })
             .collect();
+        let display = display::State::new(dtb, reservations);
 
         Tasks {
             uart,
             sdio,
             ethernet,
+            // Fixed framebuffer scanout uses polling, so no display IRQ is
+            // enabled in the PLIC. Timer issuer 5 drives initialization/drawing.
+            display,
             freq,
         }
     }
@@ -196,6 +204,8 @@ impl Tasks {
             ethernet_tx_done: [None; 2],
             ethernet_rx_task: [None; 2],
             ethernet_rx_done: [None; 2],
+            display_task: None,
+            display_done: None,
             terminate: false,
             deadline: [None; 8],
             freq: self.freq,
@@ -204,6 +214,7 @@ impl Tasks {
             &shared,
             self.sdio.is_some(),
             !self.ethernet.is_empty(),
+            self.display.is_some(),
             sdio_slot,
         );
 
@@ -222,6 +233,19 @@ impl Tasks {
             driver.state.handle(shared, tau::Event::Timeout);
         }
         for driver in self.ethernet.as_mut() {
+            driver.state.handle(shared, tau::Event::Timeout);
+        }
+        if let Some(driver) = self.display.as_mut() {
+            driver.handle(shared, tau::Event::Timeout);
+        } else {
+            shared.write(format_args!("no display found\n"));
+        }
+        if shared.display_done.is_some() {
+            user.step();
+        }
+        if !shared.uart_out.is_empty()
+            && let Some(driver) = self.uart.as_mut()
+        {
             driver.state.handle(shared, tau::Event::Timeout);
         }
 
@@ -275,17 +299,27 @@ impl Tasks {
                                     }
                                 }
                             }
+                            5 => {
+                                if let Some(driver) = self.display.as_mut() {
+                                    driver.handle(shared, tau::Event::Timeout);
+                                }
+                            }
                             _ => (),
                         }
                     }
                 }
             }
 
-            // A completion can immediately cause user.rs to submit on the
-            // other port. Drain those exchanges before sleeping, including
+            // A completion can immediately cause user.rs to submit another
+            // Ethernet or display task. Drain exchanges before sleeping, including
             // synchronous errors on absent/not-ready ports. Bound the work so
             // an unconsumed completion cannot starve interrupt processing.
             for _ in 0..2 {
+                if let Some(driver) = self.display.as_mut() {
+                    driver.submit(shared);
+                } else if shared.display_done.is_none() && shared.display_task.take().is_some() {
+                    shared.display_done = Some(Err(display::Error::Failed));
+                }
                 for port in 0..2 {
                     if let Some(driver) = self
                         .ethernet
@@ -308,6 +342,7 @@ impl Tasks {
                 }
                 if shared.ethernet_tx_done.iter().any(Option::is_some)
                     || shared.ethernet_rx_done.iter().any(Option::is_some)
+                    || shared.display_done.is_some()
                 {
                     user.step();
                 } else {
