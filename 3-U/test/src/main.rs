@@ -315,7 +315,7 @@ extern "C" fn main(event: usize, hart: usize, info: usize, pages: usize, _: usiz
                     [1]
                 );
             }
-            // The host supplies A -> B and B -> A fixture bindings. A -> B
+            // The host supplies an acyclic A -> B fixture binding. A -> B
             // uses a separate B context but the same module-owned globals.
             for (value, count) in [(3, 1), (4, 2)] {
                 assert_eq!(
@@ -383,10 +383,22 @@ extern "C" fn main(event: usize, hart: usize, info: usize, pages: usize, _: usiz
                 [6usize.rotate_left(7) ^ 0x5344_494f, 68]
             );
             assert_eq!(tau::Ubi::invoke::<0, 0>(slot, 2, []).unwrap_err().get(), 42);
+            // The assembly response path must keep every message register
+            // intact while using scratch registers to choose the MMU policy.
+            let words = [usize::MAX, 0x1234_5678_9abc_def0, 3, 4, 5];
+            assert_eq!(tau::Ubi::invoke::<5, 5>(slot, 6, words).unwrap(), words);
             assert_eq!(
                 tau::Ubi::invoke::<0, 0>(0, 0, []).unwrap_err().get(),
                 tau::ModuleError::InvalidDependency as usize
             );
+            // The ABI encodes 12 slot bits, while the protected tables contain
+            // 0x800 entries. A cache-first lookup must reject the upper half.
+            for invalid in [0x7ff, 0x800, 0xfff] {
+                assert_eq!(
+                    tau::Ubi::invoke::<0, 0>(invalid, 0, []).unwrap_err().get(),
+                    tau::ModuleError::InvalidDependency as usize
+                );
+            }
             // Bootstrap loader authority is restored on return.
             const ALIAS: usize = 0x2_0000_0000;
             tau::Ubi::map(NonZeroUsize::new(0x8020_0000), ALIAS, 1).unwrap();

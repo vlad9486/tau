@@ -84,6 +84,8 @@ fn load_elf(
     let manifest = image_range(&elf, elf.ehdr.e_entry as usize, size_of::<tau::Manifest>())?;
     let entry = word(manifest, mem::offset_of!(tau::Manifest, entry))?;
     let deps = mem::offset_of!(tau::Manifest, dependencies);
+    // Until the loader can validate and publish an acyclic binding graph,
+    // preparation only accepts fresh leaf modules. Invoke performs no cycle walk.
     if word(manifest, deps + 8)? != 0 {
         return Err(ModuleError::InvalidImage);
     }
@@ -281,31 +283,19 @@ pub fn invoke(
     context: &Context,
     thread: &Thread,
     module: &mut ModuleContext,
+    tables: &ModuleTables,
     slot: u16,
-    descriptor: usize,
 ) -> Result<Root, ModuleError> {
-    let caller = module.root;
-    if module.module_id == descriptor {
-        return Err(ModuleError::Reentrant);
+    // Bindings and successful roots live until shutdown. A retained root is
+    // already authorized; only a cache miss needs the shared descriptor table.
+    // Unload/rebinding must invalidate these caches before reusing a slot.
+    if let Some(root) = module.dependency(slot) {
+        return Ok(root);
     }
-    // Follow protected caller links directly, without collecting invocations.
-    let mut ancestor = module.caller();
-    while let Some(root) = ancestor {
-        let (physical, _) = window
-            .resolve(root, vmem::MODULE_CONTEXT)
-            .ok_or(ModuleError::InvalidImage)?;
-        let (module_id, previous) = unsafe {
-            ModuleContext::linkage_at(window.page_pointer(physical).cast::<ModuleContext>())
-        };
-        if module_id == descriptor {
-            return Err(ModuleError::Reentrant);
-        }
-        ancestor = previous;
-    }
-    let root = match module.dependency(slot) {
-        Some(root) => root,
-        None => construct(window, context, thread, caller, descriptor)?,
-    };
+    let descriptor = tables
+        .get_dependency(slot)
+        .ok_or(ModuleError::InvalidDependency)?;
+    let root = construct(window, context, thread, module.root, descriptor)?;
     module.retain_dependency(slot, root);
     Ok(root)
 }
@@ -370,7 +360,7 @@ fn construct(
         let tag = mmu::allocate_tag(window).ok_or(ModuleError::OutOfMemory)?;
         let root = Root::sv39(root.page(), tag);
         unsafe {
-            ModuleContext::init_at(private.cast(), root, dep.entry, descriptor, dep.root_index);
+            ModuleContext::init_at(private.cast(), root, dep.entry, dep.root_index);
             // All registers start at zero, including sp (top of high stack).
         }
         Ok(root)

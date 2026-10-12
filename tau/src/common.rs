@@ -224,5 +224,4 @@ pub enum ModuleError {
     OutOfMemory = 3,
     NoSlots = 4,
     InvalidDependency = 5,
-    Reentrant = 6,
 }

@@ -50,12 +50,13 @@ fault, and `7` module invocation validation.
 | 1 | `boot` | None; validates invocation and DTB arguments, then discovers and maps all three U-mode ELFs, then passes with hart ID |
 | 2 | `mapping` | Mapped address, page count; host checks contents and PTEs |
 | 3 | `timer` | Requested deadline, observed time; uses QEMU virt's 10 MHz timebase |
-| 5 | `invocation` | Two prepared dependency slots, rollback and warm checkpoints; verifies lazy construction, stable roots/ASIDs, private dependency caches and mappings retained across 128 calls, nested context paths sharing ELF globals, reentrancy rejection, fresh entry registers, caller restoration, permissions, source unmapping, failed-construction/preparation rollback, and both switch policies |
+| 5 | `invocation` | Two prepared dependency slots, rollback and warm checkpoints; verifies lazy construction, stable roots/ASIDs, private dependency caches and mappings retained across 128 calls, nested context paths sharing ELF globals, fresh entry registers, caller restoration, permissions, source unmapping, failed-construction/preparation rollback, and both switch policies |
 
 The invocation harness temporarily exhausts the ASID allocator and supplies
-protected `A -> B` and `B -> A` fixture bindings. Loader dependency wiring is
+an acyclic protected `A -> B` fixture binding. Loader dependency wiring is
 not implemented yet. Direct and nested B calls share module globals while using
-different retained roots; attempting `A -> B -> A` must fail.
+different retained roots. Dependency cycle validation belongs to the userspace
+loader at module installation and uninstallation.
 | 4 | `fault` | Fault address, zero; host validates S-mode trap entry instead of waiting for pass |
 
 The fault scenario performs a load at the exported

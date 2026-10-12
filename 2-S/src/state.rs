@@ -8,7 +8,7 @@ use super::{
     vmem::{Window, WindowAccess, Mapping},
     module::{ModuleContext, ModuleTables},
     scheduler::Thread,
-    llfree, vmem, sbi, cpu, layout,
+    llfree, loading, vmem, sbi, cpu, layout,
 };
 
 pub struct Context {
@@ -98,7 +98,7 @@ pub unsafe fn init(
         .map_err(|_| tau::AllocError::OutOfMemory)
         .map_err(InitError::Alloc)?;
     // The mapping is fresh; initialize the complete context value before access.
-    unsafe { ModuleContext::init_at(module, root, 0, root.page(), usize::MAX) };
+    unsafe { ModuleContext::init_at(module, root, 0, usize::MAX) };
 
     // Bootstrap constructs the initial module tables once. Future context
     // creation must reuse their backing pages, not allocate/reset these tables.
@@ -258,8 +258,7 @@ pub fn syscall(
 
     match tau::Call::decode(msg[0]) {
         Ok(tau::Call::PrepareModule) => {
-            match super::loading::prepare(window, context, thread.hart_id(), tables, msg[1], msg[2])
-            {
+            match loading::prepare(window, context, thread.hart_id(), tables, msg[1], msg[2]) {
                 Ok(slot) => {
                     msg[0] = 0;
                     msg[1] = slot as usize;
@@ -271,20 +270,7 @@ pub fn syscall(
             }
         }
         Ok(tau::Call::Invoke { slot, arg }) => {
-            let result = tables
-                .get_dependency(slot)
-                .ok_or(tau::ModuleError::InvalidDependency)
-                .and_then(|descriptor| {
-                    super::loading::invoke(
-                        window,
-                        context,
-                        thread,
-                        module,
-                        slot,
-                        descriptor,
-                    )
-                });
-            match result {
+            match loading::invoke(window, context, thread, module, tables, slot) {
                 Ok(root) => {
                     msg[0] = tau::Event::Invocation { arg }.encode();
                     return Outcome {
@@ -307,7 +293,6 @@ pub fn syscall(
                     enter_from: None,
                 };
             } else {
-                write!(sbi::Console, "no caller for this context\r\n").unwrap_or_default();
                 sbi::hart_stop().unwrap_or_default();
                 loop {
                     hint::spin_loop();

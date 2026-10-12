@@ -3,7 +3,7 @@
 // See LICENSE for the full license text.
 
 use core::{
-    hint, ptr, mem,
+    hint, ptr,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
@@ -34,33 +34,24 @@ pub struct ModuleContext {
     pub registers: [usize; 32],
     pub sepc: usize,
     caller: Option<vmem::Root>,
-    pub module_id: usize,
     pub shared_index: usize,
     pub root: vmem::Root,
     entry: usize,
     dependencies: [Option<vmem::Root>; 0x800],
 }
 
-// Header aliases expose one page; the complete context fits before __MODULE.
-const _: () = assert!(mem::offset_of!(ModuleContext, dependencies) <= vmem::PAGE);
+// The complete context fits before __MODULE.
 const _: () = assert!(CONTEXT_PAGES * vmem::PAGE <= vmem::MODULE - vmem::MODULE_CONTEXT);
 
 impl ModuleContext {
     /// # Safety
     /// `this` must point to writable, aligned storage with exclusive access
     /// until initialization completes.
-    pub unsafe fn init_at(
-        this: *mut Self,
-        root: vmem::Root,
-        entry: usize,
-        module_id: usize,
-        shared_index: usize,
-    ) {
+    pub unsafe fn init_at(this: *mut Self, root: vmem::Root, entry: usize, shared_index: usize) {
         unsafe {
             ptr::addr_of_mut!((*this).registers).write([0; 32]);
             ptr::addr_of_mut!((*this).sepc).write(0);
             ptr::addr_of_mut!((*this).caller).write(None);
-            ptr::addr_of_mut!((*this).module_id).write(module_id);
             ptr::addr_of_mut!((*this).shared_index).write(shared_index);
             ptr::addr_of_mut!((*this).root).write(root);
             ptr::addr_of_mut!((*this).entry).write(entry);
@@ -72,23 +63,11 @@ impl ModuleContext {
         }
     }
 
-    /// Read only the first-page header through a temporary physical alias.
-    /// # Safety
-    /// The initialized header must be readable at `this`.
-    pub unsafe fn linkage_at(this: *const Self) -> (usize, Option<vmem::Root>) {
-        unsafe {
-            (
-                ptr::addr_of!((*this).module_id).read(),
-                ptr::addr_of!((*this).caller).read(),
-            )
-        }
-    }
-
     /// Set linkage and PC for a fresh invocation, retaining dependency roots.
     /// Saved registers remain stale until the next user trap; fresh entry must
     /// clear the hardware registers rather than restore this saved state.
     /// # Safety
-    /// The initialized first-page header must be exclusively writable at `this`.
+    /// The initialized context must be exclusively writable at `this`.
     pub unsafe fn enter_at(this: *mut Self, caller: vmem::Root) {
         unsafe {
             let entry = ptr::addr_of!((*this).entry).read();
@@ -98,7 +77,7 @@ impl ModuleContext {
     }
 
     pub fn dependency(&self, slot: u16) -> Option<vmem::Root> {
-        self.dependencies[slot as usize]
+        self.dependencies.get(slot as usize).copied().flatten()
     }
 
     pub fn retain_dependency(&mut self, slot: u16, root: vmem::Root) {
@@ -107,10 +86,6 @@ impl ModuleContext {
 
     pub fn take_caller(&mut self) -> Option<vmem::Root> {
         self.caller.take()
-    }
-
-    pub fn caller(&self) -> Option<vmem::Root> {
-        self.caller
     }
 }
 
@@ -176,20 +151,17 @@ impl ModuleTables {
         }
         let cell = self.dependencies.get(slot)?;
         self.dependencies[0].store(cell.load(Ordering::Relaxed), Ordering::Relaxed);
-        cell.store(descriptor | Self::OCCUPIED, Ordering::Relaxed);
+        // Publish the initialized descriptor to readers without taking the
+        // free-list lock. Published slots remain occupied until shutdown.
+        cell.store(descriptor | Self::OCCUPIED, Ordering::Release);
         Some(slot as u16)
     }
 
     pub fn get_dependency(&self, slot: u16) -> Option<usize> {
-        let _guard = self.lock_dependencies();
-        self.get_dependency_locked(slot)
-    }
-
-    fn get_dependency_locked(&self, slot: u16) -> Option<usize> {
         let value = self
             .dependencies
             .get(slot as usize)?
-            .load(Ordering::Relaxed);
+            .load(Ordering::Acquire);
         (slot != 0 && value & Self::OCCUPIED != 0).then_some(value & !Self::OCCUPIED)
     }
 }

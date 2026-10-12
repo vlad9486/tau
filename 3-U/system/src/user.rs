@@ -40,7 +40,7 @@ impl<'a> State<'a> {
 }
 
 fn measure_roundtrips(shared: &UnsafeCell<Shared>, slot: u16) {
-    let mut samples = [0; 8];
+    let mut samples = [0; 256];
     for (index, cycles) in samples.iter_mut().enumerate() {
         let value = index + 1;
         let start = tau::asm::read_cycle();
@@ -50,15 +50,13 @@ fn measure_roundtrips(shared: &UnsafeCell<Shared>, slot: u16) {
         assert_eq!(reply, value.rotate_left(7) ^ 0x5344_494f);
         assert_eq!(count, value);
     }
-    // Format and queue UART output only after collecting all measurements.
-    let shared = unsafe { &mut *shared.get() };
-    for (index, cycles) in samples.into_iter().enumerate() {
-        let round = index + 1;
-        let context = if index == 0 { "first" } else { "reused" };
-        shared.write(format_args!(
-            "sdio roundtrip {round} ({context}): {cycles} cycles"
-        ));
-    }
+
+    let mean = samples[2..].iter().map(|x| *x as f32).sum::<f32>() / 254.0;
+    samples.sort();
+    let median = samples[126];
+    unsafe { &mut *shared.get() }.write(format_args!(
+        "sdio roundtrip mean: {mean}, median: {median}"
+    ));
 }
 
 async fn run(shared: &UnsafeCell<Shared>, has_sdio: bool, has_ethernet: bool, sdio_slot: u16) {

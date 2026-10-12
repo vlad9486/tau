@@ -242,9 +242,16 @@ extern "C" fn trap_entry() -> ! {
 #[unsafe(naked)]
 extern "C" fn handle_syscall() -> ! {
     arch::naked_asm! {
+        // Invoke still saves its caller's ABI-preserved registers below.
+        // Respond ends the callee's invocation; its PC and registers will
+        // never be resumed, so skip saving only that terminal call.
+        // Match the complete low word, including the reserved bit and slot.
+        "slli t0, a0, 48",
+        "srli t0, t0, 48",
+        "addi t0, t0, -5",
+        "beqz t0, {respond}",
         "csrr t0, sepc",
         "addi t0, t0, 4",
-        "csrw sepc, t0",
         "sd t0, {pc}(tp)",
         "sd ra, {ra}(tp)",
         "sd sp, {sp}(tp)",
@@ -288,6 +295,7 @@ extern "C" fn handle_syscall() -> ! {
         s11 = const { mem::offset_of!(module::ModuleContext, registers) + 0o330 },
 
         stack = const { vmem::WINDOW_END },
+        respond = sym respond,
         syscall = sym syscall,
     }
 }
@@ -296,6 +304,26 @@ extern "C" fn handle_non_syscall_trap(cause: isize) -> ! {
     let thread = unsafe { &mut *__THREAD.get() };
     state::handle_non_syscall_trap(cause, thread);
     resume_after_interrupt()
+}
+
+extern "C" fn respond(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
+    let window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+    let module = unsafe { &mut *__MODULE_CONTEXT.get() };
+
+    let Ok(tau::Call::Respond { code }) = tau::Call::decode(a0) else {
+        unsafe { hint::unreachable_unchecked() };
+    };
+    if let Some(caller) = module.take_caller() {
+        let flush = mmu::switch_flush(&window, module.root, caller);
+        unsafe { mmu::switch(caller, flush) };
+
+        restore_syscall(code as _, a1, a2, a3, a4, a5)
+    } else {
+        sbi::hart_stop().unwrap_or_default();
+        loop {
+            hint::spin_loop();
+        }
+    }
 }
 
 extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
@@ -376,6 +404,8 @@ fn enter_invocation(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
     }
 }
 
+/// Restore the active context with return values already in `a0`–`a5`.
+/// Called through the C ABI by Rust dispatch, or jumped to after Respond.
 extern "C" fn restore_syscall(
     a0: usize,
     a1: usize,

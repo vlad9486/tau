@@ -53,20 +53,19 @@ extern "C" fn sdio_entry(_: usize, _: usize, _: usize, _: usize, _: usize, _: us
     );
 }
 
-extern "C" fn sdio_main(event: usize, value: usize, _: usize, _: usize, _: usize, _: usize) -> ! {
+extern "C" fn sdio_main(
+    event: usize,
+    value: usize,
+    second: usize,
+    third: usize,
+    fourth: usize,
+    fifth: usize,
+) -> ! {
     let Ok(tau::Event::Invocation { arg }) = tau::Event::decode(event) else {
         tau::Ubi::respond(1, []);
     };
     match arg {
-        0 | 6 => {
-            if arg == 6 {
-                // The integration fixture binds slot one back to the active caller.
-                if tau::Ubi::invoke::<0, 0>(1, 3, []).unwrap_err().get()
-                    != tau::ModuleError::Reentrant as usize
-                {
-                    tau::Ubi::respond(10, []);
-                }
-            }
+        0 => {
             let count = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
             if INITIALIZED.fetch_add(1, Ordering::Relaxed) != 0x5344_494f + count - 1 {
                 tau::Ubi::respond(2, []);
@@ -130,9 +129,10 @@ extern "C" fn sdio_main(event: usize, value: usize, _: usize, _: usize, _: usize
             tau::Ubi::respond(0, [1])
         }
         5 => {
-            let response = tau::Ubi::invoke::<1, 2>(1, 6, [value]).unwrap();
+            let response = tau::Ubi::invoke::<1, 2>(1, 0, [value]).unwrap();
             tau::Ubi::respond(0, response)
         }
+        6 => tau::Ubi::respond(0, [value, second, third, fourth, fifth]),
         _ => tau::Ubi::respond(7, []),
     }
 }
