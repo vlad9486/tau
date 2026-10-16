@@ -119,8 +119,8 @@ fn handle<'a, S>(
     for driver in driver {
         let num = id.as_ref().get();
         if driver.int.contains(&num) {
-            let id = num as u16;
-            driver.state.handle(shared, tau::Event::Interrupt { id })
+            let arg = num as u16;
+            driver.state.handle(shared, tau::Event::Notified { arg })
         }
     }
 }
@@ -258,8 +258,7 @@ impl Tasks {
                 .min();
 
             match tau::Ubi::wait_external(deadline) {
-                tau::Event::Invocation { .. } | tau::Event::Notified => continue,
-                tau::Event::Interrupt { .. } => {
+                tau::Event::Notified { .. } => {
                     while let Some(id) = plic.next() {
                         handle(self.uart.as_mut(), shared, &id);
                         handle(self.sdio.as_mut(), shared, &id);

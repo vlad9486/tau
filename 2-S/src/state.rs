@@ -27,7 +27,7 @@ const PENDING_EXTERNAL: usize = 2;
 fn take_pending_interrupt(thread: &mut Thread) -> Option<tau::Event> {
     if thread.pending_interrupts & PENDING_EXTERNAL != 0 {
         thread.pending_interrupts &= !PENDING_EXTERNAL;
-        Some(tau::Event::Interrupt { id: 0 })
+        Some(tau::Event::Notified { arg: 0 })
     } else if thread.pending_interrupts & PENDING_TIMER != 0 {
         thread.pending_interrupts &= !PENDING_TIMER;
         Some(tau::Event::Timeout)
@@ -82,7 +82,7 @@ pub unsafe fn init(
     module: *mut ModuleContext,
     tables: *mut ModuleTables,
     context: &Context,
-) -> Result<(vmem::Root, usize, tau::Event), InitError> {
+) -> Result<(vmem::Root, usize), InitError> {
     let root = Window::current_root();
 
     let mapping = Mapping {
@@ -222,9 +222,8 @@ pub unsafe fn init(
 
     let sepc = read_usize(mem::offset_of!(tau::Manifest, entry));
     let satp = Window::current_root();
-    let inv = tau::Event::Invocation { arg: 0 };
 
-    Ok((satp, sepc, inv))
+    Ok((satp, sepc))
 }
 
 /// A switch is performed after Rust references to context/module storage have
@@ -272,7 +271,7 @@ pub fn syscall(
         Ok(tau::Call::Invoke { slot, arg }) => {
             match loading::invoke(window, context, thread, module, tables, slot) {
                 Ok(root) => {
-                    msg[0] = tau::Event::Invocation { arg }.encode();
+                    msg[0] = arg as usize;
                     return Outcome {
                         message: msg,
                         root: Some(root),
@@ -378,16 +377,16 @@ pub fn syscall(
             } else if cause == (INTERRUPT_BIT | SUPERVISOR_EXTERNAL) {
                 cpu::csrrc!("sie", 1 << SUPERVISOR_EXTERNAL);
                 // sbi::Printer.ch(*b"SU: interrupt\r\n");
-                tau::Event::Interrupt { id: 0 }
+                tau::Event::Notified { arg: 0 }
             } else if cause == (1 << 63) + 1 {
                 // sbi::Printer.ch(*b"SU: software interrupt\r\n");
                 // TODO:
                 // An IPI is not an entry-point invocation. Scheduler/IPI
                 // handling is still TODO; report generic readiness for now.
-                tau::Event::Notified
+                tau::Event::Notified { arg: 0 }
             } else if cause & (1 << 63) != 0 {
                 sbi::Printer.ch(*b"SU: unexpected interrupt\r\n");
-                tau::Event::Interrupt { id: 0 }
+                tau::Event::Notified { arg: 0 }
             } else {
                 let lo = (cause % 10) as u8 + b'0';
                 let hi = ((cause / 10) % 10) as u8 + b'0';
@@ -396,7 +395,7 @@ pub fn syscall(
                     .ch([lo, hi])
                     .ch(*b"\r\n");
                 tau::asm::dbg([0xdeadbeef]);
-                tau::Event::Interrupt { id: 0 }
+                tau::Event::Notified { arg: 0 }
             };
             msg[0] = event.encode();
         }

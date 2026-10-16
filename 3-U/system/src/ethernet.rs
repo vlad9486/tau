@@ -536,7 +536,7 @@ impl DriverState for State {
         if timer {
             self.ticks = self.ticks.wrapping_add(1);
         }
-        if matches!(event, tau::Event::Interrupt { .. }) {
+        if matches!(event, tau::Event::Notified { .. }) {
             self.irq_count = self.irq_count.wrapping_add(1);
         }
         if let Err(error) = self.step(shared, timer) {

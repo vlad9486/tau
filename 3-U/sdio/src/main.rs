@@ -61,9 +61,7 @@ extern "C" fn sdio_main(
     fourth: usize,
     fifth: usize,
 ) -> ! {
-    let Ok(tau::Event::Invocation { arg }) = tau::Event::decode(event) else {
-        tau::Ubi::respond(1, []);
-    };
+    let arg = event as u16;
     match arg {
         0 => {
             let count = CALLS.fetch_add(1, Ordering::Relaxed) + 1;

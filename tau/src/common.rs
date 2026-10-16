@@ -46,24 +46,17 @@ impl MappedRegion {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Timeout,
-    Interrupt {
-        id: u16,
-    },
-    /// Entry-point dispatch, not a wakeup of a suspended context.
-    Invocation {
+    /// A coalesced readiness notification; inspect shared state after waking.
+    Notified {
         arg: u16,
     },
-    /// A coalesced readiness notification; inspect shared state after waking.
-    Notified,
 }
 
 impl fmt::Display for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Timeout => write!(f, "timeout"),
-            Self::Interrupt { id } => write!(f, "int={id:04x}"),
-            Self::Invocation { arg } => write!(f, "invocation arg={arg}"),
-            Self::Notified => write!(f, "notified"),
+            Self::Notified { arg } => write!(f, "notification arg={arg}"),
         }
     }
 }
@@ -72,26 +65,21 @@ impl Event {
     pub const fn encode(self) -> usize {
         match self {
             Self::Timeout => 0,
-            Self::Interrupt { id } => ((id as usize) << 16) + 1,
-            Self::Invocation { arg } => ((arg as usize) << 16) + 2,
-            Self::Notified => 3,
+            Self::Notified { arg } => ((arg as usize) << 16) + 1,
         }
     }
 
     pub const fn decode(a0: usize) -> Result<Self, usize> {
         let arg = ((a0 & 0xffff0000) >> 16) as u16;
         match a0 & 0b111 {
-            0 if a0 == 0 => Ok(Self::Timeout),
-            1 if a0 == ((arg as usize) << 16) + 1 => Ok(Self::Interrupt { id: arg }),
-            2 if a0 == ((arg as usize) << 16) + 2 => Ok(Self::Invocation { arg }),
-            3 if a0 == 3 => Ok(Self::Notified),
+            0 => Ok(Self::Timeout),
+            1 if a0 == ((arg as usize) << 16) + 1 => Ok(Self::Notified { arg }),
             _ => Err(a0),
         }
     }
 }
 
 /// The supervisor interface. Additional machine words are passed in registers.
-/// Shared mappings are established declaratively by the loader, not by calls.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Call {
     /// Save the caller and transfer this thread to another module context's
@@ -101,7 +89,7 @@ pub enum Call {
     Invoke { slot: u16, arg: u16 },
     /// Return this thread to its previous module context with the response code
     /// and message. Never returns in the callee; the thread continues in its
-    /// caller. Zero is success. No invocation ID is needed.
+    /// caller. Zero is success.
     Respond { code: u16 },
     /// Spawns a thread with its own context in the same ELF module.
     /// The new thread will run in the specified entry point with the given message.
@@ -128,21 +116,21 @@ pub enum Call {
     Unmap,
     /// Transitional bootstrap operation: wait for an external interrupt or
     /// deadline (a1, zero for none). Blocks the hart, not a scheduled thread.
-    /// Superseded by a registered waiter bound to the hart's external interrupt.
+    /// Remove this once proper waiting implemented.
     WaitExternal,
-    /// Wait on this thread's registered waiter (ID in a1, deadline in a2;
-    /// zero means no deadline). Consume pending readiness or park this thread.
-    /// Resume after this call in the same context. Return status in a0 and an
-    /// encoded `Event` in a1. A timeout does not consume a pending notification.
+    /// Wait in the module context (deadline in a1 zero means no deadline).
+    /// Atomically create a record (waiter ID) in global variables of the module. The pointer
+    /// to the global variable should be provided in manifest. Resume after in the same context.
+    /// Return an encoded `Event` in a1. A timeout does not consume a pending notification.
     Wait,
-    /// Notify a waiter in the current module (ID in a1). Coalesce readiness and
-    /// make its thread runnable if parked; continue executing in this context.
-    /// Notification before wait is remembered. No handler is invoked.
+    /// Notify a waiter in the current module (waiter ID in a1). The waiting IDs are in the global
+    /// variable in manifest. Coalesce readiness and make its thread runnable if parked;
+    /// continue executing in this context.
     Notify,
     /// Emit a diagnostic checkpoint through the supervisor console.
     Debug,
     /// Loader-only: prepare an ELF image at (a1, a2), returning status in a0
-    /// and a dependency slot in a1. Does not create an invocation.
+    /// and a dependency slot in a1.
     PrepareModule,
 }
 
@@ -173,10 +161,6 @@ impl Call {
             let entry = a0;
             Ok(Self::Spawn { entry })
         } else {
-            // The old share/accept flag is reserved; do not decode old calls.
-            if a0 & 0b0010 != 0 {
-                return Err(a0);
-            }
             let discriminant = (a0 & 0b1100) >> 2;
             let id = ((a0 & 0xfff0) >> 4) as u16;
             let arg = ((a0 & 0xffff0000) >> 16) as u16;

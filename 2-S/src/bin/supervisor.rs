@@ -120,7 +120,7 @@ extern "C" fn init(
 
     let context = unsafe { (*__CONTEXT.get()).assume_init_ref() };
     match unsafe { state::init(&mut window, thread, module, tables, context) } {
-        Ok((satp, sepc, inv)) => unsafe {
+        Ok((satp, sepc)) => unsafe {
             arch::asm! {
                 "li t0, 0x100",
                 "csrrc t1, sstatus, t0", // set unprivileged mode
@@ -134,7 +134,7 @@ extern "C" fn init(
                 "sret",
                 options(noreturn),
                 module_context = sym __MODULE_CONTEXT,
-                in("a0") inv.encode(),
+                in("a0") 0,
                 in("a1") hart_id,
                 in("a2") info,
                 in("a3") info_pages,

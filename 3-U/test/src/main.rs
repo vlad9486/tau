@@ -199,9 +199,9 @@ extern "C" fn invoke_registers(_slot: usize, _value: usize, _count: usize) -> us
     );
 }
 
-extern "C" fn main(event: usize, hart: usize, info: usize, pages: usize, _: usize, _: usize) -> ! {
-    if !matches!(tau::Event::decode(event), Ok(tau::Event::Invocation { .. })) {
-        tau_test_failed(0, 2, event);
+extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize, _: usize) -> ! {
+    if arg != 0 {
+        tau_test_failed(0, 2, arg);
     }
     tau_test_ready(hart);
     let case = unsafe { ptr::read_volatile(ptr::addr_of!(TAU_TEST_CONTROL[2])) } as usize;

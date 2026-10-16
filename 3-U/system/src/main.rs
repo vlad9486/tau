@@ -45,17 +45,13 @@ static MANIFEST: tau::Manifest = tau::Manifest {
 
 #[cold]
 extern "C" fn main(
-    a0: usize,
+    _arg: usize,
     hart_id: usize,
     info: usize,
     info_pages: usize,
     _: usize,
     _: usize,
 ) -> ! {
-    let Ok(tau::Event::Invocation { .. }) = tau::Event::decode(a0) else {
-        tau::Ubi::exit([1]);
-    };
-
     let len = info_pages << 12;
     let raw = tau::Area::new(info, len).sl();
     let Ok((dtb, reservations)) = tau::Dtb::new(raw) else {
