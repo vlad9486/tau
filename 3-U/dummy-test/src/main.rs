@@ -16,10 +16,21 @@ static MANIFEST: tau::Manifest = tau::Manifest {
         version: (0, 1),
         name: *b"dummy-test\0\0\0\0\0\0\0\0\0\0",
     },
+    wait_slots_base: WAIT_SLOTS.as_ptr(),
+    wait_slots_count: WAIT_SLOTS.len(),
     entry: dummy_entry,
     dependencies: &[],
     mapped_regions: &[tau::MappedRegion::stack(0x1000)],
 };
+
+static WAIT_SLOTS: [tau::WaitSlot; 4] = [const { tau::WaitSlot::new() }; 4];
+static WAIT_READY: AtomicUsize = AtomicUsize::new(0);
+
+extern "C" fn notify_worker(_: usize, _: usize, _: usize, _: usize, _: usize, _: usize) -> ! {
+    WAIT_READY.store(1, Ordering::SeqCst);
+    tau::Ubi::notify(&WAIT_SLOTS[0]).unwrap();
+    tau::Ubi::exit([])
+}
 
 // BSS starts at zero and remains shared across separate invocations.
 static CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -153,6 +164,29 @@ extern "C" fn dummy_main(
                 Err(tau::ModuleError::AccessDenied)
             );
             tau::Ubi::respond(0, [denied as usize])
+        }
+        9 => {
+            WAIT_READY.store(0, Ordering::SeqCst);
+            WAIT_SLOTS[0].occupied.store(true, Ordering::SeqCst);
+            tau::Ubi::spawn(notify_worker, []).unwrap();
+            while WAIT_READY.load(Ordering::SeqCst) == 0 {
+                assert_eq!(
+                    tau::Ubi::wait(&WAIT_SLOTS[0], None).unwrap(),
+                    tau::Event::Notified { arg: 0 }
+                );
+            }
+            WAIT_SLOTS[0].occupied.store(false, Ordering::SeqCst);
+            tau::Ubi::respond(0, [value])
+        }
+        10 => {
+            WAIT_SLOTS[1].occupied.store(true, Ordering::SeqCst);
+            tau::Ubi::notify(&WAIT_SLOTS[1]).unwrap();
+            tau::Ubi::respond(0, [(&raw const WAIT_SLOTS[1]).addr()])
+        }
+        11 => {
+            WAIT_SLOTS[1].occupied.store(true, Ordering::SeqCst);
+            let event = tau::Ubi::wait(&WAIT_SLOTS[1], NonZeroUsize::new(1)).unwrap();
+            tau::Ubi::respond(0, [event.encode()])
         }
         _ => tau::Ubi::respond(7, []),
     }

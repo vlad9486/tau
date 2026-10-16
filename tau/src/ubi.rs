@@ -4,7 +4,7 @@
 
 use core::{arch, hint, num::NonZeroUsize};
 
-use super::{Call, Entry, Event, WaitError, ModuleError, ModuleHandle};
+use super::{Call, Entry, Event, WaitError, ModuleError, ModuleHandle, WaitSlot, SpawnError};
 
 #[inline(always)]
 fn ubi<const I: usize, const O: usize>(call: Call, arg: [usize; I]) -> (usize, [usize; O]) {
@@ -90,10 +90,15 @@ impl Ubi {
         unsafe { hint::unreachable_unchecked() }
     }
 
-    pub fn spawn<const I: usize>(entry: Entry, msg: [usize; I]) -> u16 {
+    pub fn spawn<const I: usize>(entry: Entry, msg: [usize; I]) -> Result<u16, SpawnError> {
         let entry = entry as usize;
-        let (r0, []) = ubi(Call::Spawn { entry }, msg);
-        r0 as u16
+        let (status, [id]) = ubi(Call::Spawn { entry }, msg);
+        match status {
+            0 => Ok(id as u16),
+            1 => Err(SpawnError::InvalidEntry),
+            3 => Err(SpawnError::NoSlots),
+            _ => Err(SpawnError::OutOfMemory),
+        }
     }
 
     pub fn exit<const O: usize>(msg: [usize; O]) -> ! {
@@ -144,18 +149,17 @@ impl Ubi {
 
     /// Consume readiness or suspend this thread, resuming here in this context.
     /// Shared-state publication/checking still needs module synchronization.
-    pub fn wait(deadline: Option<NonZeroUsize>) -> Result<Event, WaitError> {
+    pub fn wait(slot: *const WaitSlot, deadline: Option<NonZeroUsize>) -> Result<Event, WaitError> {
         let deadline = deadline.map(NonZeroUsize::get).unwrap_or_default();
-        let (status, [event]) = ubi(Call::Wait, [deadline]);
+        let (status, [event]) = ubi(Call::Wait, [slot.addr(), deadline]);
         wait_status(status)?;
         Event::decode(event).map_err(|_| WaitError::Unsupported)
     }
 
     /// Record coalesced readiness for a waiter in this module. Does not transfer
     /// this thread or execute code in the receiver's context.
-    /// `waiter` is thread id, TODO: define thread id
-    pub fn notify(waiter: usize) -> Result<(), WaitError> {
-        let (status, []) = ubi(Call::Notify, [waiter]);
+    pub fn notify(slot: *const WaitSlot) -> Result<(), WaitError> {
+        let (status, []) = ubi(Call::Notify, [slot.addr()]);
         wait_status(status)
     }
 

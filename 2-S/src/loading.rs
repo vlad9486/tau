@@ -12,12 +12,15 @@ use elf::{
     endian::LittleEndian,
     abi::{PT_LOAD, PF_R, PF_W, PF_X, ET_EXEC, EM_RISCV},
 };
+
 use tau::ModuleError;
 
 use super::{
-    PreparedModule,
-    module::{ModuleContext, ModuleTables, CONTEXT_PAGES, TABLE_ORDER, TABLE_PAGES},
-    scheduler::Thread,
+    module::{
+        ModuleContext, ModuleTables, PreparedModule, CONTEXT_PAGES, TABLE_ORDER, TABLE_PAGES,
+    },
+    scheduler::{Thread, ReturnKind},
+    waiting::WaitTable,
     state::Context,
     llfree, mmu,
     vmem::{self, Mapping, Root, Window, WindowAccess, PAGE},
@@ -73,7 +76,7 @@ fn load_elf(
     hart: usize,
     root: Root,
     bytes: &[u8],
-) -> Result<PreparedModule, ModuleError> {
+) -> Result<(PreparedModule, WaitTable), ModuleError> {
     let elf =
         ElfBytes::<LittleEndian>::minimal_parse(bytes).map_err(|_| ModuleError::InvalidImage)?;
     if elf.ehdr.e_machine != EM_RISCV
@@ -203,15 +206,27 @@ fn load_elf(
         return Err(ModuleError::InvalidImage);
     }
     let root_index = root_index.ok_or(ModuleError::InvalidImage)?;
-    Ok(PreparedModule {
-        stem: window
-            .root_branch(root, root_index)
-            .ok_or(ModuleError::InvalidImage)?,
+    let wait_table = WaitTable::prepare(
+        window,
+        context,
+        hart,
+        root,
         root_index,
-        entry,
-        stack_pages,
-        tables: 0,
-    })
+        word(manifest, mem::offset_of!(tau::Manifest, wait_slots_base))?,
+        word(manifest, mem::offset_of!(tau::Manifest, wait_slots_count))?,
+    )?;
+    Ok((
+        PreparedModule {
+            stem: window
+                .root_branch(root, root_index)
+                .ok_or(ModuleError::InvalidImage)?,
+            root_index,
+            entry,
+            stack_pages,
+            tables: 0,
+        },
+        wait_table,
+    ))
 }
 
 pub fn prepare(
@@ -234,6 +249,7 @@ pub fn prepare(
     }
     let order = length.div_ceil(PAGE).next_power_of_two().ilog2() as usize;
     let root = window.create(0, || context.page(hart)).map_err(memory)?;
+    let mut wait_table = WaitTable::EMPTY;
     let result = (|| {
         let snapshot = context.block(hart, order).map_err(memory)?;
         let data = window.block(snapshot, 1 << order);
@@ -243,7 +259,8 @@ pub fn prepare(
             .map_err(|_| ModuleError::InvalidImage)
             .and_then(|()| load_elf(window, context, hart, root, bytes));
         let _ = context.free_block(hart, snapshot, order);
-        let mut dep = loaded?;
+        let (mut dep, wait) = loaded?;
+        wait_table = wait;
         let module_tables = context.block(hart, TABLE_ORDER).map_err(memory)?;
         let descriptor = match context.page(hart) {
             Ok(page) => page,
@@ -255,7 +272,12 @@ pub fn prepare(
         let pointer = window
             .block(module_tables, 1 << TABLE_ORDER)
             .cast::<ModuleTables>();
-        unsafe { ModuleTables::init_at(pointer, false) };
+        unsafe {
+            ModuleTables::init_at(pointer, false);
+            ptr::addr_of_mut!((*pointer).wait_table).write(wait_table);
+            ptr::addr_of_mut!((*pointer).stem_index).write(dep.root_index);
+            ptr::addr_of_mut!((*pointer).stack_pages).write(dep.stack_pages);
+        };
         dep.tables = module_tables;
         unsafe {
             window
@@ -276,6 +298,7 @@ pub fn prepare(
         }
     })();
     if result.is_err() {
+        wait_table.release(context, hart);
         let _ = window.destroy(root, |page| context.free(hart, page));
     } else {
         // The published descriptor retains the stem; only the construction root
@@ -358,6 +381,7 @@ pub fn bind(
     insert_dependency(window, tables, parent_tables, descriptor).ok_or(ModuleError::NoSlots)
 }
 
+#[inline(always)]
 pub fn invoke(
     window: &mut WindowAccess,
     context: &Context,
@@ -452,6 +476,105 @@ fn construct(
     })();
     if result.is_err() {
         let _ = window.destroy(root, |page| context.free(hart, page));
+    }
+    result
+}
+
+/// Construct a same-module thread without publishing it. Successful storage is
+/// retained until reboot; all failed constructions reclaim their private pages.
+pub fn spawn(
+    window: &mut WindowAccess,
+    thread: &Thread,
+    module: &ModuleTables,
+    context: &Context,
+    entry: usize,
+    id: usize,
+    mut message: [usize; 6],
+) -> Result<usize, tau::SpawnError> {
+    use tau::SpawnError;
+    let caller = Window::current_root();
+    let hart = thread.hart_id();
+    let index = module.stem_index;
+    if entry & 1 != 0
+        || (entry >> 30) & 511 != index
+        || !window
+            .resolve(caller, entry)
+            .is_some_and(|(_, flags)| flags & 26 == 26)
+    {
+        return Err(SpawnError::InvalidEntry);
+    }
+    let memory = |_| SpawnError::OutOfMemory;
+    let root = window.create(0, || context.page(hart)).map_err(memory)?;
+    let mut thread_page = 0;
+    let result = (|| {
+        let stem = window
+            .root_branch(caller, index)
+            .ok_or(SpawnError::InvalidEntry)?;
+        window.attach(root, index, stem);
+        window
+            .supervisor_mappings(caller, root, || context.page(hart))
+            .map_err(memory)?;
+        thread_page = context.page(hart).map_err(memory)?;
+        let module_tables = window
+            .resolve(caller, vmem::MODULE)
+            .ok_or(SpawnError::InvalidEntry)?
+            .0;
+        for mapping in [
+            Mapping {
+                addr_virtual: vmem::THREAD,
+                virtual_pages: 1,
+                addr_physical: NonZeroUsize::new(thread_page),
+                physical_pages: 1,
+                flags: *b"rw---",
+            },
+            Mapping {
+                addr_virtual: vmem::MODULE_CONTEXT,
+                virtual_pages: CONTEXT_PAGES,
+                flags: *b"rw---",
+                ..Mapping::default()
+            },
+            Mapping {
+                addr_virtual: vmem::MODULE,
+                virtual_pages: TABLE_PAGES,
+                addr_physical: NonZeroUsize::new(module_tables),
+                physical_pages: TABLE_PAGES,
+                flags: *b"rw---",
+            },
+            Mapping {
+                addr_virtual: (module.stack_pages * PAGE).wrapping_neg(),
+                virtual_pages: module.stack_pages,
+                flags: *b"rw-u-",
+                ..Mapping::default()
+            },
+        ] {
+            window
+                .map(root, mapping, || context.page(hart))
+                .map_err(memory)?;
+        }
+        let private = window
+            .mapped_block(root, vmem::MODULE_CONTEXT, CONTEXT_PAGES)
+            .ok_or(SpawnError::OutOfMemory)?
+            .cast::<ModuleContext>();
+        let tag = mmu::allocate_tag(window).ok_or(SpawnError::OutOfMemory)?;
+        let root = Root::sv39(root.page(), tag);
+        unsafe {
+            ModuleContext::init_at(private, root, entry, index);
+            ptr::addr_of_mut!((*private).sepc).write(entry);
+        }
+        message[0] = 0;
+        unsafe {
+            window
+                .page_pointer(thread_page)
+                .cast::<Thread>()
+                .write(Thread::new(hart, id, root, message, ReturnKind::Entry))
+        };
+        Ok(thread_page)
+    })();
+    if result.is_err() {
+        let _ = window.destroy(root, |page| context.free(hart, page));
+        if thread_page != 0 {
+            let _ = context.free(hart, thread_page);
+        }
     }
     result
 }

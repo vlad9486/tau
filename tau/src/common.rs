@@ -10,6 +10,47 @@ pub struct Manifest {
     pub entry: Entry,
     pub dependencies: &'static [ModuleId],
     pub mapped_regions: &'static [MappedRegion],
+    pub wait_slots_base: *const WaitSlot,
+    pub wait_slots_count: usize,
+}
+
+// The manifest is immutable image metadata. Its raw address is validated by the
+// supervisor; sharing the manifest never dereferences that address in Rust.
+unsafe impl Sync for Manifest {}
+
+/// One module-global reservation. Shared request data needs its own synchronization.
+#[repr(C, align(64))]
+pub struct WaitSlot {
+    pub user_data: [u8; 63],
+    pub occupied: core::sync::atomic::AtomicBool,
+}
+
+impl WaitSlot {
+    pub const fn new() -> Self {
+        Self {
+            user_data: [0; 63],
+            occupied: core::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+impl Default for WaitSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+const _: () = {
+    assert!(size_of::<WaitSlot>() == 64);
+    assert!(core::mem::offset_of!(WaitSlot, occupied) == 63);
+};
+
+#[repr(usize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpawnError {
+    InvalidEntry = 1,
+    OutOfMemory = 2,
+    NoSlots = 3,
 }
 
 pub type Entry = extern "C" fn(usize, usize, usize, usize, usize, usize) -> !;
@@ -102,7 +143,7 @@ impl Event {
 }
 
 /// The supervisor interface. Additional machine words are passed in registers.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Call {
     /// Save the caller and transfer this thread to another module context's
     /// entry point. The caller remains suspended until `Respond` restores it.
@@ -140,14 +181,11 @@ pub enum Call {
     /// deadline (a1, zero for none). Blocks the hart, not a scheduled thread.
     /// Remove this once proper waiting implemented.
     WaitExternal,
-    /// Wait in the module context (deadline in a1 zero means no deadline).
-    /// Atomically create a record (waiter ID) in global variables of the module. The pointer
-    /// to the global variable should be provided in manifest. Resume after in the same context.
-    /// Return an encoded `Event` in a1. A timeout does not consume a pending notification.
+    /// Wait on a reserved module-global slot: a1 = slot address, a2 = absolute
+    /// time-counter deadline (zero for none). Return status in a0, Event in a1.
     Wait,
-    /// Notify a waiter in the current module (waiter ID in a1). The waiting IDs are in the global
-    /// variable in manifest. Coalesce readiness and make its thread runnable if parked;
-    /// continue executing in this context.
+    /// Notify a slot in the current module (a1 = slot address). Coalesces
+    /// readiness and schedules a parked client; the notifying thread continues.
     Notify,
     /// Emit a diagnostic checkpoint through the supervisor console.
     Debug,
@@ -183,7 +221,7 @@ impl Call {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub const fn decode(a0: usize) -> Result<Self, usize> {
         if a0 & 0b0001 == 0 {
             let entry = a0;

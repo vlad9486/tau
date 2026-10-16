@@ -260,7 +260,7 @@ fn init_memory(
     // 0xffff_ffc0_0020_0000 .. 0xffff_ffc0_0040_0000 (2 MiB, thread and module metadata)
     // __THREAD holds local thread metadata, shared across its module contexts.
     // __MODULE_CONTEXT holds private saved registers, PC, and the caller's satp.
-    // __MODULE holds shared dependency stems and reserved waiter storage, mapped
+    // __MODULE holds shared dependency stems and wait-table metadata, mapped
     // during supervisor bootstrap. Future contexts reuse those module pages.
     // 0xffff_ffc0_0040_0000 .. 0xffff_ffc0_0060_0000 (2 MiB, global, scheduler)
     // 0xffff_ffc0_0060_0000 .. 0xffff_ffc0_006e_0000 (896 kiB, global, context and supervisor image)
@@ -292,9 +292,7 @@ fn init_memory(
     let thread = gfp();
     l2[0o000] = (thread.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
 
-    // let l2 = gfp();
-    // // the branch of the scheduler
-    // l1[0o002] = (l2.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
+    // The supervisor allocates and maps the shared scheduler branch at startup.
 
     let mut l2 = gfp();
     // the branch of the supervisor image

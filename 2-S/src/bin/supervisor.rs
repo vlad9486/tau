@@ -35,18 +35,20 @@ unsafe extern "C" {
     static __WINDOW: vmem::Window;
     // Local thread metadata shared by this thread's module contexts; parent/child
     // lifetime information belongs here, without a separate thread collection.
-    static __THREAD: UnsafeCell<scheduler::Thread>;
+    #[allow(improper_ctypes)]
+    static __THREAD: UnsafeCell<mem::MaybeUninit<scheduler::Thread>>;
     // Context-private root, dependency roots, and active invocation state.
     // Linker-provided Rust storage, not a foreign-language representation.
     #[allow(improper_ctypes)]
     static __MODULE_CONTEXT: UnsafeCell<module::ModuleContext>;
     // Module-wide privileged tables shared across its contexts: synchronized
-    // dependency stems/templates and reserved storage for the waiter registry.
+    // dependency stems/templates and validated wait-table metadata.
     static __MODULE: UnsafeCell<module::ModuleTables>;
-    // Intended system-wide scheduling state; its mapping is not yet implemented.
-    static __SCHEDULER: UnsafeCell<scheduler::Scheduler>;
+    // System-wide scheduler backing, initialized before the first user entry.
+    #[allow(improper_ctypes)]
+    static __SCHEDULER: UnsafeCell<mem::MaybeUninit<scheduler::Scheduler>>;
     // System-wide physical-memory allocator metadata, shared between harts.
-    static __ALLOCATOR: UnsafeCell<[usize; 0o1000]>;
+    static __ALLOCATOR: UnsafeCell<u8>;
 
     // System-wide allocator access and physical-memory base, initialized by the
     // boot hart. Despite its name, this is not a thread's module context.
@@ -80,9 +82,9 @@ extern "C" fn init(
     frames: usize,
 ) -> ! {
     let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
-    let thread = unsafe { &mut *__THREAD.get() };
-    let module = unsafe { __MODULE_CONTEXT.get() };
-    let tables = unsafe { __MODULE.get() };
+    let module = UnsafeCell::raw_get(&raw const __MODULE_CONTEXT);
+    let tables = UnsafeCell::raw_get(&raw const __MODULE);
+    let scheduler = UnsafeCell::raw_get(&raw const __SCHEDULER).cast::<scheduler::Scheduler>();
 
     // `cores != 0` means this is first run on the bootstrap core
     // otherwise this is additional core bring up
@@ -95,17 +97,19 @@ extern "C" fn init(
 
         let frames = unsafe { NonZero::new_unchecked(frames) };
         let allocator = unsafe {
-            Allocator::new(frames, __ALLOCATOR.get().cast())
+            Allocator::new(frames, __ALLOCATOR.get())
                 .unwrap_unchecked()
                 .into_lower()
         };
 
         unsafe {
-            __CONTEXT.get().write(mem::MaybeUninit::new(state::Context {
-                allocator,
-                base_addr,
-                bootstrap_root: vmem::Window::current_root(),
-            }));
+            UnsafeCell::raw_get(&raw const __CONTEXT).write(mem::MaybeUninit::new(
+                state::Context {
+                    allocator,
+                    base_addr,
+                    bootstrap_root: vmem::Window::current_root(),
+                },
+            ));
         }
         unsafe { mmu::init(&mut window) };
         writeln!(
@@ -116,10 +120,17 @@ extern "C" fn init(
         )
         .unwrap_or_default();
     }
-    thread.set_hart_id(hart_id);
+    let thread = unsafe { &mut *UnsafeCell::raw_get(&raw const __THREAD) };
+    let thread = &*thread.write(scheduler::Thread::new(
+        hart_id,
+        1,
+        vmem::Window::current_root(),
+        [0; 6],
+        scheduler::ReturnKind::Syscall,
+    ));
 
-    let context = unsafe { (*__CONTEXT.get()).assume_init_ref() };
-    match unsafe { state::init(&mut window, thread, module, tables, context) } {
+    let context = unsafe { (*UnsafeCell::raw_get(&raw const __CONTEXT)).assume_init_ref() };
+    match unsafe { state::init(&mut window, thread, module, tables, scheduler, context) } {
         Ok((satp, sepc)) => unsafe {
             arch::asm! {
                 "li t0, 0x100",
@@ -301,14 +312,21 @@ extern "C" fn handle_syscall() -> ! {
 }
 
 extern "C" fn handle_non_syscall_trap(cause: isize) -> ! {
-    let thread = unsafe { &mut *__THREAD.get() };
+    let scheduler = unsafe { (*UnsafeCell::raw_get(&raw const __SCHEDULER)).assume_init_ref() };
+    if cause as usize == (1usize << 63) | 5 && scheduler.active() {
+        let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+        let selected = scheduler::preempt(&mut window, scheduler);
+        resume_scheduled(&window, selected)
+    }
+    let thread = unsafe { (&*UnsafeCell::raw_get(&raw const __THREAD)).assume_init_ref() };
     state::handle_non_syscall_trap(cause, thread);
     resume_after_interrupt()
 }
 
 extern "C" fn respond(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
-    let window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
-    let module = unsafe { &mut *__MODULE_CONTEXT.get() };
+    let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+    let module = unsafe { &mut *UnsafeCell::raw_get(&raw const __MODULE_CONTEXT) };
+    let scheduler = unsafe { (*UnsafeCell::raw_get(&raw const __SCHEDULER)).assume_init_ref() };
 
     let Ok(tau::Call::Respond { code }) = tau::Call::decode(a0) else {
         unsafe { hint::unreachable_unchecked() };
@@ -319,41 +337,160 @@ extern "C" fn respond(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5:
 
         restore_syscall(code as _, a1, a2, a3, a4, a5)
     } else {
-        sbi::hart_stop().unwrap_or_default();
-        loop {
-            hint::spin_loop();
-        }
+        respond_exit(&mut window, scheduler)
     }
 }
 
+#[cold]
+#[inline(never)]
+fn respond_exit(window: &mut vmem::WindowAccess, scheduler: &scheduler::Scheduler) -> ! {
+    scheduler::exit(window, scheduler);
+    let selected = scheduler::dispatch(window, scheduler);
+    resume_scheduled(window, selected)
+}
+
 extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
+    if let Ok(tau::Call::Invoke { slot, arg }) = tau::Call::decode(a0) {
+        let window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+        let module_context = unsafe { &mut *UnsafeCell::raw_get(&raw const __MODULE_CONTEXT) };
+        if let Some(root) = module_context.dependency(slot) {
+            let caller = module_context.root;
+            let flush = mmu::switch_flush(&window, caller, root);
+            // The per-hart window/stack and global supervisor code retain the same
+            // backing in both roots. No context/module reference is used past here.
+            unsafe { mmu::switch(root, flush) };
+            // Form a new pointer after the switch: this VA now names the callee.
+            unsafe {
+                module::ModuleContext::enter_at(
+                    UnsafeCell::raw_get(&raw const __MODULE_CONTEXT),
+                    caller,
+                )
+            };
+            enter_invocation(arg as usize, a1, a2, a3, a4, a5)
+        }
+    }
+    syscall_slow(a0, a1, a2, a3, a4, a5)
+}
+
+#[cold]
+#[inline(never)]
+extern "C" fn syscall_slow(
+    a0: usize,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+    a5: usize,
+) -> ! {
     let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
-    let thread = unsafe { &mut *__THREAD.get() };
-    let module = unsafe { &mut *__MODULE_CONTEXT.get() };
-    let tables = unsafe { &*__MODULE.get() };
-    let context = unsafe { (*__CONTEXT.get()).assume_init_ref() };
+    let thread = unsafe { (&*UnsafeCell::raw_get(&raw const __THREAD)).assume_init_ref() };
+    let module = unsafe { &mut *UnsafeCell::raw_get(&raw const __MODULE) };
+    if matches!(
+        tau::Call::decode(a0),
+        Ok(tau::Call::Spawn { .. } | tau::Call::Exit | tau::Call::Wait | tau::Call::Notify)
+    ) {
+        scheduled_syscall(&mut window, thread, module, [a0, a1, a2, a3, a4, a5]);
+    }
+    let context = unsafe { (*UnsafeCell::raw_get(&raw const __CONTEXT)).assume_init_ref() };
+    let module_context = unsafe { &mut *UnsafeCell::raw_get(&raw const __MODULE_CONTEXT) };
+    let scheduler = unsafe { (*UnsafeCell::raw_get(&raw const __SCHEDULER)).assume_init_ref() };
     let outcome = state::syscall(
         &mut window,
         thread,
+        module_context,
         module,
-        tables,
+        scheduler,
         context,
         [a0, a1, a2, a3, a4, a5],
     );
     if let Some(root) = outcome.root {
-        let flush = mmu::switch_flush(&window, module.root, root);
+        let flush = mmu::switch_flush(&window, module_context.root, root);
         // The per-hart window/stack and global supervisor code retain the same
         // backing in both roots. No context/module reference is used past here.
         unsafe { mmu::switch(root, flush) };
         if let Some(caller) = outcome.enter_from {
             // Form a new pointer after the switch: this VA now names the callee.
-            unsafe { module::ModuleContext::enter_at(__MODULE_CONTEXT.get(), caller) };
+            unsafe {
+                module::ModuleContext::enter_at(
+                    UnsafeCell::raw_get(&raw const __MODULE_CONTEXT),
+                    caller,
+                )
+            };
             let [a0, a1, a2, a3, a4, a5] = outcome.message;
             enter_invocation(a0, a1, a2, a3, a4, a5)
         }
     }
     let [a0, a1, a2, a3, a4, a5] = outcome.message;
     restore_syscall(a0, a1, a2, a3, a4, a5)
+}
+
+#[cold]
+#[inline(never)]
+fn scheduled_syscall(
+    window: &mut vmem::WindowAccess,
+    thread: &scheduler::Thread,
+    module: &module::ModuleTables,
+    message: [usize; 6],
+) -> ! {
+    let context = unsafe { (*UnsafeCell::raw_get(&raw const __CONTEXT)).assume_init_ref() };
+    let scheduler = unsafe { (*UnsafeCell::raw_get(&raw const __SCHEDULER)).assume_init_ref() };
+    let mut result = [0; 6];
+    match tau::Call::decode(message[0]) {
+        Ok(tau::Call::Spawn { entry }) => {
+            match scheduler::spawn(window, thread, module, context, scheduler, entry, message) {
+                Ok(id) => result[1] = id as usize,
+                Err(error) => result[0] = error as usize,
+            }
+        }
+        Ok(tau::Call::Wait) => {
+            match scheduler::wait(window, module, scheduler, message[1], message[2]) {
+                Ok(Some(event)) => result[1] = event.encode(),
+                Ok(None) => {
+                    let selected = scheduler::dispatch(window, scheduler);
+                    resume_scheduled(window, selected)
+                }
+                Err(error) => result[0] = error as usize,
+            }
+        }
+        Ok(tau::Call::Notify) => {
+            if let Err(error) = scheduler::notify(window, scheduler, module.wait_table, message[1])
+            {
+                result[0] = error as usize;
+            }
+        }
+        Ok(tau::Call::Exit) => {
+            scheduler::exit(window, scheduler);
+            let selected = scheduler::dispatch(window, &scheduler);
+            resume_scheduled(window, selected)
+        }
+        _ => {
+            result[0] = tau::WaitError::Unsupported as usize;
+        }
+    }
+    let [a0, a1, a2, a3, a4, a5] = result;
+    restore_syscall(a0, a1, a2, a3, a4, a5)
+}
+
+fn resume_scheduled(window: &vmem::WindowAccess, selected: scheduler::Dispatch) -> ! {
+    let source = vmem::Window::current_root();
+    if source != selected.root {
+        let flush = mmu::switch_flush(window, source, selected.root);
+        unsafe { mmu::switch(selected.root, flush) };
+    }
+    // The idle path and timer entry both return to U-mode with interrupts on.
+    supervisor::cpu::csrrc!("sstatus", 1 << 8);
+    supervisor::cpu::csrrs!("sstatus", 1 << 5);
+    match selected.kind {
+        scheduler::ReturnKind::Interrupt => resume_after_interrupt(),
+        scheduler::ReturnKind::Entry => {
+            let [a0, a1, a2, a3, a4, a5] = selected.message;
+            enter_invocation(a0, a1, a2, a3, a4, a5)
+        }
+        scheduler::ReturnKind::Syscall => {
+            let [a0, a1, a2, a3, a4, a5] = selected.message;
+            restore_syscall(a0, a1, a2, a3, a4, a5)
+        }
+    }
 }
 
 /// Enter a fresh invocation with only the message registers populated.

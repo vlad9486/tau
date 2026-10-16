@@ -14,6 +14,7 @@ use super::{asm, cpu, llfree, mmu::Hart};
 pub const SV39: usize = 8;
 pub const PAGE: usize = 4096;
 pub const WINDOW_END: usize = 0xffff_ffc0_0020_0000;
+pub const SCHEDULER: usize = 0xffff_ffc0_0040_0000;
 pub const THREAD: usize = 0xffff_ffc0_0020_0000;
 pub const MODULE_CONTEXT: usize = 0xffff_ffc0_0021_0000;
 pub const MODULE: usize = 0xffff_ffc0_0022_0000;

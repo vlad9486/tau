@@ -7,7 +7,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use super::vmem;
+use super::{vmem, waiting::WaitTable};
 
 /// Immutable prepared module descriptor, held in an owned physical page.
 /// Shared module dependency slots contain its physical address.
@@ -98,8 +98,9 @@ pub struct ModuleTables {
     // Slot zero is the free-list head. Free entries contain the next slot;
     // occupied entries contain a tagged physical descriptor address.
     dependencies: [AtomicUsize; 0x800],
-    // Phase two will define the protected waiter records and their generations.
-    waiters_reserved: [AtomicUsize; 4096 / size_of::<AtomicUsize>()],
+    pub wait_table: WaitTable,
+    pub stem_index: usize,
+    pub stack_pages: usize,
 }
 
 impl ModuleTables {
@@ -120,9 +121,10 @@ impl ModuleTables {
         for index in 0..Self::END {
             unsafe { dependencies.add(index).write(AtomicUsize::new(index + 1)) };
         }
-        let waiters = unsafe { ptr::addr_of_mut!((*this).waiters_reserved).cast::<AtomicUsize>() };
-        for index in 0..4096 / size_of::<AtomicUsize>() {
-            unsafe { waiters.add(index).write(AtomicUsize::new(0)) };
+        unsafe {
+            ptr::addr_of_mut!((*this).wait_table).write(WaitTable::EMPTY);
+            ptr::addr_of_mut!((*this).stem_index).write(usize::MAX);
+            ptr::addr_of_mut!((*this).stack_pages).write(0);
         }
     }
 

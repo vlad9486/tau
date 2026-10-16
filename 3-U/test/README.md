@@ -53,6 +53,8 @@ fault, and `7` module invocation validation.
 | 5 | `invocation` | Two prepared dependency slots, rollback and warm checkpoints; verifies lazy construction, stable roots/ASIDs, private dependency caches and mappings retained across 128 calls, nested context paths sharing ELF globals, fresh entry registers, caller restoration, permissions, source unmapping, failed-construction/preparation rollback, and both switch policies |
 
 | 4 | `fault` | Fault address, zero; host validates S-mode trap entry instead of waiting for pass |
+| 7 | `scheduling` | Wait-table address and count; software waits, errors, pending/coalescing/reuse, module isolation, competing waiters, idle deadlines, CPU-bound preemption/registers, abandoned reservations, canceled timers, and waiting in an invoked module |
+| 8 | `spawn-rollback` | Phases 0 and 1; host forces ASID exhaustion, checks page/ID/ASID rollback, then restores capacity for successful creation |
 | 6 | `graph` | Graph snapshot address and phase (0 prepared, 1 warm); prepares two applications with declared dependencies and a shared service with its own leaf, walks both paths repeatedly, checks separate instances and shared counters, verifies loader-only operations, exhausts binding slots, and checks failed-preparation rollback |
 
 The invocation payload prepares an acyclic `A -> B` binding through
@@ -80,3 +82,10 @@ Add scenario code here and corresponding selection/assertions in the host's
 `src/testing.rs`. Keep protocol IDs consistent across repositories and increment
 the version when changing existing meanings. The payload is not a Rust unit-test
 runner and does not automatically cover drivers private to `system`.
+
+Host checks for the software-wait ABI, table validation, and parking interleavings
+can also run without QEMU from the sibling `tau-tool` checkout:
+
+```sh
+cargo test --test scheduling -- --ignored --nocapture
+```

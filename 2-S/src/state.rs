@@ -7,7 +7,8 @@ use core::{arch, hint, num::NonZeroUsize, slice, ptr, mem};
 use super::{
     vmem::{Window, WindowAccess, Mapping},
     module::{ModuleContext, ModuleTables},
-    scheduler::Thread,
+    scheduler::{Scheduler, Thread},
+    waiting::WaitTable,
     llfree, loading, vmem, sbi, cpu, layout,
 };
 
@@ -24,12 +25,26 @@ const SUPERVISOR_EXTERNAL: usize = 9;
 const PENDING_TIMER: usize = 1;
 const PENDING_EXTERNAL: usize = 2;
 
-fn take_pending_interrupt(thread: &mut Thread) -> Option<tau::Event> {
-    if thread.pending_interrupts & PENDING_EXTERNAL != 0 {
-        thread.pending_interrupts &= !PENDING_EXTERNAL;
+fn take_pending_interrupt(thread: &Thread) -> Option<tau::Event> {
+    if thread
+        .pending_interrupts
+        .load(core::sync::atomic::Ordering::Relaxed)
+        & PENDING_EXTERNAL
+        != 0
+    {
+        thread
+            .pending_interrupts
+            .fetch_and(!PENDING_EXTERNAL, core::sync::atomic::Ordering::Relaxed);
         Some(tau::Event::Notified { arg: 0 })
-    } else if thread.pending_interrupts & PENDING_TIMER != 0 {
-        thread.pending_interrupts &= !PENDING_TIMER;
+    } else if thread
+        .pending_interrupts
+        .load(core::sync::atomic::Ordering::Relaxed)
+        & PENDING_TIMER
+        != 0
+    {
+        thread
+            .pending_interrupts
+            .fetch_and(!PENDING_TIMER, core::sync::atomic::Ordering::Relaxed);
         Some(tau::Event::Timeout)
     } else {
         None
@@ -78,9 +93,10 @@ pub enum InitError {
 /// be initialized only once for this module.
 pub unsafe fn init(
     window: &mut WindowAccess,
-    thread: &mut Thread,
+    thread: &Thread,
     module: *mut ModuleContext,
     tables: *mut ModuleTables,
+    scheduler: *mut Scheduler,
     context: &Context,
 ) -> Result<(vmem::Root, usize), InitError> {
     let root = Window::current_root();
@@ -102,11 +118,14 @@ pub unsafe fn init(
 
     // Bootstrap constructs the initial module tables once. Future context
     // creation must reuse their backing pages, not allocate/reset these tables.
+    let tables_backing = context
+        .block(thread.hart_id(), super::module::TABLE_ORDER)
+        .map_err(InitError::Allocator)?;
     let mapping = Mapping {
         addr_virtual: tables.addr(),
         virtual_pages: size_of::<ModuleTables>().div_ceil(0x1000),
-        addr_physical: None,
-        physical_pages: 0,
+        addr_physical: NonZeroUsize::new(tables_backing),
+        physical_pages: size_of::<ModuleTables>().div_ceil(0x1000),
         flags: *b"rw---",
     };
     window
@@ -146,18 +165,36 @@ pub unsafe fn init(
                 flags[2] = b'x';
             }
             let virtual_pages = ((ph.p_vaddr & 0xfff) + ph.p_memsz).div_ceil(0x1000) as usize;
-            let physical_pages = ((ph.p_offset & 0xfff) + ph.p_filesz).div_ceil(0x1000) as usize;
             let mapping = Mapping {
                 addr_virtual: (ph.p_vaddr as usize) & !0xfff,
                 virtual_pages,
-                addr_physical: NonZeroUsize::new((elf_base + ph.p_offset as usize) & !0xfff),
-                physical_pages,
+                addr_physical: None,
+                physical_pages: 0,
                 flags,
             };
 
             window
                 .map(root, mapping, || context.page(thread.hart_id()))
                 .map_err(InitError::Allocator)?;
+            // Bootstrap needs owned, zeroed segment backing too. Borrowing the
+            // file's last page exposes ELF metadata as nonzero BSS, and lets
+            // shared globals overwrite the source image.
+            let file = elf.segment_data(&ph).map_err(InitError::Elf)?;
+            let mut done = 0;
+            while done < file.len() {
+                let address = ph.p_vaddr as usize + done;
+                let (physical, _) = window.resolve(root, address).ok_or(InitError::Manifest)?;
+                let offset = physical & 0xfff;
+                let count = (vmem::PAGE - offset).min(file.len() - done);
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        file.as_ptr().add(done),
+                        window.page_pointer(physical & !0xfff).add(offset),
+                        count,
+                    )
+                };
+                done += count;
+            }
         }
     }
 
@@ -220,9 +257,54 @@ pub unsafe fn init(
         .map_err(InitError::Alloc)?;
     }
 
+    if ranges_num != 1 {
+        return Err(InitError::Manifest);
+    }
+    let stack_offset = ranges_vaddr
+        .checked_sub(header.p_vaddr as usize)
+        .ok_or(InitError::Manifest)?;
+    let stack_bytes = data
+        .get(stack_offset..stack_offset + size_of::<tau::MappedRegion>())
+        .ok_or(InitError::Manifest)?;
+    let stack_pages = usize::from_ne_bytes(
+        stack_bytes[mem::offset_of!(tau::MappedRegion, pages)..][..8]
+            .try_into()
+            .unwrap(),
+    );
+    let stack_start = usize::from_ne_bytes(
+        stack_bytes[mem::offset_of!(tau::MappedRegion, virtual_start)..][..8]
+            .try_into()
+            .unwrap(),
+    );
+    if !(1..=256).contains(&stack_pages)
+        || stack_start != (stack_pages * vmem::PAGE).wrapping_neg()
+        || stack_bytes[..8] != [0; 8]
+        || stack_bytes[mem::offset_of!(tau::MappedRegion, write)] != 1
+    {
+        return Err(InitError::Manifest);
+    }
     let sepc = read_usize(mem::offset_of!(tau::Manifest, entry));
     let satp = Window::current_root();
-
+    let stem = (sepc >> 30) & 511;
+    let wait_table = WaitTable::prepare(
+        window,
+        context,
+        thread.hart_id(),
+        satp,
+        stem,
+        read_usize(mem::offset_of!(tau::Manifest, wait_slots_base)),
+        read_usize(mem::offset_of!(tau::Manifest, wait_slots_count)),
+    )
+    .map_err(|_| InitError::Manifest)?;
+    // The boot ELF uses the same protected shared-stem rule as prepared ELFs.
+    unsafe {
+        ptr::addr_of_mut!((*tables).wait_table).write(wait_table);
+        ptr::addr_of_mut!((*tables).stem_index).write(stem);
+        ptr::addr_of_mut!((*tables).stack_pages).write(stack_pages);
+        ModuleContext::init_at(module, satp, sepc, stem);
+        Scheduler::initialize(scheduler, window, context, thread.hart_id())
+            .map_err(InitError::Alloc)?;
+    }
     Ok((satp, sepc))
 }
 
@@ -245,11 +327,13 @@ impl From<[usize; 6]> for Outcome {
     }
 }
 
+#[inline]
 pub fn syscall(
     window: &mut WindowAccess,
-    thread: &mut Thread,
+    thread: &Thread,
     module: &mut ModuleContext,
     tables: &ModuleTables,
+    scheduler: &Scheduler,
     context: &Context,
     mut msg: [usize; 6],
 ) -> Outcome {
@@ -320,31 +404,16 @@ pub fn syscall(
                 }
             }
         }
-        Ok(tau::Call::Spawn { entry }) => {
-            write!(sbi::Console, "spawn: {entry:016x}\r\n").unwrap_or_default();
-
-            // TODO:
-            let _ = entry;
-            loop {
-                hint::spin_loop();
-            }
-        }
-        Ok(tau::Call::Exit) => {
-            write!(sbi::Console, "exit\r\n").unwrap_or_default();
-
-            // TODO:
-            loop {
-                hint::spin_loop();
-            }
-        }
-        Ok(tau::Call::Join { thread_id }) => {
-            write!(sbi::Console, "join {thread_id}\r\n").unwrap_or_default();
-
-            // TODO:
-            let _ = thread_id;
-            loop {
-                hint::spin_loop();
-            }
+        // These calls need dispatch after all current-context borrows end.
+        // The trap boundary handles them through scheduler before entering here.
+        Ok(
+            tau::Call::Spawn { .. }
+            | tau::Call::Exit
+            | tau::Call::Wait
+            | tau::Call::Notify
+            | tau::Call::Join { .. },
+        ) => {
+            msg = [tau::WaitError::Unsupported as usize, 0, 0, 0, 0, 0];
         }
         Ok(tau::Call::Map) => {
             msg[0] = if (msg[1] != 0 && !tables.loader_authority)
@@ -377,13 +446,12 @@ pub fn syscall(
                 msg[0] = 0;
             }
         }
-        Ok(tau::Call::Wait | tau::Call::Notify) => {
-            // Phase-one ABI only. Do not pretend to park, notify, or bind an
-            // interrupt until scheduler and waiter lifetime support exist.
-            msg[0] = tau::WaitError::Unsupported as usize;
-            msg[1] = 0;
-        }
         Ok(tau::Call::WaitExternal) => {
+            if scheduler.active() {
+                // Bootstrap compatibility only: scheduled clients use Wait.
+                // Polling must neither block this hart nor overwrite its timer.
+                return [tau::Event::Notified { arg: 0 }.encode(), 0, 0, 0, 0, 0].into();
+            }
             if let Some(event) = take_pending_interrupt(thread) {
                 msg[0] = event.encode();
                 return msg.into();
@@ -466,7 +534,7 @@ fn overlaps_stem(module: &ModuleContext, address: usize, pages: usize) -> bool {
 
 pub fn alloc_pages(
     window: &mut WindowAccess,
-    thread: &mut Thread,
+    thread: &Thread,
     context: &Context,
     physical_addr: Option<NonZeroUsize>,
     virtual_addr: usize,
@@ -553,7 +621,7 @@ fn wait() -> usize {
 }
 
 #[inline(always)]
-pub fn handle_non_syscall_trap(cause: isize, thread: &mut Thread) {
+pub fn handle_non_syscall_trap(cause: isize, thread: &Thread) {
     use core::fmt::Write;
 
     if cause >= 0 {
@@ -570,12 +638,16 @@ pub fn handle_non_syscall_trap(cause: isize, thread: &mut Thread) {
         match (cause as usize) & !INTERRUPT_BIT {
             SUPERVISOR_TIMER => {
                 sbi::set_timer(usize::MAX).unwrap_or_default();
-                thread.pending_interrupts |= PENDING_TIMER;
+                thread
+                    .pending_interrupts
+                    .fetch_or(PENDING_TIMER, core::sync::atomic::Ordering::Relaxed);
             }
             SUPERVISOR_EXTERNAL => {
                 // Keep the level interrupt gated until userspace drains the PLIC.
                 cpu::csrrc!("sie", 1 << SUPERVISOR_EXTERNAL);
-                thread.pending_interrupts |= PENDING_EXTERNAL;
+                thread
+                    .pending_interrupts
+                    .fetch_or(PENDING_EXTERNAL, core::sync::atomic::Ordering::Relaxed);
             }
             _ => {
                 sbi::Printer.ch(*b"SU: unexpected interrupt\r\n");

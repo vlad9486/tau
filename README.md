@@ -31,12 +31,14 @@ each context's private dependency slots cache callee roots constructed on first
 use. Returns retain roots, private mappings, and stable hart-local ASIDs. These
 roots form a context tree without a separate context registry. The scheduler is
 the only owner of a global task registry. Synchronous invocation and return are implemented for the `dummy-test` module;
-spawn/join and that registry are still under development.
+same-module spawning, single-hart scheduling, and software waiting are implemented.
+Join and successful thread/context reclamation remain deferred.
 
 ### Lock-Free Kernel Components
 
 * **Lock-free page frame allocation** for efficient memory management.
-* **Lock-free scheduler** to maximize performance across many cores.
+* The initial scheduler uses one interrupt-safe lock, FIFO round-robin dispatch,
+  timer preemption, and module-local software waits on one active hart.
 
 ### Status
 

@@ -8,6 +8,7 @@
 use core::{arch::naked_asm, num::NonZeroUsize, ptr};
 
 mod graph;
+mod scheduling;
 
 // Wire protocol v1: three little-endian u64 words: magic, version, scenario.
 // The host writes scenario only while stopped at tau_test_ready. Volatile access
@@ -21,6 +22,8 @@ static MANIFEST: tau::Manifest = tau::Manifest {
         version: (0, 1),
         name: *b"system-test\0\0\0\0\0\0\0\0\0",
     },
+    wait_slots_base: scheduling::SLOTS.as_ptr(),
+    wait_slots_count: scheduling::SLOTS.len(),
     entry: main,
     dependencies: &[],
     mapped_regions: &[tau::MappedRegion::stack(0x20000)],
@@ -417,6 +420,8 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             tau_test_passed(case, 128)
         }
         6 => graph::run(case, info, pages),
+        7 => scheduling::run(case, info, pages),
+        8 => scheduling::rollback(case),
         _ => tau_test_failed(case, 0, case),
     }
 }
