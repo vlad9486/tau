@@ -14,7 +14,9 @@ pub mod tester;
 pub mod asm;
 
 mod common;
-pub use self::common::*;
+pub use self::common::{
+    Call, Entry, Event, Manifest, MappedRegion, ModuleError, ModuleHandle, ModuleId, WaitError,
+};
 
 mod ubi;
 pub use self::ubi::{Ubi, FreeError, AllocError};

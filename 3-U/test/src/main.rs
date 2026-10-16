@@ -7,6 +7,8 @@
 
 use core::{arch::naked_asm, num::NonZeroUsize, ptr};
 
+mod graph;
+
 // Wire protocol v1: three little-endian u64 words: magic, version, scenario.
 // The host writes scenario only while stopped at tau_test_ready. Volatile access
 // keeps that external write visible even with release LTO enabled.
@@ -88,6 +90,7 @@ fn prepare_raw(address: usize, length: usize) -> usize {
             inout("a0") tau::Call::PrepareModule.encode() => status,
             in("a1") address,
             in("a2") length,
+            in("a3") 0usize,
             clobber_abi("C"),
             options(nostack),
         );
@@ -215,7 +218,7 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             let Ok((dtb, _)) = tau::Dtb::new(raw) else {
                 tau_test_failed(case, 3, info);
             };
-            for name in ["system", "system-test", "sdio"] {
+            for name in ["system", "system-test", "dummy-test"] {
                 let Some(module) = dtb.boot_module(name) else {
                     tau_test_failed(case, 3, info);
                 };
@@ -264,13 +267,21 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
         5 => {
             let raw = tau::Area::new(info, pages << 12).sl();
             let (dtb, _) = tau::Dtb::new(raw).unwrap();
-            let image = dtb.boot_module("sdio").unwrap().sl::<u8>();
+            let image = dtb.boot_module("dummy-test").unwrap().sl::<u8>();
             assert_eq!(
-                tau::Ubi::prepare_module(&[0]),
+                tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, &[0]),
                 Err(tau::ModuleError::InvalidImage)
             );
-            let slot = tau::Ubi::prepare_module(image).expect("prepare sdio");
-            let sibling = tau::Ubi::prepare_module(image).expect("prepare second sdio");
+            let (slot, module) = tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, image)
+                .expect("prepare dummy-test");
+            let (sibling, sibling_module) =
+                tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, image)
+                    .expect("prepare second dummy-test");
+            assert_ne!(module, sibling_module);
+            assert_eq!(
+                tau::Ubi::bind_dependency(module, sibling_module).unwrap(),
+                1
+            );
             // Reject a late load segment after earlier segments allocated pages.
             // Keep the damaged fixture on our existing stack so the host can
             // compare allocator counts before and after failed preparations.
@@ -315,7 +326,7 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
                     [1]
                 );
             }
-            // The host supplies an acyclic A -> B fixture binding. A -> B
+            // The loader supplied an acyclic A -> B binding. A -> B
             // uses a separate B context but the same module-owned globals.
             for (value, count) in [(3, 1), (4, 2)] {
                 assert_eq!(
@@ -327,11 +338,11 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             // These failed preparations must not retain snapshot/root pages.
             for _ in 0..8 {
                 assert_eq!(
-                    tau::Ubi::prepare_module(&[0]),
+                    tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, &[0]),
                     Err(tau::ModuleError::InvalidImage)
                 );
                 assert_eq!(
-                    tau::Ubi::prepare_module(malformed),
+                    tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, malformed),
                     Err(tau::ModuleError::InvalidImage)
                 );
             }
@@ -405,6 +416,7 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             tau::Ubi::unmap(ALIAS, 1).unwrap();
             tau_test_passed(case, 128)
         }
+        6 => graph::run(case, info, pages),
         _ => tau_test_failed(case, 0, case),
     }
 }

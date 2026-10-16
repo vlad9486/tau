@@ -15,7 +15,8 @@ use elf::{
 use tau::ModuleError;
 
 use super::{
-    module::{Dependency, ModuleContext, ModuleTables, CONTEXT_PAGES, TABLE_ORDER, TABLE_PAGES},
+    PreparedModule,
+    module::{ModuleContext, ModuleTables, CONTEXT_PAGES, TABLE_ORDER, TABLE_PAGES},
     scheduler::Thread,
     state::Context,
     llfree, mmu,
@@ -72,7 +73,7 @@ fn load_elf(
     hart: usize,
     root: Root,
     bytes: &[u8],
-) -> Result<Dependency, ModuleError> {
+) -> Result<PreparedModule, ModuleError> {
     let elf =
         ElfBytes::<LittleEndian>::minimal_parse(bytes).map_err(|_| ModuleError::InvalidImage)?;
     if elf.ehdr.e_machine != EM_RISCV
@@ -84,10 +85,14 @@ fn load_elf(
     let manifest = image_range(&elf, elf.ehdr.e_entry as usize, size_of::<tau::Manifest>())?;
     let entry = word(manifest, mem::offset_of!(tau::Manifest, entry))?;
     let deps = mem::offset_of!(tau::Manifest, dependencies);
-    // Until the loader can validate and publish an acyclic binding graph,
-    // preparation only accepts fresh leaf modules. Invoke performs no cycle walk.
-    if word(manifest, deps + 8)? != 0 {
-        return Err(ModuleError::InvalidImage);
+    // Validate the declared dependency slice's image backing. The trusted
+    // loader resolves its names and publishes acyclic bindings before use.
+    let dependency_count = word(manifest, deps + 8)?;
+    if dependency_count != 0 {
+        let bytes = dependency_count
+            .checked_mul(size_of::<tau::ModuleId>())
+            .ok_or(ModuleError::InvalidImage)?;
+        image_range(&elf, word(manifest, deps)?, bytes)?;
     }
     let regions = mem::offset_of!(tau::Manifest, mapped_regions);
     // First iteration supports one private stack, not declarative device bindings.
@@ -198,7 +203,7 @@ fn load_elf(
         return Err(ModuleError::InvalidImage);
     }
     let root_index = root_index.ok_or(ModuleError::InvalidImage)?;
-    Ok(Dependency {
+    Ok(PreparedModule {
         stem: window
             .root_branch(root, root_index)
             .ok_or(ModuleError::InvalidImage)?,
@@ -214,12 +219,14 @@ pub fn prepare(
     context: &Context,
     hart: usize,
     tables: &ModuleTables,
+    parent: usize,
     address: usize,
     length: usize,
-) -> Result<u16, ModuleError> {
+) -> Result<(u16, usize), ModuleError> {
     if !tables.loader_authority {
         return Err(ModuleError::AccessDenied);
     }
+    let parent_tables = parent_tables(window, context, parent)?;
     // Snapshot bounded user input before parsing. No unchecked userspace refs,
     // SUM, or dependency on the lifetime of the temporary source mapping.
     if length == 0 || length > 1024 * 1024 || !vmem::user_range(address, length) {
@@ -253,15 +260,15 @@ pub fn prepare(
         unsafe {
             window
                 .page_pointer(descriptor)
-                .cast::<Dependency>()
+                .cast::<PreparedModule>()
                 .write(dep)
         };
-        if let Some(slot) = tables.insert_dependency(descriptor) {
+        if let Some(slot) = insert_dependency(window, tables, parent_tables, descriptor) {
             // Publish newly copied executable bytes on this hart once.
             unsafe {
                 core::arch::asm!("fence.i", options(nostack));
             }
-            Ok(slot)
+            Ok((slot, descriptor / PAGE))
         } else {
             let _ = context.free(hart, descriptor);
             let _ = context.free_block(hart, module_tables, TABLE_ORDER);
@@ -276,6 +283,79 @@ pub fn prepare(
         let _ = context.free(hart, root.page());
     }
     result
+}
+
+/// Handles are supplied by the trusted loader, not arbitrary module code.
+/// Bounds checks prevent overflow and aliases outside managed physical memory;
+/// they do not establish that the page contains a prepared descriptor.
+fn descriptor_page(context: &Context, handle: usize) -> Result<usize, ModuleError> {
+    let page = handle
+        .checked_mul(PAGE)
+        .ok_or(ModuleError::InvalidDependency)?;
+    let frame = page
+        .checked_sub(context.base_addr)
+        .ok_or(ModuleError::InvalidDependency)?
+        / PAGE;
+    if handle == 0 || page & (1 << (usize::BITS - 1)) != 0 || frame >= context.allocator.frames() {
+        return Err(ModuleError::InvalidDependency);
+    }
+    Ok(page)
+}
+
+fn parent_tables(
+    window: &mut WindowAccess,
+    context: &Context,
+    parent: usize,
+) -> Result<Option<usize>, ModuleError> {
+    if parent == 0 {
+        return Ok(None);
+    }
+    let descriptor = descriptor_page(context, parent)?;
+    let module = unsafe {
+        window
+            .page_pointer(descriptor)
+            .cast::<PreparedModule>()
+            .read()
+    };
+    Ok(Some(module.tables))
+}
+
+fn insert_dependency(
+    window: &mut WindowAccess,
+    bootstrap: &ModuleTables,
+    parent_tables: Option<usize>,
+    descriptor: usize,
+) -> Option<u16> {
+    match parent_tables {
+        None => bootstrap.insert_dependency(descriptor),
+        Some(physical) => {
+            // Alias only at publication, after snapshot/construction aliases
+            // have expired. No window remapping may occur while borrowed.
+            let pointer = window.block(physical, TABLE_PAGES).cast::<ModuleTables>();
+            unsafe { &*pointer }.insert_dependency(descriptor)
+        }
+    }
+}
+
+pub fn bind(
+    window: &mut WindowAccess,
+    context: &Context,
+    tables: &ModuleTables,
+    parent: usize,
+    dependency: usize,
+) -> Result<u16, ModuleError> {
+    // Check the caller's authority before interpreting either physical handle.
+    if !tables.loader_authority {
+        return Err(ModuleError::AccessDenied);
+    }
+    if parent == dependency {
+        return Err(ModuleError::InvalidDependency);
+    }
+    let descriptor = descriptor_page(context, dependency)?;
+    let parent_tables = parent_tables(window, context, parent)?;
+    // Longer cycles are the loader's responsibility. Slots and descriptors
+    // remain installed until shutdown; existing context caches stay valid.
+    insert_dependency(window, tables, parent_tables, descriptor).ok_or(ModuleError::NoSlots)
 }
 
 pub fn invoke(
@@ -312,7 +392,12 @@ fn construct(
     descriptor: usize,
 ) -> Result<Root, ModuleError> {
     let hart = thread.hart_id();
-    let dep = unsafe { window.page_pointer(descriptor).cast::<Dependency>().read() };
+    let dep = unsafe {
+        window
+            .page_pointer(descriptor)
+            .cast::<PreparedModule>()
+            .read()
+    };
     let root = window.create(0, || context.page(hart)).map_err(memory)?;
     let result = (|| {
         window.attach(root, dep.root_index, dep.stem);

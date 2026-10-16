@@ -30,7 +30,7 @@ to its caller through `satp`. Shared module tables hold prepared ELF templates;
 each context's private dependency slots cache callee roots constructed on first
 use. Returns retain roots, private mappings, and stable hart-local ASIDs. These
 roots form a context tree without a separate context registry. The scheduler is
-the only owner of a global task registry. Synchronous invocation and return are implemented for the dummy `sdio` module;
+the only owner of a global task registry. Synchronous invocation and return are implemented for the `dummy-test` module;
 spawn/join and that registry are still under development.
 
 ### Lock-Free Kernel Components
@@ -52,7 +52,7 @@ cargo install --path .
 ```
 
 This workspace provides `tau-firmware` in `0-M` with `tau-qemu` and `tau-visionfive2` binary targets, plus `tau-visionfive2-spl` in `0-M/vf2` for the board's first boot stage. The supervisor package lives in `2-S`; U-mode modules live in `3-U/system`,
-`3-U/test`, and `3-U/sdio`. Their static image layout is defined in `2-S/modules.toml`. The tool uses the binary target names when selecting and locating firmware images.
+`3-U/test`, and `3-U/dummy-test`. Their static image layout is defined in `2-S/modules.toml`. The tool uses the binary target names when selecting and locating firmware images.
 
 ## Build for Vision Five 2
 
@@ -103,7 +103,7 @@ all host code lives in the separate `tau-tool` repository. Builds use the
 default `target` directory; test logs live under `target/tau-test`. Run
 `tau build --qemu` to switch the firmware back to the normal system payload.
 
-The image contains both `system` and `system-test`, plus a dummy `sdio` module.
+The image contains both `system` and `system-test`, plus the `dummy-test` module.
 `tau test` selects `system-test` through a loader feature. U-mode ELF copies are
 stripped during composition; the original build artifacts retain debug info.
 The loader copies the firmware DTB into a reserved 64 KiB buffer and adds

@@ -21,6 +21,28 @@ pub struct ModuleId {
     pub name: [u8; 20],
 }
 
+/// Boot-lifetime handle to a prepared module's physical descriptor page.
+/// The trusted loader must use supervisor-issued handles and keep bindings
+/// acyclic. This is independent of the manifest's name and version.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModuleHandle(usize);
+
+impl ModuleHandle {
+    /// The bootstrap module. Valid only as a dependency's parent.
+    pub const ROOT: Self = Self(0);
+
+    /// Decode a syscall handle. This does not validate descriptor membership.
+    pub const fn from_raw(value: usize) -> Self {
+        Self(value)
+    }
+
+    /// The physical descriptor page number, or zero for the bootstrap module.
+    pub const fn as_raw(self) -> usize {
+        self.0
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MappedRegion {
@@ -129,12 +151,17 @@ pub enum Call {
     Notify,
     /// Emit a diagnostic checkpoint through the supervisor console.
     Debug,
-    /// Loader-only: prepare an ELF image at (a1, a2), returning status in a0
-    /// and a dependency slot in a1.
+    /// Loader-only: prepare an ELF image at (a1, a2) under parent handle a3.
+    /// Return status in a0, a parent-local slot in a1, and the new handle in a2.
     PrepareModule,
+    /// Loader-only: bind dependency handle a2 under parent handle a1.
+    /// Return status in a0 and a fresh parent-local slot in a1.
+    BindDependency,
 }
 
 impl Call {
+    // WARNING: some assembly code might rely on this encoding
+    // check all `naked_asm!` and `asm!` before modify this
     #[inline]
     pub const fn encode(self) -> usize {
         match self {
@@ -152,6 +179,7 @@ impl Call {
             Self::Wait => (6 << 4) + 0b1001,
             Self::Notify => (7 << 4) + 0b1001,
             Self::PrepareModule => (8 << 4) + 0b1001,
+            Self::BindDependency => (9 << 4) + 0b1001,
         }
     }
 
@@ -180,6 +208,7 @@ impl Call {
                     6 => Ok(Self::Wait),
                     7 => Ok(Self::Notify),
                     8 => Ok(Self::PrepareModule),
+                    9 => Ok(Self::BindDependency),
                     _ => Err(a0),
                 },
                 _ => Err(a0),

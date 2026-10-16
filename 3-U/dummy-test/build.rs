@@ -3,5 +3,5 @@
 // See LICENSE for the full license text.
 
 fn main() {
-    println!("cargo:rustc-link-arg-bin=sdio=-eMANIFEST");
+    println!("cargo:rustc-link-arg-bin=dummy-test=-eMANIFEST");
 }

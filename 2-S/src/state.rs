@@ -257,7 +257,29 @@ pub fn syscall(
 
     match tau::Call::decode(msg[0]) {
         Ok(tau::Call::PrepareModule) => {
-            match loading::prepare(window, context, thread.hart_id(), tables, msg[1], msg[2]) {
+            match loading::prepare(
+                window,
+                context,
+                thread.hart_id(),
+                tables,
+                msg[3],
+                msg[1],
+                msg[2],
+            ) {
+                Ok((slot, handle)) => {
+                    msg[0] = 0;
+                    msg[1] = slot as usize;
+                    msg[2] = handle;
+                }
+                Err(error) => {
+                    msg[0] = error as usize;
+                    msg[1] = 0;
+                    msg[2] = 0;
+                }
+            }
+        }
+        Ok(tau::Call::BindDependency) => {
+            match loading::bind(window, context, tables, msg[1], msg[2]) {
                 Ok(slot) => {
                     msg[0] = 0;
                     msg[1] = slot as usize;

@@ -194,7 +194,7 @@ impl Tasks {
         }
     }
 
-    pub fn run(&mut self, plic: &PlicCtx, sdio_slot: u16) {
+    pub fn run(&mut self, plic: &PlicCtx, dummy_slot: u16) {
         let shared = UnsafeCell::new(Shared {
             uart_out: uart::Buffer::default(),
             uart_in: uart::Buffer::default(),
@@ -215,7 +215,7 @@ impl Tasks {
             self.sdio.is_some(),
             !self.ethernet.is_empty(),
             self.display.is_some(),
-            sdio_slot,
+            dummy_slot,
         );
 
         let shared = unsafe { &mut *shared.get() };

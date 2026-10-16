@@ -27,6 +27,6 @@ offset = 80
 size = 20
 
 [[module]]
-name = "sdio"
+name = "dummy-test"
 offset = 100
 size = 8

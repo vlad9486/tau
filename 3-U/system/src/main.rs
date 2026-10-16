@@ -58,16 +58,17 @@ extern "C" fn main(
         tau::Ubi::respond(1, []);
     };
 
-    // Prepare the dummy SDIO service from the DTB-provided ELF image.
-    let Some(sdio_image) = dtb.boot_module("sdio") else {
+    // Prepare the test service from the DTB-provided ELF image.
+    let Some(dummy_image) = dtb.boot_module("dummy-test") else {
         tau::Ubi::respond(7, []);
     };
-    let sdio_bytes = sdio_image.sl::<u8>();
-    if sdio_bytes.get(..4) != Some(b"\x7fELF") {
+    let dummy_bytes = dummy_image.sl::<u8>();
+    if dummy_bytes.get(..4) != Some(b"\x7fELF") {
         tau::Ubi::respond(7, []);
     }
 
-    let slot = tau::Ubi::prepare_module(sdio_bytes).expect("prepare dummy sdio");
+    let (slot, _module) =
+        tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, dummy_bytes).expect("prepare dummy-test");
     tau::Ubi::debug(0x5344_494f, slot as usize);
 
     let Some((cpu_props, cpu_path)) = dtb

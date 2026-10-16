@@ -26,10 +26,10 @@ impl<'a> State<'a> {
         has_sdio: bool,
         has_ethernet: bool,
         has_display: bool,
-        sdio_slot: u16,
+        dummy_slot: u16,
     ) -> Self {
         State {
-            fut: Box::pin(run(shared, has_sdio, has_ethernet, has_display, sdio_slot)),
+            fut: Box::pin(run(shared, has_sdio, has_ethernet, has_display, dummy_slot)),
         }
     }
 
@@ -47,7 +47,7 @@ fn measure_roundtrips(shared: &UnsafeCell<Shared>, slot: u16) {
         let start = tau::asm::read_cycle();
         let response = tau::Ubi::invoke::<1, 2>(slot, 0, [value]);
         *cycles = tau::asm::read_cycle().wrapping_sub(start);
-        let [reply, count] = response.expect("invoke dummy sdio");
+        let [reply, count] = response.expect("invoke dummy-test");
         assert_eq!(reply, value.rotate_left(7) ^ 0x5344_494f);
         assert_eq!(count, value);
     }
@@ -56,7 +56,7 @@ fn measure_roundtrips(shared: &UnsafeCell<Shared>, slot: u16) {
     samples.sort();
     let median = samples[126];
     unsafe { &mut *shared.get() }.write(format_args!(
-        "sdio roundtrip mean: {mean}, median: {median}"
+        "dummy-test roundtrip mean: {mean}, median: {median}"
     ));
 }
 
@@ -65,9 +65,9 @@ async fn run(
     has_sdio: bool,
     has_ethernet: bool,
     has_display: bool,
-    sdio_slot: u16,
+    dummy_slot: u16,
 ) {
-    measure_roundtrips(shared, sdio_slot);
+    measure_roundtrips(shared, dummy_slot);
     if has_display {
         unsafe { &mut *shared.get() }.display_task = Some(display::Task::TestPattern);
     }

@@ -4,9 +4,7 @@
 
 use core::{arch, hint, num::NonZeroUsize};
 
-use super::{
-    common::{Call, Entry, Event, WaitError, ModuleError},
-};
+use super::{Call, Entry, Event, WaitError, ModuleError, ModuleHandle};
 
 #[inline(always)]
 fn ubi<const I: usize, const O: usize>(call: Call, arg: [usize; I]) -> (usize, [usize; O]) {
@@ -39,17 +37,39 @@ fn ubi<const I: usize, const O: usize>(call: Call, arg: [usize; I]) -> (usize, [
 pub struct Ubi;
 
 impl Ubi {
-    /// Prepare a reusable module template from ELF bytes in this address space.
-    /// Only the bootstrap loader module has this authority.
-    pub fn prepare_module(image: &[u8]) -> Result<u16, ModuleError> {
-        let (status, [slot]) = ubi(Call::PrepareModule, [image.as_ptr().addr(), image.len()]);
-        match status {
-            0 => Ok(slot as u16),
-            1 => Err(ModuleError::AccessDenied),
-            3 => Err(ModuleError::OutOfMemory),
-            4 => Err(ModuleError::NoSlots),
-            _ => Err(ModuleError::InvalidImage),
-        }
+    /// Prepare a fresh module instance and attach it to the specified parent.
+    /// Return the parent's dependency slot and the new module's handle.
+    /// Only the trusted bootstrap loader may call this. It must supply issued
+    /// handles and finish resolving dependencies before invoking the module.
+    pub fn prepare_module(
+        parent_module_id: ModuleHandle,
+        image: &[u8],
+    ) -> Result<(u16, ModuleHandle), ModuleError> {
+        let (status, [slot, handle]) = ubi(
+            Call::PrepareModule,
+            [
+                image.as_ptr().addr(),
+                image.len(),
+                parent_module_id.as_raw(),
+            ],
+        );
+        module_status(status)?;
+        Ok((slot as u16, ModuleHandle::from_raw(handle)))
+    }
+
+    /// Attach an existing module instance without copying its ELF or globals.
+    /// Each call allocates a fresh parent-local slot. ROOT is valid only as a
+    /// parent. The trusted loader must validate that this edge creates no cycle.
+    pub fn bind_dependency(
+        parent_module_id: ModuleHandle,
+        dependency_module_id: ModuleHandle,
+    ) -> Result<u16, ModuleError> {
+        let (status, [slot]) = ubi(
+            Call::BindDependency,
+            [parent_module_id.as_raw(), dependency_module_id.as_raw()],
+        );
+        module_status(status)?;
+        Ok(slot as u16)
     }
 
     pub fn invoke<const I: usize, const O: usize>(
@@ -143,6 +163,17 @@ impl Ubi {
     /// supervisor's SBI debug console.
     pub fn debug(checkpoint: usize, value: usize) {
         let (_, []) = ubi(Call::Debug, [checkpoint, value]);
+    }
+}
+
+fn module_status(status: usize) -> Result<(), ModuleError> {
+    match status {
+        0 => Ok(()),
+        1 => Err(ModuleError::AccessDenied),
+        3 => Err(ModuleError::OutOfMemory),
+        4 => Err(ModuleError::NoSlots),
+        5 => Err(ModuleError::InvalidDependency),
+        _ => Err(ModuleError::InvalidImage),
     }
 }
 

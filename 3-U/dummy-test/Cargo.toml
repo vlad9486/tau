@@ -1,10 +1,10 @@
 [package]
-name = "sdio"
+name = "dummy-test"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "sdio"
+name = "dummy-test"
 test = false
 doctest = false
 bench = false

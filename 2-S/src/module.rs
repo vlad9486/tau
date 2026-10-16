@@ -13,7 +13,7 @@ use super::vmem;
 /// Shared module dependency slots contain its physical address.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct Dependency {
+pub struct PreparedModule {
     pub stem: usize,
     pub root_index: usize,
     pub entry: usize,

@@ -14,9 +14,9 @@ use core::{
 static MANIFEST: tau::Manifest = tau::Manifest {
     this: tau::ModuleId {
         version: (0, 1),
-        name: *b"sdio\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+        name: *b"dummy-test\0\0\0\0\0\0\0\0\0\0",
     },
-    entry: sdio_entry,
+    entry: dummy_entry,
     dependencies: &[],
     mapped_regions: &[tau::MappedRegion::stack(0x1000)],
 };
@@ -32,7 +32,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-extern "C" fn sdio_entry(_: usize, _: usize, _: usize, _: usize, _: usize, _: usize) -> ! {
+extern "C" fn dummy_entry(_: usize, _: usize, _: usize, _: usize, _: usize, _: usize) -> ! {
     core::arch::naked_asm!(
         "li s0, 500",
         "li s1, 501",
@@ -49,11 +49,11 @@ extern "C" fn sdio_entry(_: usize, _: usize, _: usize, _: usize, _: usize, _: us
         "li gp, 12345",
         "li tp, 67890",
         "j {main}",
-        main = sym sdio_main,
+        main = sym dummy_main,
     );
 }
 
-extern "C" fn sdio_main(
+extern "C" fn dummy_main(
     event: usize,
     value: usize,
     second: usize,
@@ -64,10 +64,7 @@ extern "C" fn sdio_main(
     let arg = event as u16;
     match arg {
         0 => {
-            let count = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
-            if INITIALIZED.fetch_add(1, Ordering::Relaxed) != 0x5344_494f + count - 1 {
-                tau::Ubi::respond(2, []);
-            }
+            let count = count_call();
             tau::Ubi::respond(0, [value.rotate_left(7) ^ 0x5344_494f, count])
         }
         1 => {
@@ -76,7 +73,7 @@ extern "C" fn sdio_main(
                 tau::Ubi::map(NonZeroUsize::new(value), 0x1_0000_0000, 1),
                 Err(tau::AllocError::AccessDenied)
             ) && matches!(
-                tau::Ubi::prepare_module(&[0]),
+                tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, &[0]),
                 Err(tau::ModuleError::AccessDenied)
             ) && matches!(
                 tau::Ubi::map(None, 0xffff_ffc0_0020_0000, 1),
@@ -131,6 +128,40 @@ extern "C" fn sdio_main(
             tau::Ubi::respond(0, response)
         }
         6 => tau::Ubi::respond(0, [value, second, third, fourth, fifth]),
+        7 => {
+            // Route words contain parent-local slots in successive 16-bit fields.
+            // Pack each module's shared counter into the response in path order.
+            let count = count_call();
+            let (reply, counts) = if third == 0 {
+                (value.rotate_left(7) ^ 0x5344_494f, 0)
+            } else {
+                let [reply, counts] =
+                    tau::Ubi::invoke::<3, 2>(second as u16, 7, [value, second >> 16, third - 1])
+                        .unwrap();
+                (reply, counts)
+            };
+            tau::Ubi::respond(0, [reply, counts | (count << (third * 16))])
+        }
+        8 => {
+            let parent = tau::ModuleHandle::from_raw(value);
+            let child = tau::ModuleHandle::from_raw(second);
+            let denied = matches!(
+                tau::Ubi::prepare_module(parent, &[0]),
+                Err(tau::ModuleError::AccessDenied)
+            ) && matches!(
+                tau::Ubi::bind_dependency(parent, child),
+                Err(tau::ModuleError::AccessDenied)
+            );
+            tau::Ubi::respond(0, [denied as usize])
+        }
         _ => tau::Ubi::respond(7, []),
     }
+}
+
+fn count_call() -> usize {
+    let count = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    if INITIALIZED.fetch_add(1, Ordering::Relaxed) != 0x5344_494f + count - 1 {
+        tau::Ubi::respond(2, []);
+    }
+    count
 }

@@ -15,6 +15,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
+name = "dummy-test"
+version = "0.1.0"
+dependencies = [
+ "tau",
+]
+
+[[package]]
 name = "elf"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -131,13 +138,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "785b91fcc41c7426fc07510be49ed1db44f002b45d45c175ec7f155c3cd447a9"
 dependencies = [
  "bitflags",
-]
-
-[[package]]
-name = "sdio"
-version = "0.1.0"
-dependencies = [
- "tau",
 ]
 
 [[package]]

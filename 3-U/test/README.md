@@ -1,6 +1,6 @@
 # OS test payload
 
-`system-test` is packed alongside `system` and `sdio`. `tau test` enables the
+`system-test` is packed alongside `system` and `dummy-test`. `tau test` enables the
 loader’s `system-test` feature to choose the initial U-mode program.
 It uses the normal manifest/entry convention and supervisor. All host code lives
 in the separate `tau-tool` repository, keeping this workspace RISC-V-only.
@@ -52,12 +52,24 @@ fault, and `7` module invocation validation.
 | 3 | `timer` | Requested deadline, observed time; uses QEMU virt's 10 MHz timebase |
 | 5 | `invocation` | Two prepared dependency slots, rollback and warm checkpoints; verifies lazy construction, stable roots/ASIDs, private dependency caches and mappings retained across 128 calls, nested context paths sharing ELF globals, fresh entry registers, caller restoration, permissions, source unmapping, failed-construction/preparation rollback, and both switch policies |
 
-The invocation harness temporarily exhausts the ASID allocator and supplies
-an acyclic protected `A -> B` fixture binding. Loader dependency wiring is
-not implemented yet. Direct and nested B calls share module globals while using
-different retained roots. Dependency cycle validation belongs to the userspace
-loader at module installation and uninstallation.
 | 4 | `fault` | Fault address, zero; host validates S-mode trap entry instead of waiting for pass |
+| 6 | `graph` | Graph snapshot address and phase (0 prepared, 1 warm); prepares two applications with declared dependencies and a shared service with its own leaf, walks both paths repeatedly, checks separate instances and shared counters, verifies loader-only operations, exhausts binding slots, and checks failed-preparation rollback |
+
+The invocation payload prepares an acyclic `A -> B` binding through
+`Ubi::bind_dependency`; the host temporarily exhausts the ASID allocator to
+exercise construction rollback. Direct and nested B calls share module globals
+while using different retained roots. Dependency cycle validation belongs to
+the trusted userspace loader at module installation and uninstallation.
+
+The graph payload prepares four instances from `dummy-test` ELF bytes:
+`system-test -> A -> Service -> Leaf` and
+`system-test -> B -> Service -> Leaf`. A and B have independent globals;
+both paths reach the same service and leaf descriptors. It keeps the returned
+handles and local slots in a checkpoint snapshot. The host reads the protected
+bindings to verify those handles and checks shared ELF/table backing, separate
+private roots/stacks, retained roots, and allocator counts across 128 warm walks.
+No host writes are used to create graph bindings. Run `tau test graph` alone or
+include it in the full `tau test` suite.
 
 The fault scenario performs a load at the exported
 `tau_test_fault_instruction` label. The host checks load page fault cause `13`,

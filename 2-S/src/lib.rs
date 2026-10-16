@@ -33,3 +33,5 @@ pub mod state;
 
 /// Static image layout generated from modules.toml.
 pub mod layout;
+
+use self::module::PreparedModule;
