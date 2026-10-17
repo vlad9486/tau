@@ -99,7 +99,7 @@ extern "C" fn worker(_: usize, role: usize, _: usize, _: usize, _: usize, _: usi
     }
     DONE.store(role, SeqCst);
     Ubi::notify(pointer(0)).unwrap();
-    Ubi::exit([])
+    Ubi::exit()
 }
 
 // Exercise all register classes across several timer interrupts. Only t0 is a

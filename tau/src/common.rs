@@ -153,6 +153,12 @@ pub enum Call {
     /// and message. Never returns in the callee; the thread continues in its
     /// caller. Zero is success.
     Respond { code: u16 },
+    /// Wait on a reserved module-global slot: a1 = slot address, a2 = absolute
+    /// time-counter deadline (zero for none). Return status in a0, Event in a1.
+    Wait,
+    /// Notify a slot in the current module (a1 = slot address). Coalesces
+    /// readiness and schedules a parked client; the notifying thread continues.
+    Notify,
     /// Spawns a thread with its own context in the same ELF module.
     /// The new thread will run in the specified entry point with the given message.
     ///
@@ -161,12 +167,6 @@ pub enum Call {
     Spawn { entry: usize },
     /// Exit the current thread with the given message. Never returns, the thread cease to exist.
     Exit,
-    /// Blocks until the specified thread completes execution and returns a message.
-    /// No message required.
-    ///
-    /// # Parameters
-    /// - `thread_id`: The ID of the thread to wait.
-    Join { thread_id: u16 },
     /// Map the physical memory on the virtual address space of the thread.
     /// The message may provide a desired physical address or zero.
     /// If zero specified the system will allocate the physical address.
@@ -176,20 +176,14 @@ pub enum Call {
     /// Unmap the physical memory from the virtual address space of the thread.
     /// The message must provide the virtual address and the number of pages.
     Unmap,
-    /// Wait on a reserved module-global slot: a1 = slot address, a2 = absolute
-    /// time-counter deadline (zero for none). Return status in a0, Event in a1.
-    Wait,
-    /// Notify a slot in the current module (a1 = slot address). Coalesces
-    /// readiness and schedules a parked client; the notifying thread continues.
-    Notify,
-    /// Emit a diagnostic checkpoint through the supervisor console.
-    Debug,
     /// Loader-only: prepare an ELF image at (a1, a2) under parent handle a3.
     /// Return status in a0, a parent-local slot in a1, and the new handle in a2.
     PrepareModule,
     /// Loader-only: bind dependency handle a2 under parent handle a1.
     /// Return status in a0 and a fresh parent-local slot in a1.
     BindDependency,
+    /// Emit a diagnostic checkpoint through the supervisor console.
+    Debug,
 }
 
 impl Call {
@@ -202,16 +196,15 @@ impl Call {
                 ((arg as usize) << 16) + (((slot & 0xfff) as usize) << 4) + 0b0001
             }
             Self::Respond { code } => ((code as usize) << 16) + 0b0101,
-            Self::Spawn { entry } => entry,
-            Self::Exit => 0b1001,
-            Self::Join { thread_id } => ((thread_id as usize) << 16) + (1 << 4) + 0b1001,
-            Self::Map => (2 << 4) + 0b1001,
-            Self::Unmap => (3 << 4) + 0b1001,
-            Self::Debug => (5 << 4) + 0b1001,
             Self::Wait => (6 << 4) + 0b1001,
             Self::Notify => (7 << 4) + 0b1001,
+            Self::Spawn { entry } => entry,
+            Self::Exit => 0b1001,
+            Self::Map => (2 << 4) + 0b1001,
+            Self::Unmap => (3 << 4) + 0b1001,
             Self::PrepareModule => (8 << 4) + 0b1001,
             Self::BindDependency => (9 << 4) + 0b1001,
+            Self::Debug => (5 << 4) + 0b1001,
         }
     }
 
@@ -228,18 +221,14 @@ impl Call {
                 0b00 => Ok(Self::Invoke { slot: id, arg }),
                 0b01 if id == 0 => Ok(Self::Respond { code: arg }),
                 0b10 => match id {
-                    0 => Ok(Self::Exit),
-                    1 => {
-                        let thread_id = arg;
-                        Ok(Self::Join { thread_id })
-                    }
-                    2 => Ok(Self::Map),
-                    3 => Ok(Self::Unmap),
-                    5 => Ok(Self::Debug),
                     6 => Ok(Self::Wait),
                     7 => Ok(Self::Notify),
+                    0 => Ok(Self::Exit),
+                    2 => Ok(Self::Map),
+                    3 => Ok(Self::Unmap),
                     8 => Ok(Self::PrepareModule),
                     9 => Ok(Self::BindDependency),
+                    5 => Ok(Self::Debug),
                     _ => Err(a0),
                 },
                 _ => Err(a0),

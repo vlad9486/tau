@@ -28,7 +28,7 @@ use core::sync::atomic::Ordering;
 #[cfg(not(test))]
 #[panic_handler]
 fn panic_handler(_info: &core::panic::PanicInfo) -> ! {
-    tau::Ubi::exit([1]);
+    tau::Ubi::respond(1, []);
 }
 
 pub static WAIT_SLOTS: [tau::WaitSlot; 8] = [const { tau::WaitSlot::new() }; 8];

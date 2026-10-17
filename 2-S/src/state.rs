@@ -377,13 +377,7 @@ pub fn syscall(
         }
         // These calls need dispatch after all current-context borrows end.
         // The trap boundary handles them through scheduler before entering here.
-        Ok(
-            tau::Call::Spawn { .. }
-            | tau::Call::Exit
-            | tau::Call::Wait
-            | tau::Call::Notify
-            | tau::Call::Join { .. },
-        ) => {
+        Ok(tau::Call::Spawn { .. } | tau::Call::Exit | tau::Call::Wait | tau::Call::Notify) => {
             msg = [tau::WaitError::Unsupported as usize, 0, 0, 0, 0, 0];
         }
         Ok(tau::Call::Map) => {

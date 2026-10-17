@@ -29,7 +29,7 @@ static WAIT_READY: AtomicUsize = AtomicUsize::new(0);
 extern "C" fn notify_worker(_: usize, _: usize, _: usize, _: usize, _: usize, _: usize) -> ! {
     WAIT_READY.store(1, Ordering::SeqCst);
     tau::Ubi::notify(&WAIT_SLOTS[0]).unwrap();
-    tau::Ubi::exit([])
+    tau::Ubi::exit()
 }
 
 // BSS starts at zero and remains shared across separate invocations.

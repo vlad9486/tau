@@ -101,18 +101,9 @@ impl Ubi {
         }
     }
 
-    pub fn exit<const O: usize>(msg: [usize; O]) -> ! {
-        let (_, []) = ubi(Call::Exit, msg);
+    pub fn exit() -> ! {
+        let (_, []) = ubi(Call::Exit, []);
         unsafe { hint::unreachable_unchecked() }
-    }
-
-    pub fn join<const O: usize>(thread_id: u16) -> Result<[usize; O], NonZeroUsize> {
-        let (r0, msg) = ubi(Call::Join { thread_id }, []);
-        if let Some(error) = NonZeroUsize::new(r0) {
-            Err(error)
-        } else {
-            Ok(msg)
-        }
     }
 
     pub fn map(
