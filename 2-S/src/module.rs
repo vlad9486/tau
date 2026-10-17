@@ -66,14 +66,9 @@ impl ModuleContext {
     /// Set linkage and PC for a fresh invocation, retaining dependency roots.
     /// Saved registers remain stale until the next user trap; fresh entry must
     /// clear the hardware registers rather than restore this saved state.
-    /// # Safety
-    /// The initialized context must be exclusively writable at `this`.
-    pub unsafe fn enter_at(this: *mut Self, caller: vmem::Root) {
-        unsafe {
-            let entry = ptr::addr_of!((*this).entry).read();
-            ptr::addr_of_mut!((*this).sepc).write(entry);
-            ptr::addr_of_mut!((*this).caller).write(Some(caller));
-        }
+    pub fn enter(&mut self, caller: vmem::Root) {
+        self.sepc = self.entry;
+        self.caller = Some(caller);
     }
 
     pub fn dependency(&self, slot: u16) -> Option<vmem::Root> {

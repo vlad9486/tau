@@ -4,12 +4,23 @@
 //! Stable hart-local tags for retained roots. Successful contexts and their
 //! ASIDs live until shutdown; migration and thread teardown are still TODO.
 
-use core::arch;
+use core::{arch, ptr};
 
 use super::{
     asm,
+    module::{ModuleContext, ModuleTables},
+    scheduler::Thread,
     vmem::{Root, Window, WindowAccess},
 };
+
+/// Exclusive references to the active root's thread, context, and module pages.
+/// Moving this token into [`switch`] statically ends all borrows derived from
+/// these root-dependent mappings before `satp` changes.
+pub struct Local<'a> {
+    pub thread: &'a mut Thread,
+    pub module_context: &'a mut ModuleContext,
+    pub module: &'a mut ModuleTables,
+}
 
 #[repr(C)]
 pub(super) struct Hart {
@@ -70,11 +81,15 @@ pub fn allocate_tag(window: &mut WindowAccess) -> Option<u16> {
 }
 
 /// # Safety
-/// Both roots must share executing supervisor code, stack and hart mappings.
+/// Both roots must share executing supervisor code, stack and hart mappings,
+/// and `root` must map initialized thread, module-context, and module pages.
 /// All global mappings must have identical backing and permissions on this hart.
 /// Unique live ASIDs and ordered page-table publication are required without a fence.
 #[inline(always)]
-pub unsafe fn switch(root: Root, flush: bool) {
+pub unsafe fn switch<'a>(local: Local<'a>, root: Root, flush: bool) -> Local<'a> {
+    let thread = ptr::from_mut(local.thread);
+    let module_context = ptr::from_mut(local.module_context);
+    let module = ptr::from_mut(local.module);
     if flush {
         // Keep the write and fence together: no compiler-generated access to
         // context storage may slip between changing roots and invalidation.
@@ -92,6 +107,13 @@ pub unsafe fn switch(root: Root, flush: bool) {
     } else {
         unsafe {
             arch::asm!("csrw satp, {0}", in(reg) root.0.get(), options(nostack));
+        }
+    }
+    unsafe {
+        Local {
+            thread: &mut *thread,
+            module_context: &mut *module_context,
+            module: &mut *module,
         }
     }
 }

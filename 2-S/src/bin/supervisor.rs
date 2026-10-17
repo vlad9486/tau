@@ -33,10 +33,11 @@ unsafe extern "C" {
 
     // Per-hart sparse window and stack; pass its pointer without a whole borrow.
     static __WINDOW: vmem::Window;
+
     // Local thread metadata shared by this thread's module contexts; parent/child
     // lifetime information belongs here, without a separate thread collection.
     #[allow(improper_ctypes)]
-    static __THREAD: UnsafeCell<mem::MaybeUninit<scheduler::Thread>>;
+    static __THREAD: UnsafeCell<scheduler::Thread>;
     // Context-private root, dependency roots, and active invocation state.
     // Linker-provided Rust storage, not a foreign-language representation.
     #[allow(improper_ctypes)]
@@ -44,16 +45,30 @@ unsafe extern "C" {
     // Module-wide privileged tables shared across its contexts: synchronized
     // dependency stems/templates and validated wait-table metadata.
     static __MODULE: UnsafeCell<module::ModuleTables>;
+
     // System-wide scheduler backing, initialized before the first user entry.
     #[allow(improper_ctypes)]
-    static __SCHEDULER: UnsafeCell<mem::MaybeUninit<scheduler::Scheduler>>;
+    static __SCHEDULER: UnsafeCell<scheduler::Scheduler>;
     // System-wide physical-memory allocator metadata, shared between harts.
     static __ALLOCATOR: UnsafeCell<u8>;
-
     // System-wide allocator access and physical-memory base, initialized by the
     // boot hart. Despite its name, this is not a thread's module context.
     #[allow(improper_ctypes)]
-    static __CONTEXT: UnsafeCell<mem::MaybeUninit<state::Context>>;
+    static __CONTEXT: UnsafeCell<state::Context>;
+}
+
+/// # Safety
+/// The current root's thread, module-context, and module pages must be mapped
+/// and initialized, and no other references to them may exist on this hart.
+#[inline(always)]
+unsafe fn local_access<'a>() -> mmu::Local<'a> {
+    unsafe {
+        mmu::Local {
+            thread: &mut *UnsafeCell::raw_get(&raw const __THREAD),
+            module_context: &mut *UnsafeCell::raw_get(&raw const __MODULE_CONTEXT),
+            module: &mut *UnsafeCell::raw_get(&raw const __MODULE),
+        }
+    }
 }
 
 #[unsafe(link_section = ".text.init")]
@@ -84,7 +99,7 @@ extern "C" fn init(
     let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
     let module = UnsafeCell::raw_get(&raw const __MODULE_CONTEXT);
     let tables = UnsafeCell::raw_get(&raw const __MODULE);
-    let scheduler = UnsafeCell::raw_get(&raw const __SCHEDULER).cast::<scheduler::Scheduler>();
+    let scheduler = UnsafeCell::raw_get(&raw const __SCHEDULER);
 
     // `cores != 0` means this is first run on the bootstrap core
     // otherwise this is additional core bring up
@@ -103,13 +118,11 @@ extern "C" fn init(
         };
 
         unsafe {
-            UnsafeCell::raw_get(&raw const __CONTEXT).write(mem::MaybeUninit::new(
-                state::Context {
-                    allocator,
-                    base_addr,
-                    bootstrap_root: vmem::Window::current_root(),
-                },
-            ));
+            UnsafeCell::raw_get(&raw const __CONTEXT).write(state::Context {
+                allocator,
+                base_addr,
+                bootstrap_root: vmem::Window::current_root(),
+            });
         }
         unsafe { mmu::init(&mut window) };
         writeln!(
@@ -120,16 +133,19 @@ extern "C" fn init(
         )
         .unwrap_or_default();
     }
-    let thread = unsafe { &mut *UnsafeCell::raw_get(&raw const __THREAD) };
-    let thread = &*thread.write(scheduler::Thread::new(
-        hart_id,
-        1,
-        vmem::Window::current_root(),
-        [0; 6],
-        scheduler::ReturnKind::Syscall,
-    ));
+    let thread = UnsafeCell::raw_get(&raw const __THREAD);
+    unsafe {
+        thread.write(scheduler::Thread::new(
+            hart_id,
+            1,
+            vmem::Window::current_root(),
+            [0; 6],
+            scheduler::ReturnKind::Syscall,
+        ));
+    }
+    let thread = unsafe { &*thread };
 
-    let context = unsafe { (*UnsafeCell::raw_get(&raw const __CONTEXT)).assume_init_ref() };
+    let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
     match unsafe { state::init(&mut window, thread, module, tables, scheduler, context) } {
         Ok((satp, sepc)) => unsafe {
             arch::asm! {
@@ -312,60 +328,58 @@ extern "C" fn handle_syscall() -> ! {
 }
 
 extern "C" fn handle_non_syscall_trap(cause: isize) -> ! {
-    let scheduler = unsafe { (*UnsafeCell::raw_get(&raw const __SCHEDULER)).assume_init_ref() };
+    let local = unsafe { local_access() };
+    let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
     if cause as usize == (1usize << 63) | 5 && scheduler.active() {
         let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
         let selected = scheduler::preempt(&mut window, scheduler);
-        resume_scheduled(&window, selected)
+        resume_scheduled(&window, local, selected)
     }
-    let thread = unsafe { (&*UnsafeCell::raw_get(&raw const __THREAD)).assume_init_ref() };
-    state::handle_non_syscall_trap(cause, thread);
+    state::handle_non_syscall_trap(cause, local.thread);
     resume_after_interrupt()
 }
 
 extern "C" fn respond(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
     let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
-    let module = unsafe { &mut *UnsafeCell::raw_get(&raw const __MODULE_CONTEXT) };
-    let scheduler = unsafe { (*UnsafeCell::raw_get(&raw const __SCHEDULER)).assume_init_ref() };
+    let local = unsafe { local_access() };
+    let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
 
     let Ok(tau::Call::Respond { code }) = tau::Call::decode(a0) else {
         unsafe { hint::unreachable_unchecked() };
     };
-    if let Some(caller) = module.take_caller() {
-        let flush = mmu::switch_flush(&window, module.root, caller);
-        unsafe { mmu::switch(caller, flush) };
+    if let Some(caller) = local.module_context.take_caller() {
+        let flush = mmu::switch_flush(&window, local.module_context.root, caller);
+        let _local = unsafe { mmu::switch(local, caller, flush) };
 
         restore_syscall(code as _, a1, a2, a3, a4, a5)
     } else {
-        respond_exit(&mut window, scheduler)
+        respond_exit(&mut window, local, scheduler)
     }
 }
 
 #[cold]
 #[inline(never)]
-fn respond_exit(window: &mut vmem::WindowAccess, scheduler: &scheduler::Scheduler) -> ! {
+fn respond_exit(
+    window: &mut vmem::WindowAccess,
+    local: mmu::Local<'_>,
+    scheduler: &scheduler::Scheduler,
+) -> ! {
     scheduler::exit(window, scheduler);
     let selected = scheduler::dispatch(window, scheduler);
-    resume_scheduled(window, selected)
+    resume_scheduled(window, local, selected)
 }
 
 extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
     if let Ok(tau::Call::Invoke { slot, arg }) = tau::Call::decode(a0) {
         let window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
-        let module_context = unsafe { &mut *UnsafeCell::raw_get(&raw const __MODULE_CONTEXT) };
-        if let Some(root) = module_context.dependency(slot) {
-            let caller = module_context.root;
+        let local = unsafe { local_access() };
+        if let Some(root) = local.module_context.dependency(slot) {
+            let caller = local.module_context.root;
             let flush = mmu::switch_flush(&window, caller, root);
             // The per-hart window/stack and global supervisor code retain the same
-            // backing in both roots. No context/module reference is used past here.
-            unsafe { mmu::switch(root, flush) };
-            // Form a new pointer after the switch: this VA now names the callee.
-            unsafe {
-                module::ModuleContext::enter_at(
-                    UnsafeCell::raw_get(&raw const __MODULE_CONTEXT),
-                    caller,
-                )
-            };
+            // backing in both roots. Moving `local` ends all pre-switch borrows.
+            let local = unsafe { mmu::switch(local, root, flush) };
+            local.module_context.enter(caller);
             enter_invocation(arg as usize, a1, a2, a3, a4, a5)
         }
     }
@@ -383,39 +397,32 @@ extern "C" fn syscall_slow(
     a5: usize,
 ) -> ! {
     let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
-    let thread = unsafe { (&*UnsafeCell::raw_get(&raw const __THREAD)).assume_init_ref() };
-    let module = unsafe { &mut *UnsafeCell::raw_get(&raw const __MODULE) };
+    let local = unsafe { local_access() };
     if matches!(
         tau::Call::decode(a0),
         Ok(tau::Call::Spawn { .. } | tau::Call::Exit | tau::Call::Wait | tau::Call::Notify)
     ) {
-        scheduled_syscall(&mut window, thread, module, [a0, a1, a2, a3, a4, a5]);
+        scheduled_syscall(&mut window, local, [a0, a1, a2, a3, a4, a5]);
     }
-    let context = unsafe { (*UnsafeCell::raw_get(&raw const __CONTEXT)).assume_init_ref() };
-    let module_context = unsafe { &mut *UnsafeCell::raw_get(&raw const __MODULE_CONTEXT) };
-    let scheduler = unsafe { (*UnsafeCell::raw_get(&raw const __SCHEDULER)).assume_init_ref() };
+    let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
+    let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
+    let current_root = local.module_context.root;
     let outcome = state::syscall(
         &mut window,
-        thread,
-        module_context,
-        module,
+        local.thread,
+        local.module_context,
+        local.module,
         scheduler,
         context,
         [a0, a1, a2, a3, a4, a5],
     );
     if let Some(root) = outcome.root {
-        let flush = mmu::switch_flush(&window, module_context.root, root);
+        let flush = mmu::switch_flush(&window, current_root, root);
         // The per-hart window/stack and global supervisor code retain the same
-        // backing in both roots. No context/module reference is used past here.
-        unsafe { mmu::switch(root, flush) };
+        // backing in both roots. Moving `local` ends all pre-switch borrows.
+        let local = unsafe { mmu::switch(local, root, flush) };
         if let Some(caller) = outcome.enter_from {
-            // Form a new pointer after the switch: this VA now names the callee.
-            unsafe {
-                module::ModuleContext::enter_at(
-                    UnsafeCell::raw_get(&raw const __MODULE_CONTEXT),
-                    caller,
-                )
-            };
+            local.module_context.enter(caller);
             let [a0, a1, a2, a3, a4, a5] = outcome.message;
             enter_invocation(a0, a1, a2, a3, a4, a5)
         }
@@ -428,40 +435,48 @@ extern "C" fn syscall_slow(
 #[inline(never)]
 fn scheduled_syscall(
     window: &mut vmem::WindowAccess,
-    thread: &scheduler::Thread,
-    module: &module::ModuleTables,
+    local: mmu::Local<'_>,
     message: [usize; 6],
 ) -> ! {
-    let context = unsafe { (*UnsafeCell::raw_get(&raw const __CONTEXT)).assume_init_ref() };
-    let scheduler = unsafe { (*UnsafeCell::raw_get(&raw const __SCHEDULER)).assume_init_ref() };
+    let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
+    let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
     let mut result = [0; 6];
     match tau::Call::decode(message[0]) {
         Ok(tau::Call::Spawn { entry }) => {
-            match scheduler::spawn(window, thread, module, context, scheduler, entry, message) {
+            match scheduler::spawn(
+                window,
+                local.thread,
+                local.module,
+                context,
+                scheduler,
+                entry,
+                message,
+            ) {
                 Ok(id) => result[1] = id as usize,
                 Err(error) => result[0] = error as usize,
             }
         }
         Ok(tau::Call::Wait) => {
-            match scheduler::wait(window, module, scheduler, message[1], message[2]) {
+            match scheduler::wait(window, local.module, scheduler, message[1], message[2]) {
                 Ok(Some(event)) => result[1] = event.encode(),
                 Ok(None) => {
                     let selected = scheduler::dispatch(window, scheduler);
-                    resume_scheduled(window, selected)
+                    resume_scheduled(window, local, selected)
                 }
                 Err(error) => result[0] = error as usize,
             }
         }
         Ok(tau::Call::Notify) => {
-            if let Err(error) = scheduler::notify(window, scheduler, module.wait_table, message[1])
+            if let Err(error) =
+                scheduler::notify(window, scheduler, local.module.wait_table, message[1])
             {
                 result[0] = error as usize;
             }
         }
         Ok(tau::Call::Exit) => {
             scheduler::exit(window, scheduler);
-            let selected = scheduler::dispatch(window, &scheduler);
-            resume_scheduled(window, selected)
+            let selected = scheduler::dispatch(window, scheduler);
+            resume_scheduled(window, local, selected)
         }
         _ => {
             result[0] = tau::WaitError::Unsupported as usize;
@@ -471,12 +486,18 @@ fn scheduled_syscall(
     restore_syscall(a0, a1, a2, a3, a4, a5)
 }
 
-fn resume_scheduled(window: &vmem::WindowAccess, selected: scheduler::Dispatch) -> ! {
+fn resume_scheduled(
+    window: &vmem::WindowAccess,
+    local: mmu::Local<'_>,
+    selected: scheduler::Dispatch,
+) -> ! {
     let source = vmem::Window::current_root();
-    if source != selected.root {
+    let _local = if source != selected.root {
         let flush = mmu::switch_flush(window, source, selected.root);
-        unsafe { mmu::switch(selected.root, flush) };
-    }
+        unsafe { mmu::switch(local, selected.root, flush) }
+    } else {
+        local
+    };
     // The idle path and timer entry both return to U-mode with interrupts on.
     supervisor::cpu::csrrc!("sstatus", 1 << 8);
     supervisor::cpu::csrrs!("sstatus", 1 << 5);
