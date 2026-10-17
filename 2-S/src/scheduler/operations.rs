@@ -7,7 +7,8 @@
 use tau::{Event, SpawnError, WaitError};
 
 use super::{
-    ActiveWait, Context, Phase, Resume, Thread, invariant_failed, Scheduler, now, loading,
+    thread::{ActiveWait, Phase, Resume},
+    runtime, Context, Thread, Scheduler, loading,
     vmem::{self, Window, WindowAccess},
     module::ModuleTables,
     waiting::WaitTable,
@@ -31,7 +32,7 @@ pub fn spawn(
     *scheduler
         .registry
         .get_mut(id - 1)
-        .unwrap_or_else(|| invariant_failed()) = physical;
+        .unwrap_or_else(|| runtime::invariant_failed()) = physical;
     scheduler.count = id;
     scheduler.enqueue(id);
     scheduler.enable();
@@ -62,7 +63,7 @@ pub fn wait(
         unsafe { table.write(window, index, slot) };
         return Ok(Some(Event::Notified { arg: 0 }));
     }
-    if deadline != 0 && deadline <= now() {
+    if deadline != 0 && deadline <= runtime::now() {
         return Ok(Some(Event::Timeout));
     }
     let module = window

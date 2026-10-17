@@ -32,6 +32,7 @@ unsafe extern "C" {
     // the physical pages mapped there, not by these external static declarations.
 
     // Per-hart sparse window and stack; pass its pointer without a whole borrow.
+    #[allow(improper_ctypes)]
     static __WINDOW: vmem::Window;
 
     // Local thread metadata shared by this thread's module contexts; parent/child
@@ -56,6 +57,8 @@ unsafe extern "C" {
     #[allow(improper_ctypes)]
     static __CONTEXT: UnsafeCell<state::Context>;
 }
+
+pub const WINDOW_END: usize = 0xffff_ffc0_0020_0000;
 
 /// # Safety
 /// The current root's thread, module-context, and module pages must be mapped
@@ -84,7 +87,7 @@ extern "C" fn _start() -> ! {
         "j {init}",
         trap_entry = sym trap_entry,
         init = sym init,
-        stack = const { vmem::WINDOW_END },
+        stack = const { WINDOW_END },
     }
 }
 
@@ -260,7 +263,7 @@ extern "C" fn trap_entry() -> ! {
         t6  = const { mem::offset_of!(module::ModuleContext, registers) + 0o370 },
         pc = const { mem::offset_of!(module::ModuleContext, sepc) },
 
-        stack = const { vmem::WINDOW_END },
+        stack = const { WINDOW_END },
         handle_syscall = sym handle_syscall,
         non_syscall_trap = sym handle_non_syscall_trap,
     }
@@ -321,7 +324,7 @@ extern "C" fn handle_syscall() -> ! {
         s10 = const { mem::offset_of!(module::ModuleContext, registers) + 0o320 },
         s11 = const { mem::offset_of!(module::ModuleContext, registers) + 0o330 },
 
-        stack = const { vmem::WINDOW_END },
+        stack = const { WINDOW_END },
         respond = sym respond,
         syscall = sym syscall,
     }
@@ -388,14 +391,7 @@ extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5:
 
 #[cold]
 #[inline(never)]
-extern "C" fn syscall_slow(
-    a0: usize,
-    a1: usize,
-    a2: usize,
-    a3: usize,
-    a4: usize,
-    a5: usize,
-) -> ! {
+extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
     let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
     let local = unsafe { local_access() };
     if matches!(

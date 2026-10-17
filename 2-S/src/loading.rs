@@ -252,7 +252,7 @@ pub fn prepare(
     let mut wait_table = WaitTable::EMPTY;
     let result = (|| {
         let snapshot = context.block(hart, order).map_err(memory)?;
-        let data = window.block(snapshot, 1 << order);
+        let data = window.map_snapshot(snapshot, 1 << order);
         let bytes = unsafe { slice::from_raw_parts_mut(data, length) };
         let loaded = window
             .copy_user(Window::current_root(), address, bytes)
@@ -269,9 +269,7 @@ pub fn prepare(
                 return Err(memory(e));
             }
         };
-        let pointer = window
-            .block(module_tables, 1 << TABLE_ORDER)
-            .cast::<ModuleTables>();
+        let pointer = window.map_module_tables(module_tables);
         unsafe {
             ModuleTables::init_at(pointer, false);
             ptr::addr_of_mut!((*pointer).wait_table).write(wait_table);
@@ -279,12 +277,7 @@ pub fn prepare(
             ptr::addr_of_mut!((*pointer).stack_pages).write(dep.stack_pages);
         };
         dep.tables = module_tables;
-        unsafe {
-            window
-                .page_pointer(descriptor)
-                .cast::<PreparedModule>()
-                .write(dep)
-        };
+        window.write_descriptor(descriptor, dep);
         if let Some(slot) = insert_dependency(window, tables, parent_tables, descriptor) {
             // Publish newly copied executable bytes on this hart once.
             unsafe {
@@ -334,12 +327,7 @@ fn parent_tables(
         return Ok(None);
     }
     let descriptor = descriptor_page(context, parent)?;
-    let module = unsafe {
-        window
-            .page_pointer(descriptor)
-            .cast::<PreparedModule>()
-            .read()
-    };
+    let module = window.read_descriptor(descriptor);
     Ok(Some(module.tables))
 }
 
@@ -354,7 +342,7 @@ fn insert_dependency(
         Some(physical) => {
             // Alias only at publication, after snapshot/construction aliases
             // have expired. No window remapping may occur while borrowed.
-            let pointer = window.block(physical, TABLE_PAGES).cast::<ModuleTables>();
+            let pointer = window.map_module_tables(physical);
             unsafe { &*pointer }.insert_dependency(descriptor)
         }
     }
@@ -416,12 +404,7 @@ fn construct(
     descriptor: usize,
 ) -> Result<Root, ModuleError> {
     let hart = thread.hart_id();
-    let dep = unsafe {
-        window
-            .page_pointer(descriptor)
-            .cast::<PreparedModule>()
-            .read()
-    };
+    let dep = window.read_descriptor(descriptor);
     let root = window.create(0, || context.page(hart)).map_err(memory)?;
     let result = (|| {
         window.attach(root, dep.root_index, dep.stem);
@@ -464,12 +447,12 @@ fn construct(
                 .map_err(memory)?;
         }
         let private = window
-            .mapped_block(root, vmem::MODULE_CONTEXT, CONTEXT_PAGES)
+            .map_module_context(root)
             .ok_or(ModuleError::InvalidImage)?;
         let tag = mmu::allocate_tag(window).ok_or(ModuleError::OutOfMemory)?;
         let root = Root::sv39(root.page(), tag);
         unsafe {
-            ModuleContext::init_at(private.cast(), root, dep.entry, dep.root_index);
+            ModuleContext::init_at(private, root, dep.entry, dep.root_index);
             // All registers start at zero, including sp (top of high stack).
         }
         Ok(root)
@@ -552,9 +535,8 @@ pub fn spawn(
                 .map_err(memory)?;
         }
         let private = window
-            .mapped_block(root, vmem::MODULE_CONTEXT, CONTEXT_PAGES)
-            .ok_or(SpawnError::OutOfMemory)?
-            .cast::<ModuleContext>();
+            .map_module_context(root)
+            .ok_or(SpawnError::OutOfMemory)?;
         let tag = mmu::allocate_tag(window).ok_or(SpawnError::OutOfMemory)?;
         let root = Root::sv39(root.page(), tag);
         unsafe {
@@ -562,12 +544,8 @@ pub fn spawn(
             ptr::addr_of_mut!((*private).sepc).write(entry);
         }
         message[0] = 0;
-        unsafe {
-            window
-                .page_pointer(thread_page)
-                .cast::<Thread>()
-                .write(Thread::new(hart, id, root, message, ReturnKind::Entry))
-        };
+        let thread = Thread::new(hart, id, root, message, ReturnKind::Entry);
+        unsafe { window.thread_mut(thread_page).write(thread) };
         Ok(thread_page)
     })();
     if result.is_err() {

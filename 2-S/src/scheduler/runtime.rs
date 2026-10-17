@@ -13,7 +13,8 @@ use core::{
 use tau::Event;
 
 use super::{
-    ActiveWait, Context, Phase, Resume, Thread, cpu, sbi,
+    thread::{ActiveWait, Phase, Resume},
+    Context, Thread, cpu, sbi,
     vmem::{self, Mapping, Root, Window, WindowAccess},
 };
 

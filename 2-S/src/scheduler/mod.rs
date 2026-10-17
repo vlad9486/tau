@@ -12,7 +12,5 @@ mod runtime;
 mod operations;
 
 pub use self::thread::{Thread, Resume as ReturnKind};
-use self::thread::{ActiveWait, Phase, Resume};
-use self::runtime::{now, invariant_failed};
 pub use self::runtime::{Scheduler, Dispatch, preempt, dispatch};
 pub use self::operations::{spawn, wait, notify, exit};

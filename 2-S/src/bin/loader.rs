@@ -284,7 +284,7 @@ fn init_memory(
 
     // STATUS: size of the kernel stack is 1 page, increase if needed
     let stack = gfp();
-    l2[0o777] = (stack.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
+    l2[vmem::STACK_SLOT] = (stack.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
 
     let l2 = gfp();
     // the branch of the thread context

@@ -121,7 +121,7 @@ impl WaitTable {
         }
         let byte = unsafe {
             &*window
-                .page_pointer(physical & !(PAGE - 1))
+                .wait_pointer(physical & !(PAGE - 1))
                 .add(physical & (PAGE - 1))
                 .cast::<AtomicU8>()
         }
@@ -143,7 +143,7 @@ impl WaitTable {
         let address = self.records + index * size_of::<WaitRecord>();
         unsafe {
             window
-                .page_pointer(address & !(PAGE - 1))
+                .wait_pointer(address & !(PAGE - 1))
                 .add(address & (PAGE - 1))
                 .cast::<WaitRecord>()
                 .read()
@@ -160,7 +160,7 @@ impl WaitTable {
         let address = self.records + index * size_of::<WaitRecord>();
         unsafe {
             window
-                .page_pointer(address & !(PAGE - 1))
+                .wait_pointer(address & !(PAGE - 1))
                 .add(address & (PAGE - 1))
                 .cast::<WaitRecord>()
                 .write(record)

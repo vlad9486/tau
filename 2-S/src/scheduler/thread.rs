@@ -112,7 +112,7 @@ impl Thread {
         window: &mut super::vmem::WindowAccess,
         physical: usize,
     ) -> ThreadState {
-        unsafe { (*window.page_pointer(physical).cast::<Self>()).state }
+        unsafe { (*window.thread(physical)).state }
     }
 
     pub(super) unsafe fn write(
@@ -120,6 +120,6 @@ impl Thread {
         physical: usize,
         state: ThreadState,
     ) {
-        unsafe { (*window.page_pointer(physical).cast::<Self>()).state = state };
+        unsafe { (*window.thread_mut(physical)).state = state };
     }
 }

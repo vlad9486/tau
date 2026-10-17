@@ -9,11 +9,15 @@ use core::{
     ptr,
 };
 
-use super::{asm, cpu, llfree, mmu::Hart};
+use super::{
+    asm, cpu, llfree,
+    mmu::Hart,
+    module::{PreparedModule, ModuleContext, ModuleTables, CONTEXT_PAGES, TABLE_PAGES},
+    scheduler::Thread,
+};
 
 pub const SV39: usize = 8;
 pub const PAGE: usize = 4096;
-pub const WINDOW_END: usize = 0xffff_ffc0_0020_0000;
 pub const SCHEDULER: usize = 0xffff_ffc0_0040_0000;
 pub const THREAD: usize = 0xffff_ffc0_0020_0000;
 pub const MODULE_CONTEXT: usize = 0xffff_ffc0_0021_0000;
@@ -81,24 +85,60 @@ fn branch(page: usize) -> usize {
     (page >> 2) | 1
 }
 
+#[repr(C, align(4096))]
+pub struct Page([u8; PAGE]);
+
+#[repr(C, align(4096))]
+pub struct Padded<T> {
+    pub inner: T,
+}
+
 /// Linker-provided layout of the 2 MiB hart-local window. The first page maps
 /// itself, slot 6 holds MMU state, and slot 511 is the supervisor stack.
 /// Reserved bytes may be unmapped or temporarily aliased; never borrow or copy
 /// the whole structure. Access only mapped fields or use `WindowAccess`.
 #[repr(C)]
+#[rustfmt::skip]
 pub struct Window {
-    table: UnsafeCell<[usize; 512]>,
-    _before_hart: UnsafeCell<[MaybeUninit<u8>; 5 * PAGE]>,
-    pub(super) hart: UnsafeCell<Hart>,
-    _after_hart: UnsafeCell<[MaybeUninit<u8>; 505 * PAGE - size_of::<Hart>()]>,
-    stack: UnsafeCell<[MaybeUninit<u8>; PAGE]>,
+    table: UnsafeCell<[usize; 512]>,                                 // 1 page  (slot 0: recursive L2)
+    pte: UnsafeCell<[usize; 512]>,                                   // 1 page  (slot 1: page-table walk)
+    page: UnsafeCell<MaybeUninit<Page>>,                             // 1 page  (slot 2: zeroing / segment copy)
+    user: UnsafeCell<MaybeUninit<Page>>,                             // 1 page  (slot 3: copy_user)
+    descriptor: UnsafeCell<MaybeUninit<Padded<PreparedModule>>>,     // 1 page  (slot 4: module descriptor)
+    wait: UnsafeCell<MaybeUninit<Page>>,                             // 1 page  (slot 5: WaitRecord / wait slot)
+    pub(super) hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,          // 1 page  (slot 6: permanent per-hart MMU)
+    thread: UnsafeCell<MaybeUninit<Padded<Thread>>>,                 // 1 page  (slot 7: foreign Thread)
+    module_context: UnsafeCell<MaybeUninit<Padded<ModuleContext>>>,  // 5 pages (slots 8..13: foreign ModuleContext)
+    module: UnsafeCell<MaybeUninit<Padded<ModuleTables>>>,           // 5 pages (slots 13..18: foreign ModuleTables)
+    snapshot: UnsafeCell<MaybeUninit<[Page; 256]>>,                  // 256 pages (1 MiB ELF snapshot in prepare)
+    _reserved: UnsafeCell<MaybeUninit<[Page; 237]>>,                 // unused window slots
+    stack: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 511: supervisor stack)
 }
 
+const PTE_SLOT: usize = mem::offset_of!(Window, pte) / PAGE;
+const PAGE_SLOT: usize = mem::offset_of!(Window, page) / PAGE;
+const USER_SLOT: usize = mem::offset_of!(Window, user) / PAGE;
+const DESCRIPTOR_SLOT: usize = mem::offset_of!(Window, descriptor) / PAGE;
+const WAIT_SLOT: usize = mem::offset_of!(Window, wait) / PAGE;
 pub const HART_SLOT: usize = mem::offset_of!(Window, hart) / PAGE;
+const THREAD_SLOT: usize = mem::offset_of!(Window, thread) / PAGE;
+const MODULE_CONTEXT_SLOT: usize = mem::offset_of!(Window, module_context) / PAGE;
+const MODULE_SLOT: usize = mem::offset_of!(Window, module) / PAGE;
+const SNAPSHOT_SLOT: usize = mem::offset_of!(Window, snapshot) / PAGE;
+pub const STACK_SLOT: usize = mem::offset_of!(Window, stack) / PAGE;
 
 const _: () = {
-    assert!(mem::offset_of!(Window, hart) == 6 * PAGE);
-    assert!(mem::offset_of!(Window, stack) == 511 * PAGE);
+    assert!(PTE_SLOT == 1);
+    assert!(PAGE_SLOT == 2);
+    assert!(USER_SLOT == 3);
+    assert!(DESCRIPTOR_SLOT == 4);
+    assert!(WAIT_SLOT == 5);
+    assert!(HART_SLOT == 6);
+    assert!(THREAD_SLOT == 7);
+    assert!(MODULE_CONTEXT_SLOT == 8);
+    assert!(MODULE_SLOT == 13);
+    assert!(SNAPSHOT_SLOT == 18);
+    assert!(STACK_SLOT == 511);
     assert!(size_of::<Window>() == 512 * PAGE);
 };
 
@@ -127,11 +167,19 @@ impl WindowAccess {
     }
 
     pub(super) fn hart(&self) -> &Hart {
-        unsafe { &*UnsafeCell::raw_get(&raw const (*self.base).hart) }
+        unsafe {
+            &(&*UnsafeCell::raw_get(&raw const (*self.base).hart))
+                .assume_init_ref()
+                .inner
+        }
     }
 
     pub(super) fn hart_mut(&mut self) -> &mut Hart {
-        unsafe { &mut *UnsafeCell::raw_get(&raw const (*self.base).hart) }
+        unsafe {
+            &mut (&mut *UnsafeCell::raw_get(&raw const (*self.base).hart))
+                .assume_init_mut()
+                .inner
+        }
     }
 
     fn alias(&mut self, slot: usize, physical: usize) -> *mut u8 {
@@ -147,20 +195,20 @@ impl WindowAccess {
         target
     }
 
-    pub fn read_pte(&mut self, table: usize, index: usize) -> usize {
+    fn read_pte(&mut self, table: usize, index: usize) -> usize {
         debug_assert!(index < 512);
         unsafe {
-            self.alias(2, table)
+            self.alias(PTE_SLOT, table)
                 .cast::<usize>()
                 .add(index)
                 .read_volatile()
         }
     }
 
-    pub fn write_pte(&mut self, table: usize, index: usize, pte: usize) {
+    fn write_pte(&mut self, table: usize, index: usize, pte: usize) {
         debug_assert!(index < 512);
         unsafe {
-            self.alias(2, table)
+            self.alias(PTE_SLOT, table)
                 .cast::<usize>()
                 .add(index)
                 .write_volatile(pte)
@@ -184,29 +232,70 @@ impl WindowAccess {
         Ok(Root::sv39(self.new_page(page)?, asid))
     }
 
-    /// An alias for a contiguous allocator block. Only construction code may
-    /// use this pointer; it must not survive another alias of slots 16..510.
-    pub fn block(&mut self, physical: usize, pages: usize) -> *mut u8 {
-        debug_assert!(pages > 0 && pages <= 495);
-        for i in 0..pages {
-            self.alias(16 + i, physical + i * PAGE);
-        }
-        self.base.cast::<u8>().wrapping_add(16 * PAGE).cast_mut()
-    }
-
     pub fn page_pointer(&mut self, physical: usize) -> *mut u8 {
-        self.alias(3, physical)
+        self.alias(PAGE_SLOT, physical)
     }
 
-    /// Alias a root-local range whose backing pages need not be contiguous.
-    /// The pointer expires when slots 16..510 are aliased again.
-    pub fn mapped_block(&mut self, root: Root, address: usize, pages: usize) -> Option<*mut u8> {
-        debug_assert!(pages > 0 && pages <= 495 && address & 0xfff == 0);
-        for i in 0..pages {
-            let (physical, _) = self.resolve(root, address + i * PAGE)?;
-            self.alias(16 + i, physical);
+    pub fn read_descriptor(&mut self, physical: usize) -> PreparedModule {
+        let ptr = self
+            .alias(DESCRIPTOR_SLOT, physical)
+            .cast::<PreparedModule>();
+        unsafe { ptr.read() }
+    }
+
+    pub fn write_descriptor(&mut self, physical: usize, descriptor: PreparedModule) {
+        let ptr = self
+            .alias(DESCRIPTOR_SLOT, physical)
+            .cast::<PreparedModule>();
+        unsafe { ptr.write(descriptor) };
+    }
+
+    pub fn wait_pointer(&mut self, physical: usize) -> *mut u8 {
+        self.alias(WAIT_SLOT, physical)
+    }
+
+    pub fn thread(&mut self, physical: usize) -> *const Thread {
+        self.alias(THREAD_SLOT, physical).cast()
+    }
+
+    pub fn thread_mut(&mut self, physical: usize) -> *mut Thread {
+        self.alias(THREAD_SLOT, physical).cast()
+    }
+
+    pub fn map_module_context(&mut self, root: Root) -> Option<*mut ModuleContext> {
+        for i in 0..CONTEXT_PAGES {
+            let (physical, _) = self.resolve(root, MODULE_CONTEXT + i * PAGE)?;
+            self.alias(MODULE_CONTEXT_SLOT + i, physical);
         }
-        Some(self.base.cast::<u8>().wrapping_add(16 * PAGE).cast_mut())
+        Some(
+            self.base
+                .cast::<u8>()
+                .wrapping_add(MODULE_CONTEXT_SLOT * PAGE)
+                .cast_mut()
+                .cast(),
+        )
+    }
+
+    pub fn map_module_tables(&mut self, physical: usize) -> *mut ModuleTables {
+        for i in 0..TABLE_PAGES {
+            self.alias(MODULE_SLOT + i, physical + i * PAGE);
+        }
+        self.base
+            .cast::<u8>()
+            .wrapping_add(MODULE_SLOT * PAGE)
+            .cast_mut()
+            .cast()
+    }
+
+    pub fn map_snapshot(&mut self, physical: usize, pages: usize) -> *mut u8 {
+        debug_assert!(pages > 0 && pages <= 256);
+        for i in 0..pages {
+            self.alias(SNAPSHOT_SLOT + i, physical + i * PAGE);
+        }
+        self.base
+            .cast::<u8>()
+            .wrapping_add(SNAPSHOT_SLOT * PAGE)
+            .cast_mut()
     }
 
     pub fn root_branch(&mut self, root: Root, index: usize) -> Option<usize> {
@@ -327,7 +416,7 @@ impl WindowAccess {
             }
             let offset = physical & 0xfff;
             let count = (PAGE - offset).min(destination.len() - done);
-            let source = self.alias(4, physical & !0xfff);
+            let source = self.alias(USER_SLOT, physical & !0xfff);
             unsafe {
                 ptr::copy_nonoverlapping(
                     source.add(offset),
