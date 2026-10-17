@@ -35,8 +35,7 @@ static MANIFEST: tau::Manifest = tau::Manifest {
         version: (0, 1),
         name: *b"system\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
     },
-    wait_slots_base: core::ptr::null(),
-    wait_slots_count: 0,
+    wait_slots: &[],
     entry: main,
     dependencies: &[tau::ModuleId {
         version: (0, 1),

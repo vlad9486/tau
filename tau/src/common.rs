@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{fmt, num::NonZeroUsize};
+use core::{fmt, num::NonZeroUsize, sync::atomic::AtomicBool, mem};
 
 #[repr(C)]
 pub struct Manifest {
@@ -10,8 +10,7 @@ pub struct Manifest {
     pub entry: Entry,
     pub dependencies: &'static [ModuleId],
     pub mapped_regions: &'static [MappedRegion],
-    pub wait_slots_base: *const WaitSlot,
-    pub wait_slots_count: usize,
+    pub wait_slots: &'static [WaitSlot],
 }
 
 // The manifest is immutable image metadata. Its raw address is validated by the
@@ -22,14 +21,14 @@ unsafe impl Sync for Manifest {}
 #[repr(C, align(64))]
 pub struct WaitSlot {
     pub user_data: [u8; 63],
-    pub occupied: core::sync::atomic::AtomicBool,
+    pub occupied: AtomicBool,
 }
 
 impl WaitSlot {
     pub const fn new() -> Self {
         Self {
             user_data: [0; 63],
-            occupied: core::sync::atomic::AtomicBool::new(false),
+            occupied: AtomicBool::new(false),
         }
     }
 }
@@ -42,7 +41,7 @@ impl Default for WaitSlot {
 
 const _: () = {
     assert!(size_of::<WaitSlot>() == 64);
-    assert!(core::mem::offset_of!(WaitSlot, occupied) == 63);
+    assert!(mem::offset_of!(WaitSlot, occupied) == 63);
 };
 
 #[repr(usize)]

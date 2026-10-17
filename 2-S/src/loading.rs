@@ -206,15 +206,12 @@ fn load_elf(
         return Err(ModuleError::InvalidImage);
     }
     let root_index = root_index.ok_or(ModuleError::InvalidImage)?;
-    let wait_table = WaitTable::prepare(
-        window,
-        context,
-        hart,
-        root,
-        root_index,
-        word(manifest, mem::offset_of!(tau::Manifest, wait_slots_base))?,
-        word(manifest, mem::offset_of!(tau::Manifest, wait_slots_count))?,
+    let base = word(manifest, mem::offset_of!(tau::Manifest, wait_slots))?;
+    let count = word(
+        manifest,
+        mem::offset_of!(tau::Manifest, wait_slots) + size_of::<usize>(),
     )?;
+    let wait_table = WaitTable::prepare(window, context, hart, root, root_index, base, count)?;
     Ok((
         PreparedModule {
             stem: window

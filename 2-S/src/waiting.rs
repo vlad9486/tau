@@ -45,7 +45,7 @@ impl WaitTable {
         base: usize,
         count: usize,
     ) -> Result<Self, ModuleError> {
-        if base == 0 && count == 0 {
+        if count == 0 {
             return Ok(Self::EMPTY);
         }
         let bytes = count.checked_mul(64).ok_or(ModuleError::InvalidImage)?;

@@ -292,8 +292,8 @@ pub unsafe fn init(
         thread.hart_id(),
         satp,
         stem,
-        read_usize(mem::offset_of!(tau::Manifest, wait_slots_base)),
-        read_usize(mem::offset_of!(tau::Manifest, wait_slots_count)),
+        read_usize(mem::offset_of!(tau::Manifest, wait_slots)),
+        read_usize(mem::offset_of!(tau::Manifest, wait_slots) + size_of::<usize>()),
     )
     .map_err(|_| InitError::Manifest)?;
     // The boot ELF uses the same protected shared-stem rule as prepared ELFs.
