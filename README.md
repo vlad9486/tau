@@ -1,21 +1,27 @@
 # Tau
 
-Tau is a new operating system designed for RISC-V with a focus on high-performance, multi-core scalability, and security. Tau does not aim for POSIX compatibility but instead provides a clean-slate architecture optimized for modern software development.
+Tau is a new operating system designed for RISC-V with a focus on high-performance,
+multi-core scalability, and security. Tau does not aim for POSIX compatibility but
+instead provides a clean-slate architecture optimized for modern software development.
 
 ## Key Features
 
 ### RISC-V Exclusive
 
-Tau is built only for RISC-V and fully leverages its tagged TLBs for efficient address space switching.
+Tau is built only for RISC-V and fully leverages its tagged TLBs for efficientaddress space
+switching.
 
 ### Designed for High-Core-Count Systems
 
-Tau is optimized for 64+ core systems, ensuring superior scalability compared to Linux by minimizing contention points and leveraging lock-free data structures.
+Tau is optimized for 64+ core systems, ensuring superior scalability compared to Linux
+by minimizing contention points and leveraging lock-free data structures.
 
 ### Isolation by Default
 
-* Each thread has its own address space, improving security and reducing the need for locks during memory allocation.
-* Tagged MMU support enables lightweight and efficient context switching, improving performance for high-load applications.
+* Each thread has its own address space, improving security and reducing the need
+  for locks during memory allocation.
+* Tagged MMU support enables lightweight and efficient context switching, improving
+  performance for high-load applications.
 
 ### Local execution state
 
@@ -30,9 +36,10 @@ to its caller through `satp`. Shared module tables hold prepared ELF templates;
 each context's private dependency slots cache callee roots constructed on first
 use. Returns retain roots, private mappings, and stable hart-local ASIDs. These
 roots form a context tree without a separate context registry. The scheduler is
-the only owner of a global task registry. Synchronous invocation and return are implemented for the `dummy-test` module;
-same-module spawning, single-hart scheduling, and software waiting are implemented.
-Join and successful thread/context reclamation remain deferred.
+the only owner of a global task registry. Synchronous invocation and return are
+implemented for the `dummy-test` module; same-module spawning, single-hart scheduling,
+and software waiting are implemented. Join and successful thread/context reclamation
+remain deferred.
 
 ### Lock-Free Kernel Components
 
@@ -53,16 +60,13 @@ running OS tests, and preparing SD cards. Install it from the `tau-tool` checkou
 cargo install --path .
 ```
 
-This workspace provides `tau-firmware` in `0-M` with `tau-qemu` and `tau-visionfive2` binary targets, plus `tau-visionfive2-spl` in `0-M/vf2` for the board's first boot stage. The supervisor package lives in `2-S`; U-mode modules live in `3-U/system`,
-`3-U/test`, and `3-U/dummy-test`. Their static image layout is defined in `2-S/modules.toml`. The tool uses the binary target names when selecting and locating firmware images.
+This workspace provides `tau-firmware` in `0-M` with `tau-qemu` and `tau-visionfive2`
+binary targets, plus `tau-visionfive2-spl` in `0-M/vf2` for the board's first boot stage.
+The supervisor package lives in `2-S`; U-mode modules live in `3-U/system`, `3-U/test`,
+and `3-U/dummy-test`. Their static image layout is defined in `2-S/modules.toml`.
+The tool uses the binary target names when selecting and locating firmware images.
 
 ## Build for Vision Five 2
-
-### Build Dependencies Ubuntu 24.04
-
-```
-apt install -y make clang llvm lld device-tree-compiler u-boot-tools
-```
 
 Build the Rust SPL, firmware and Tau with:
 
@@ -88,6 +92,8 @@ tau update --path=/dev/disk/by-partlabel/starfive_visionfive_2_tau
 ## Build for another computer
 
 You need the device tree and firmware for the specific computer.
+
+See `0-M/config.toml` as a starting point to port on the new computer.
 
 ## Qemu
 
