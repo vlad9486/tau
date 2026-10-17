@@ -6,6 +6,7 @@
 #![no_main]
 
 use core::{
+    arch,
     num::NonZeroUsize,
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -43,7 +44,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 extern "C" fn dummy_entry(_: usize, _: usize, _: usize, _: usize, _: usize, _: usize) -> ! {
-    core::arch::naked_asm!(
+    arch::naked_asm!(
         "li s0, 500",
         "li s1, 501",
         "li s2, 502",

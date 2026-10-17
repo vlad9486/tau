@@ -23,11 +23,15 @@ mod ethernet;
 mod display;
 mod user;
 
+use core::sync::atomic::Ordering;
+
 #[cfg(not(test))]
 #[panic_handler]
 fn panic_handler(_info: &core::panic::PanicInfo) -> ! {
     tau::Ubi::exit([1]);
 }
+
+pub static WAIT_SLOTS: [tau::WaitSlot; 8] = [const { tau::WaitSlot::new() }; 8];
 
 #[unsafe(no_mangle)]
 static MANIFEST: tau::Manifest = tau::Manifest {
@@ -35,7 +39,7 @@ static MANIFEST: tau::Manifest = tau::Manifest {
         version: (0, 1),
         name: *b"system\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
     },
-    wait_slots: &[],
+    wait_slots: &WAIT_SLOTS,
     entry: main,
     dependencies: &[tau::ModuleId {
         version: (0, 1),
@@ -53,6 +57,9 @@ extern "C" fn main(
     _: usize,
     _: usize,
 ) -> ! {
+    if let Some(slot) = WAIT_SLOTS.get(hart_id) {
+        slot.occupied.store(true, Ordering::SeqCst);
+    }
     let len = info_pages << 12;
     let raw = tau::Area::new(info, len).sl();
     let Ok((dtb, reservations)) = tau::Dtb::new(raw) else {
@@ -128,7 +135,8 @@ extern "C" fn main(
         .r::<plic::PlicCtx>();
     plic_ctx.set_threshold(plic::InterruptPriority::_0);
 
-    scheduler::Tasks::new(&dtb, reservations, plic, plic_e, context_id).run(plic_ctx, slot);
+    scheduler::Tasks::new(&dtb, reservations, plic, plic_e, context_id)
+        .run(plic_ctx, slot, hart_id);
 
     tau::Ubi::respond(0, [])
 }

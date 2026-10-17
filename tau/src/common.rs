@@ -176,10 +176,6 @@ pub enum Call {
     /// Unmap the physical memory from the virtual address space of the thread.
     /// The message must provide the virtual address and the number of pages.
     Unmap,
-    /// Transitional bootstrap operation: wait for an external interrupt or
-    /// deadline (a1, zero for none). Blocks the hart, not a scheduled thread.
-    /// Remove this once proper waiting implemented.
-    WaitExternal,
     /// Wait on a reserved module-global slot: a1 = slot address, a2 = absolute
     /// time-counter deadline (zero for none). Return status in a0, Event in a1.
     Wait,
@@ -211,7 +207,6 @@ impl Call {
             Self::Join { thread_id } => ((thread_id as usize) << 16) + (1 << 4) + 0b1001,
             Self::Map => (2 << 4) + 0b1001,
             Self::Unmap => (3 << 4) + 0b1001,
-            Self::WaitExternal => (4 << 4) + 0b1001,
             Self::Debug => (5 << 4) + 0b1001,
             Self::Wait => (6 << 4) + 0b1001,
             Self::Notify => (7 << 4) + 0b1001,
@@ -240,7 +235,6 @@ impl Call {
                     }
                     2 => Ok(Self::Map),
                     3 => Ok(Self::Unmap),
-                    4 => Ok(Self::WaitExternal),
                     5 => Ok(Self::Debug),
                     6 => Ok(Self::Wait),
                     7 => Ok(Self::Notify),

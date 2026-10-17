@@ -194,7 +194,7 @@ impl Tasks {
         }
     }
 
-    pub fn run(&mut self, plic: &PlicCtx, dummy_slot: u16) {
+    pub fn run(&mut self, plic: &PlicCtx, dummy_slot: u16, hart_id: usize) {
         let shared = UnsafeCell::new(Shared {
             uart_out: uart::Buffer::default(),
             uart_in: uart::Buffer::default(),
@@ -257,8 +257,8 @@ impl Tasks {
                 .map(|d| d.val)
                 .min();
 
-            match tau::Ubi::wait_external(deadline) {
-                tau::Event::Notified { .. } => {
+            match tau::Ubi::wait(&crate::WAIT_SLOTS[hart_id], deadline) {
+                Ok(tau::Event::Notified { .. }) => {
                     while let Some(id) = plic.next() {
                         handle(self.uart.as_mut(), shared, &id);
                         handle(self.sdio.as_mut(), shared, &id);
@@ -271,7 +271,7 @@ impl Tasks {
                         plic.complete(id);
                     }
                 }
-                tau::Event::Timeout => {
+                Ok(tau::Event::Timeout) => {
                     let now = tau::asm::read_time();
                     let mut issuers = [0; 8];
                     let mut it = issuers.iter_mut();
@@ -307,6 +307,7 @@ impl Tasks {
                         }
                     }
                 }
+                Err(_) => (),
             }
 
             // A completion can immediately cause user.rs to submit another

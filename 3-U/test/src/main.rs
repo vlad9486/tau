@@ -5,10 +5,15 @@
 #![no_std]
 #![no_main]
 
-use core::{arch::naked_asm, num::NonZeroUsize, ptr};
-
 mod graph;
 mod scheduling;
+
+use core::{
+    arch::{self, naked_asm},
+    num::NonZeroUsize,
+    ptr,
+    sync::atomic::Ordering,
+};
 
 // Wire protocol v1: three little-endian u64 words: magic, version, scenario.
 // The host writes scenario only while stopped at tau_test_ready. Volatile access
@@ -87,7 +92,7 @@ extern "C" fn tau_test_fault() -> ! {
 fn prepare_raw(address: usize, length: usize) -> usize {
     let status;
     unsafe {
-        core::arch::asm!(
+        arch::asm!(
             "ecall",
             inout("a0") tau::Call::PrepareModule.encode() => status,
             in("a1") address,
@@ -253,9 +258,15 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             // elapsed guest ticks, never debugger-sensitive wall-clock timing.
             let start = tau::asm::read_time();
             let deadline = start.checked_add(1_000_000).unwrap();
-            let event = tau::Ubi::wait_external(NonZeroUsize::new(deadline));
-            if !matches!(event, tau::Event::Timeout) {
-                tau_test_failed(case, 5, event.encode());
+            scheduling::SLOTS[0].occupied.store(true, Ordering::SeqCst);
+            let event = tau::Ubi::wait(&scheduling::SLOTS[0], NonZeroUsize::new(deadline));
+            scheduling::SLOTS[0].occupied.store(false, Ordering::SeqCst);
+            if !matches!(event, Ok(tau::Event::Timeout)) {
+                let code = match event {
+                    Ok(e) => e.encode(),
+                    Err(err) => err as usize,
+                };
+                tau_test_failed(case, 5, code);
             }
             let end = tau::asm::read_time();
             assert!(end >= deadline);

@@ -14,7 +14,7 @@
 
 use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem, num::NonZero};
 
-use supervisor::{llfree::Allocator, module, sbi, scheduler, state, vmem, mmu};
+use supervisor::{llfree::Allocator, module, sbi, scheduler, state, vmem, mmu, cpu};
 
 #[cfg(all(not(debug_assertions), feature = "panic-never"))]
 use panic_never as _;
@@ -333,8 +333,15 @@ extern "C" fn handle_syscall() -> ! {
 extern "C" fn handle_non_syscall_trap(cause: isize) -> ! {
     let local = unsafe { local_access() };
     let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
-    if cause as usize == (1usize << 63) | 5 && scheduler.active() {
+    let cause_usize = cause as usize;
+    if cause_usize == (1usize << 63) | 5 && scheduler.active() {
         let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+        let selected = scheduler::preempt(&mut window, scheduler);
+        resume_scheduled(&window, local, selected)
+    } else if cause_usize == (1usize << 63) | 9 && scheduler.active() {
+        cpu::csrrc!("sie", 1 << 9);
+        let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+        scheduler::notify_hardware_interrupt(&mut window, scheduler, local.thread.hart_id());
         let selected = scheduler::preempt(&mut window, scheduler);
         resume_scheduled(&window, local, selected)
     }
@@ -367,8 +374,9 @@ fn respond_exit(
     local: mmu::Local<'_>,
     scheduler: &scheduler::Scheduler,
 ) -> ! {
+    let hart = local.thread.hart_id();
     scheduler::exit(window, scheduler);
-    let selected = scheduler::dispatch(window, scheduler);
+    let selected = scheduler::dispatch(window, scheduler, hart);
     resume_scheduled(window, local, selected)
 }
 
@@ -401,14 +409,12 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
         scheduled_syscall(&mut window, local, [a0, a1, a2, a3, a4, a5]);
     }
     let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
-    let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
     let current_root = local.module_context.root;
     let outcome = state::syscall(
         &mut window,
         local.thread,
         local.module_context,
         local.module,
-        scheduler,
         context,
         [a0, a1, a2, a3, a4, a5],
     );
@@ -453,10 +459,11 @@ fn scheduled_syscall(
             }
         }
         Ok(tau::Call::Wait) => {
+            let hart = local.thread.hart_id();
             match scheduler::wait(window, local.module, scheduler, message[1], message[2]) {
                 Ok(Some(event)) => result[1] = event.encode(),
                 Ok(None) => {
-                    let selected = scheduler::dispatch(window, scheduler);
+                    let selected = scheduler::dispatch(window, scheduler, hart);
                     resume_scheduled(window, local, selected)
                 }
                 Err(error) => result[0] = error as usize,
@@ -470,8 +477,9 @@ fn scheduled_syscall(
             }
         }
         Ok(tau::Call::Exit) => {
+            let hart = local.thread.hart_id();
             scheduler::exit(window, scheduler);
-            let selected = scheduler::dispatch(window, scheduler);
+            let selected = scheduler::dispatch(window, scheduler, hart);
             resume_scheduled(window, local, selected)
         }
         _ => {
@@ -495,8 +503,8 @@ fn resume_scheduled(
         local
     };
     // The idle path and timer entry both return to U-mode with interrupts on.
-    supervisor::cpu::csrrc!("sstatus", 1 << 8);
-    supervisor::cpu::csrrs!("sstatus", 1 << 5);
+    cpu::csrrc!("sstatus", 1 << 8);
+    cpu::csrrs!("sstatus", 1 << 5);
     match selected.kind {
         scheduler::ReturnKind::Interrupt => resume_after_interrupt(),
         scheduler::ReturnKind::Entry => {

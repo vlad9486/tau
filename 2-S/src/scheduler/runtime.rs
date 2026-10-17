@@ -25,7 +25,14 @@ const QUANTUM: usize = 100_000;
 #[repr(C)]
 pub struct Scheduler {
     lock: AtomicBool,
-    state: UnsafeCell<State>,
+    pub(super) state: UnsafeCell<State>,
+}
+
+#[derive(Clone, Copy)]
+pub struct InterruptTarget {
+    pub physical: usize,
+    pub table: super::waiting::WaitTable,
+    pub slot: usize,
 }
 
 pub(super) struct State {
@@ -37,6 +44,7 @@ pub(super) struct State {
     pub(super) running: usize,
     pub(super) active: bool,
     pub(super) quantum: usize,
+    pub(super) interrupt_targets: [Option<InterruptTarget>; 8],
 }
 
 // All access to the shared State is serialized by the interrupt-safe lock.
@@ -116,6 +124,15 @@ impl State {
         self.length += 1;
     }
 
+    pub(super) fn push_front(&mut self, id: usize) {
+        if self.length >= CAPACITY {
+            invariant_failed();
+        }
+        self.head = (self.head + CAPACITY - 1) % CAPACITY;
+        self.queue[self.head] = id as u16;
+        self.length += 1;
+    }
+
     fn pop(&mut self) -> Option<usize> {
         if self.length == 0 {
             return None;
@@ -133,9 +150,6 @@ impl State {
     pub(super) fn enable(&mut self) {
         if !self.active {
             self.active = true;
-            // Hardware receiver bindings are a later iteration. Scheduled mode
-            // never attributes device interrupts to the interrupted worker.
-            cpu::csrrc!("sie", 1 << 9);
             cpu::csrrs!("sie", 1 << 5);
             self.quantum = now().saturating_add(QUANTUM);
         }
@@ -163,6 +177,7 @@ impl State {
         physical: usize,
         wait: ActiveWait,
         event: Event,
+        high_priority: bool,
     ) {
         let Some(index) = self
             .registry
@@ -189,7 +204,11 @@ impl State {
         let enqueue = thread.complete([0, event.encode(), 0, 0, 0, 0]);
         unsafe { Thread::write(window, physical, thread) };
         if enqueue {
-            self.enqueue(index + 1);
+            if high_priority {
+                self.push_front(index + 1);
+            } else {
+                self.enqueue(index + 1);
+            }
         }
     }
 
@@ -201,7 +220,7 @@ impl State {
                 && wait.deadline != 0
                 && wait.deadline <= time
             {
-                self.complete(window, physical, wait, Event::Timeout);
+                self.complete(window, physical, wait, Event::Timeout, false);
             }
         }
     }
@@ -249,6 +268,7 @@ impl Scheduler {
             ptr::addr_of_mut!((*state).running).write(1);
             ptr::addr_of_mut!((*state).active).write(false);
             ptr::addr_of_mut!((*state).quantum).write(0);
+            ptr::addr_of_mut!((*state).interrupt_targets).write([None; 8]);
         }
         let mut thread = unsafe { Thread::read(window, physical) };
         thread.phase = Phase::Running;
@@ -267,8 +287,35 @@ pub struct Dispatch {
     pub message: [usize; 6],
 }
 
+pub fn notify_hardware_interrupt(
+    window: &mut WindowAccess,
+    scheduler: &Scheduler,
+    hart_id: usize,
+) {
+    let mut scheduler = scheduler.lock();
+    let Some(target) = scheduler
+        .interrupt_targets
+        .get(hart_id)
+        .copied()
+        .flatten()
+    else {
+        return;
+    };
+    let thread = unsafe { Thread::read(window, target.physical) };
+    if let Some(wait) = thread.wait {
+        scheduler.complete(window, target.physical, wait, Event::Notified { arg: 0 }, true);
+    } else {
+        let mut slot = unsafe { target.table.read(window, target.slot) };
+        slot.pending = true;
+        unsafe { target.table.write(window, target.slot, slot) };
+    }
+    if scheduler.active {
+        scheduler.program(window);
+    }
+}
+
 pub fn preempt(window: &mut WindowAccess, scheduler: &Scheduler) -> Dispatch {
-    {
+    let hart = {
         let mut scheduler = scheduler.lock();
         let physical = scheduler.physical(scheduler.running);
         let mut thread = unsafe { Thread::read(window, physical) };
@@ -280,14 +327,15 @@ pub fn preempt(window: &mut WindowAccess, scheduler: &Scheduler) -> Dispatch {
         let id = scheduler.running;
         scheduler.enqueue(id);
         scheduler.running = 0;
-    }
-    dispatch(window, scheduler)
+        unsafe { Thread::hart(window, physical) }
+    };
+    dispatch(window, scheduler, hart)
 }
 
 /// Interrupts remain disabled between committing departure and installing the
 /// selected root. An idle hart waits with SIE clear and STIE enabled: WFI may
 /// wake for a pending timer without entering the user trap entry from S-mode.
-pub fn dispatch(window: &mut WindowAccess, scheduler: &Scheduler) -> Dispatch {
+pub fn dispatch(window: &mut WindowAccess, scheduler: &Scheduler, hart_id: usize) -> Dispatch {
     loop {
         {
             let mut scheduler = scheduler.lock();
@@ -331,5 +379,9 @@ pub fn dispatch(window: &mut WindowAccess, scheduler: &Scheduler) -> Dispatch {
             scheduler.program(window);
         }
         unsafe { core::arch::asm!("wfi", options(nostack)) };
+        if cpu::csrr!("sip") & (1 << 9) != 0 {
+            cpu::csrrc!("sie", 1 << 9);
+            notify_hardware_interrupt(window, scheduler, hart_id);
+        }
     }
 }

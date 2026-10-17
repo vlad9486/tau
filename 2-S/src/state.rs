@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{arch, hint, num::NonZeroUsize, slice, ptr, mem};
+use core::{hint, num::NonZeroUsize, slice, ptr, mem};
 
 use super::{
     vmem::{Window, WindowAccess, Mapping},
@@ -22,34 +22,6 @@ pub struct Context {
 const INTERRUPT_BIT: usize = 1 << (usize::BITS - 1);
 const SUPERVISOR_TIMER: usize = 5;
 const SUPERVISOR_EXTERNAL: usize = 9;
-const PENDING_TIMER: usize = 1;
-const PENDING_EXTERNAL: usize = 2;
-
-fn take_pending_interrupt(thread: &Thread) -> Option<tau::Event> {
-    if thread
-        .pending_interrupts
-        .load(core::sync::atomic::Ordering::Relaxed)
-        & PENDING_EXTERNAL
-        != 0
-    {
-        thread
-            .pending_interrupts
-            .fetch_and(!PENDING_EXTERNAL, core::sync::atomic::Ordering::Relaxed);
-        Some(tau::Event::Notified { arg: 0 })
-    } else if thread
-        .pending_interrupts
-        .load(core::sync::atomic::Ordering::Relaxed)
-        & PENDING_TIMER
-        != 0
-    {
-        thread
-            .pending_interrupts
-            .fetch_and(!PENDING_TIMER, core::sync::atomic::Ordering::Relaxed);
-        Some(tau::Event::Timeout)
-    } else {
-        None
-    }
-}
 
 impl Context {
     pub fn block(&self, hart_id: usize, order: usize) -> Result<usize, llfree::Error> {
@@ -333,7 +305,6 @@ pub fn syscall(
     thread: &Thread,
     module: &mut ModuleContext,
     tables: &ModuleTables,
-    scheduler: &Scheduler,
     context: &Context,
     mut msg: [usize; 6],
 ) -> Outcome {
@@ -446,49 +417,6 @@ pub fn syscall(
                 msg[0] = 0;
             }
         }
-        Ok(tau::Call::WaitExternal) => {
-            if scheduler.active() {
-                // Bootstrap compatibility only: scheduled clients use Wait.
-                // Polling must neither block this hart nor overwrite its timer.
-                return [tau::Event::Notified { arg: 0 }.encode(), 0, 0, 0, 0, 0].into();
-            }
-            if let Some(event) = take_pending_interrupt(thread) {
-                msg[0] = event.encode();
-                return msg.into();
-            }
-            if msg[1] != 0 {
-                sbi::set_timer(msg[1]).unwrap_or_default();
-            }
-            let cause = wait();
-            let event = if cause == (INTERRUPT_BIT | SUPERVISOR_TIMER) {
-                sbi::set_timer(usize::MAX).unwrap_or_default();
-                // sbi::Printer.ch(*b"SU: timer\r\n");
-                tau::Event::Timeout
-            } else if cause == (INTERRUPT_BIT | SUPERVISOR_EXTERNAL) {
-                cpu::csrrc!("sie", 1 << SUPERVISOR_EXTERNAL);
-                // sbi::Printer.ch(*b"SU: interrupt\r\n");
-                tau::Event::Notified { arg: 0 }
-            } else if cause == (1 << 63) + 1 {
-                // sbi::Printer.ch(*b"SU: software interrupt\r\n");
-                // TODO:
-                // An IPI is not an entry-point invocation. Scheduler/IPI
-                // handling is still TODO; report generic readiness for now.
-                tau::Event::Notified { arg: 0 }
-            } else if cause & (1 << 63) != 0 {
-                sbi::Printer.ch(*b"SU: unexpected interrupt\r\n");
-                tau::Event::Notified { arg: 0 }
-            } else {
-                let lo = (cause % 10) as u8 + b'0';
-                let hi = ((cause / 10) % 10) as u8 + b'0';
-                sbi::Printer
-                    .ch(*b"SU: exception: ")
-                    .ch([lo, hi])
-                    .ch(*b"\r\n");
-                tau::asm::dbg([0xdeadbeef]);
-                tau::Event::Notified { arg: 0 }
-            };
-            msg[0] = event.encode();
-        }
         Ok(tau::Call::Debug) => {
             write!(
                 sbi::Console,
@@ -586,42 +514,8 @@ pub fn alloc_pages(
     Ok(())
 }
 
-fn wait() -> usize {
-    let v;
-
-    unsafe {
-        arch::asm! {
-            "li t1, 0x120",
-            "csrrs t0, sstatus, t1",
-            "li t1, 0x220",
-            "csrrs t0, sie, t1",
-            "la t0, 2f",
-            "csrrw t2, sepc, t0",
-            "la t0, 3f",
-            "addi t0, t0, 3",
-            "andi t0, t0, -4",
-            "csrrw t3, stvec, t0",
-            "sret",
-            "2:",
-            "wfi",
-            "j 2b",
-            "3:",
-            "nop",
-            "li t1, 0x120",
-            "csrrc t0, sstatus, t1",
-            "csrw sepc, t2",
-            "csrw stvec, t3",
-            "csrr {0}, scause",
-            options(nomem, nostack),
-            out(reg) v
-        }
-    }
-
-    v
-}
-
 #[inline(always)]
-pub fn handle_non_syscall_trap(cause: isize, thread: &Thread) {
+pub fn handle_non_syscall_trap(cause: isize, _thread: &Thread) {
     use core::fmt::Write;
 
     if cause >= 0 {
@@ -638,16 +532,10 @@ pub fn handle_non_syscall_trap(cause: isize, thread: &Thread) {
         match (cause as usize) & !INTERRUPT_BIT {
             SUPERVISOR_TIMER => {
                 sbi::set_timer(usize::MAX).unwrap_or_default();
-                thread
-                    .pending_interrupts
-                    .fetch_or(PENDING_TIMER, core::sync::atomic::Ordering::Relaxed);
             }
             SUPERVISOR_EXTERNAL => {
                 // Keep the level interrupt gated until userspace drains the PLIC.
                 cpu::csrrc!("sie", 1 << SUPERVISOR_EXTERNAL);
-                thread
-                    .pending_interrupts
-                    .fetch_or(PENDING_EXTERNAL, core::sync::atomic::Ordering::Relaxed);
             }
             _ => {
                 sbi::Printer.ch(*b"SU: unexpected interrupt\r\n");

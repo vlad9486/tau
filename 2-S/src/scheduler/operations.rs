@@ -8,7 +8,7 @@ use tau::{Event, SpawnError, WaitError};
 
 use super::{
     thread::{ActiveWait, Phase, Resume},
-    runtime, Context, Thread, Scheduler, loading,
+    runtime, cpu, Context, Thread, Scheduler, loading,
     vmem::{self, Window, WindowAccess},
     module::ModuleTables,
     waiting::WaitTable,
@@ -66,7 +66,7 @@ pub fn wait(
     if deadline != 0 && deadline <= runtime::now() {
         return Ok(Some(Event::Timeout));
     }
-    let module = window
+    let module_addr = window
         .resolve(root, vmem::MODULE)
         .ok_or(WaitError::InvalidWaiter)?
         .0;
@@ -78,7 +78,7 @@ pub fn wait(
     thread.resume = Resume::Syscall;
     thread.phase = Phase::Parking;
     thread.wait = Some(ActiveWait {
-        module,
+        module: module_addr,
         table,
         slot: index,
         sequence: thread.sequence,
@@ -89,6 +89,19 @@ pub fn wait(
     unsafe {
         table.write(window, index, slot);
         Thread::write(window, physical, thread);
+    }
+    if module.loader_authority {
+        let hart = unsafe { Thread::hart(window, physical) };
+        if index == hart {
+            if hart < scheduler.interrupt_targets.len() {
+                scheduler.interrupt_targets[hart] = Some(runtime::InterruptTarget {
+                    physical,
+                    table,
+                    slot: index,
+                });
+            }
+            cpu::csrrs!("sie", 1 << 9);
+        }
     }
     scheduler.enable();
     Ok(None)
@@ -130,7 +143,7 @@ pub fn notify(
             && wait.slot == index
             && wait.sequence == slot.sequence
         {
-            scheduler.complete(window, slot.thread, wait, Event::Notified { arg: 0 });
+            scheduler.complete(window, slot.thread, wait, Event::Notified { arg: 0 }, false);
         }
     }
     if scheduler.active {
@@ -143,6 +156,13 @@ pub fn exit(window: &mut WindowAccess, scheduler: &Scheduler) {
     let mut scheduler = scheduler.lock();
     let physical = scheduler.physical(scheduler.running);
     let mut thread = unsafe { Thread::read(window, physical) };
+    let hart = unsafe { Thread::hart(window, physical) };
+    if let Some(target) = scheduler.interrupt_targets.get_mut(hart)
+        && target.as_ref().is_some_and(|t| t.physical == physical)
+    {
+        *target = None;
+        cpu::csrrc!("sie", 1 << 9);
+    }
     if let Some(wait) = thread.wait {
         let mut slot = unsafe { wait.table.read(window, wait.slot) };
         if slot.thread == physical && slot.sequence == wait.sequence {

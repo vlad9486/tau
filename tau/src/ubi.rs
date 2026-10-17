@@ -138,15 +138,6 @@ impl Ubi {
         }
     }
 
-    /// Bootstrap-only interrupt wait.
-    /// TODO: unify with ordinary `wait`.
-    pub fn wait_external(deadline: Option<NonZeroUsize>) -> Event {
-        let t = deadline.map(NonZeroUsize::get).unwrap_or_default();
-        let (a0, []) = ubi(Call::WaitExternal, [t]);
-        // supervisor will not send invalid value
-        unsafe { Event::decode(a0).unwrap_unchecked() }
-    }
-
     /// Consume readiness or suspend this thread, resuming here in this context.
     /// Shared-state publication/checking still needs module synchronization.
     pub fn wait(slot: *const WaitSlot, deadline: Option<NonZeroUsize>) -> Result<Event, WaitError> {

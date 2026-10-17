@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::sync::atomic::AtomicUsize;
-
 use super::{vmem::Root, waiting::WaitTable};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,7 +79,6 @@ impl ThreadState {
 #[repr(C)]
 pub struct Thread {
     hart_id: usize,
-    pub pending_interrupts: AtomicUsize,
     id: usize,
     state: ThreadState,
 }
@@ -95,7 +92,6 @@ impl Thread {
     pub fn new(hart: usize, id: usize, root: Root, message: [usize; 6], resume: Resume) -> Self {
         Thread {
             hart_id: hart,
-            pending_interrupts: AtomicUsize::new(0),
             id,
             state: ThreadState {
                 phase: Phase::Runnable,
@@ -113,6 +109,13 @@ impl Thread {
         physical: usize,
     ) -> ThreadState {
         unsafe { (*window.thread(physical)).state }
+    }
+
+    pub(super) unsafe fn hart(
+        window: &mut super::vmem::WindowAccess,
+        physical: usize,
+    ) -> usize {
+        unsafe { (*window.thread(physical)).hart_id }
     }
 
     pub(super) unsafe fn write(
