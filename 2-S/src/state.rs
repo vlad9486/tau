@@ -9,7 +9,7 @@ use super::{
     module::{ModuleContext, ModuleTables},
     scheduler::{Scheduler, Thread},
     waiting::WaitTable,
-    llfree, loading, vmem, sbi, cpu, layout,
+    llfree, loading, vmem, sbi, layout,
 };
 
 pub struct Context {
@@ -18,10 +18,6 @@ pub struct Context {
     /// Kept independently of the active satp for later loader/hart startup.
     pub bootstrap_root: vmem::Root,
 }
-
-const INTERRUPT_BIT: usize = 1 << (usize::BITS - 1);
-const SUPERVISOR_TIMER: usize = 5;
-const SUPERVISOR_EXTERNAL: usize = 9;
 
 impl Context {
     pub fn block(&self, hart_id: usize, order: usize) -> Result<usize, llfree::Error> {
@@ -506,34 +502,4 @@ pub fn alloc_pages(
         });
     }
     Ok(())
-}
-
-#[inline(always)]
-pub fn handle_non_syscall_trap(cause: isize, _thread: &Thread) {
-    use core::fmt::Write;
-
-    if cause >= 0 {
-        let sepc = cpu::csrr!("sepc");
-        let stval = cpu::csrr!("stval");
-
-        write!(
-            sbi::Console,
-            "\r\n\nSU: exception: cause={cause} sepc=0x{sepc:016x} stval=0x{stval:016x}\r\n",
-        )
-        .unwrap_or_default();
-        tau::asm::dbg([0xdeadbeef]);
-    } else {
-        match (cause as usize) & !INTERRUPT_BIT {
-            SUPERVISOR_TIMER => {
-                sbi::set_timer(usize::MAX).unwrap_or_default();
-            }
-            SUPERVISOR_EXTERNAL => {
-                // Keep the level interrupt gated until userspace drains the PLIC.
-                cpu::csrrc!("sie", 1 << SUPERVISOR_EXTERNAL);
-            }
-            _ => {
-                sbi::Printer.ch(*b"SU: unexpected interrupt\r\n");
-            }
-        };
-    }
 }
