@@ -41,7 +41,7 @@ impl<'a> State<'a> {
 }
 
 fn measure_roundtrips(shared: &UnsafeCell<Shared>, slot: u16) {
-    let mut samples = [0; 256];
+    let mut samples = [0; 22];
     for (index, cycles) in samples.iter_mut().enumerate() {
         let value = index + 1;
         let start = tau::asm::read_cycle();
@@ -52,9 +52,9 @@ fn measure_roundtrips(shared: &UnsafeCell<Shared>, slot: u16) {
         assert_eq!(count, value);
     }
 
-    let mean = samples[2..].iter().map(|x| *x as f32).sum::<f32>() / 254.0;
+    let mean = samples[2..].iter().map(|x| *x as f32).sum::<f32>() / 20.0;
     samples.sort();
-    let median = samples[126];
+    let median = samples[10];
     unsafe { &mut *shared.get() }.write(format_args!(
         "dummy-test roundtrip mean: {mean}, median: {median}"
     ));

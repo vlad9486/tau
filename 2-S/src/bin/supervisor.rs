@@ -16,7 +16,7 @@ use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem, num::NonZero, syn
 
 use supervisor::{
     llfree::Allocator,
-    module, sbi, state, vmem, mmu, cpu,
+    module, sbi, state, vmem, mmu, cpu, loading,
     scheduler::{self, Thread, ReturnKind, Scheduler, Dispatch},
 };
 
@@ -428,24 +428,53 @@ fn respond_exit(
 
 extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
     if let Ok(tau::Call::Invoke { slot, arg }) = tau::Call::decode(a0) {
-        let window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
-        let local = unsafe { local_access() };
-        if let Some(root) = local.module_context.dependency(slot) {
-            let caller = local.module_context.root;
-            let flush = mmu::switch_flush(&window, caller, root);
-            // The per-hart window/stack and global supervisor code retain the same
-            // backing in both roots. Moving `local` ends all pre-switch borrows.
-            let local = unsafe { mmu::switch(local, root, flush) };
-            if local.module.poisoned.load(Ordering::Acquire) {
-                let flush = mmu::switch_flush(&window, root, caller);
-                let _local = unsafe { mmu::switch(local, caller, flush) };
-                restore_syscall(tau::ModuleError::Poisoned as usize, 0, 0, 0, 0, 0);
-            }
-            local.module_context.enter(caller);
-            enter_invocation(arg as usize, a1, a2, a3, a4, a5)
-        }
+        invoke(slot, arg, a1, a2, a3, a4, a5);
     }
     syscall_slow(a0, a1, a2, a3, a4, a5)
+}
+
+#[inline(always)]
+fn invoke(slot: u16, arg: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
+    let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+    let local = unsafe { local_access() };
+    let root = match local.module_context.dependency(slot) {
+        Some(root) => root,
+        None => invoke_slow(
+            &mut window,
+            local.thread,
+            local.module_context,
+            local.module,
+            slot,
+        ),
+    };
+    let caller = local.module_context.root;
+    let flush = mmu::switch_flush(&window, caller, root);
+    // The per-hart window/stack and global supervisor code retain the same
+    // backing in both roots. Moving `local` ends all pre-switch borrows.
+    let local = unsafe { mmu::switch(local, root, flush) };
+    if local.module.poisoned.load(Ordering::Acquire) {
+        let flush = mmu::switch_flush(&window, root, caller);
+        let _local = unsafe { mmu::switch(local, caller, flush) };
+        restore_syscall(tau::ModuleError::Poisoned as usize, 0, 0, 0, 0, 0);
+    }
+    local.module_context.enter(caller);
+    enter_invocation(arg as usize, a1, a2, a3, a4, a5)
+}
+
+#[cold]
+#[inline(never)]
+fn invoke_slow(
+    window: &mut vmem::WindowAccess,
+    thread: &Thread,
+    module_context: &mut module::ModuleContext,
+    module: &module::ModuleTables,
+    slot: u16,
+) -> vmem::Root {
+    let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
+    match loading::invoke(window, context, thread, module_context, module, slot) {
+        Ok(root) => root,
+        Err(error) => restore_syscall(error as usize, 0, 0, 0, 0, 0),
+    }
 }
 
 #[cold]
@@ -460,8 +489,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
         scheduled_syscall(&mut window, local, [a0, a1, a2, a3, a4, a5]);
     }
     let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
-    let current_root = local.module_context.root;
-    let outcome = state::syscall(
+    let [a0, a1, a2, a3, a4, a5] = state::syscall(
         &mut window,
         local.thread,
         local.module_context,
@@ -469,18 +497,6 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
         context,
         [a0, a1, a2, a3, a4, a5],
     );
-    if let Some(root) = outcome.root {
-        let flush = mmu::switch_flush(&window, current_root, root);
-        // The per-hart window/stack and global supervisor code retain the same
-        // backing in both roots. Moving `local` ends all pre-switch borrows.
-        let local = unsafe { mmu::switch(local, root, flush) };
-        if let Some(caller) = outcome.enter_from {
-            local.module_context.enter(caller);
-            let [a0, a1, a2, a3, a4, a5] = outcome.message;
-            enter_invocation(a0, a1, a2, a3, a4, a5)
-        }
-    }
-    let [a0, a1, a2, a3, a4, a5] = outcome.message;
     restore_syscall(a0, a1, a2, a3, a4, a5)
 }
 

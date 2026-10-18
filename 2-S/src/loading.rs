@@ -5,7 +5,7 @@
 //! ELF template preparation and lazy retained context construction. No language
 //! interpretation, global invocation registry, or thread control block.
 
-use core::{num::NonZeroUsize, ptr, slice, mem, sync::atomic::Ordering};
+use core::{num::NonZeroUsize, ptr, slice, mem};
 
 use elf::{
     ElfBytes,
@@ -379,14 +379,6 @@ pub fn invoke(
     let descriptor = tables
         .get_dependency(slot)
         .ok_or(ModuleError::InvalidDependency)?;
-    if let Some(root) = module.dependency(slot) {
-        let dep = window.read_descriptor(descriptor);
-        let target_tables = window.map_module_tables(dep.tables);
-        if target_tables.poisoned.load(Ordering::Acquire) {
-            return Err(ModuleError::Poisoned);
-        }
-        return Ok(root);
-    }
     let root = construct(window, context, thread, module.root, descriptor)?;
     module.retain_dependency(slot, root);
     Ok(root)

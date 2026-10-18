@@ -276,25 +276,6 @@ pub unsafe fn init(
     Ok((satp, sepc))
 }
 
-/// A switch is performed after Rust references to context/module storage have
-/// expired. The caller/callee metadata has different backing at the same VA.
-pub struct Outcome {
-    pub message: [usize; 6],
-    pub root: Option<vmem::Root>,
-    /// Initialize a fresh callee entry only after installing the destination root.
-    pub enter_from: Option<vmem::Root>,
-}
-
-impl From<[usize; 6]> for Outcome {
-    fn from(message: [usize; 6]) -> Self {
-        Self {
-            message,
-            root: None,
-            enter_from: None,
-        }
-    }
-}
-
 #[inline]
 pub fn syscall(
     window: &mut WindowAccess,
@@ -303,7 +284,7 @@ pub fn syscall(
     tables: &ModuleTables,
     context: &Context,
     mut msg: [usize; 6],
-) -> Outcome {
+) -> [usize; 6] {
     use core::fmt::Write;
 
     match tau::Call::decode(msg[0]) {
@@ -341,39 +322,16 @@ pub fn syscall(
                 }
             }
         }
-        Ok(tau::Call::Invoke { slot, arg }) => {
-            match loading::invoke(window, context, thread, module, tables, slot) {
-                Ok(root) => {
-                    msg[0] = arg as usize;
-                    return Outcome {
-                        message: msg,
-                        root: Some(root),
-                        enter_from: Some(module.root),
-                    };
-                }
-                Err(error) => {
-                    msg[0] = error as usize;
-                }
-            }
-        }
-        Ok(tau::Call::Respond { code }) => {
-            msg[0] = code as usize;
-            if let Some(caller) = module.take_caller() {
-                return Outcome {
-                    message: msg,
-                    root: Some(caller),
-                    enter_from: None,
-                };
-            } else {
-                sbi::hart_stop().unwrap_or_default();
-                loop {
-                    hint::spin_loop();
-                }
-            }
-        }
         // These calls need dispatch after all current-context borrows end.
-        // The trap boundary handles them through scheduler before entering here.
-        Ok(tau::Call::Spawn { .. } | tau::Call::Exit | tau::Call::Wait | tau::Call::Notify) => {
+        // The trap boundary handles them before entering here.
+        Ok(
+            tau::Call::Spawn { .. }
+            | tau::Call::Exit
+            | tau::Call::Wait
+            | tau::Call::Notify
+            | tau::Call::Invoke { .. }
+            | tau::Call::Respond { .. },
+        ) => {
             msg = [tau::WaitError::Unsupported as usize, 0, 0, 0, 0, 0];
         }
         Ok(tau::Call::Map) => {
@@ -424,7 +382,7 @@ pub fn syscall(
         }
     }
 
-    msg.into()
+    msg
 }
 
 fn valid_pages(address: usize, pages: usize) -> bool {
