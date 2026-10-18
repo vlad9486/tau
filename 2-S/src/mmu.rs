@@ -4,7 +4,7 @@
 //! Stable hart-local tags for retained roots. Successful contexts and their
 //! ASIDs live until shutdown; migration and thread teardown are still TODO.
 
-use core::{arch, hint, ptr};
+use core::{arch, fmt, hint, ptr};
 
 use super::{
     asm,
@@ -23,15 +23,20 @@ pub struct Local<'a> {
 }
 
 #[repr(C)]
-pub(super) struct Hart {
+pub struct Hart {
     mask: u16,
     flush: bool,
     next_asid: usize,
 }
 
-/// # Safety
-/// The window must belong to the executing hart; interrupts are disabled.
-pub unsafe fn init(window: &mut WindowAccess) {
+impl fmt::Display for Hart {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Hart { mask, flush, .. } = self;
+        writeln!(f, "ASID mask=0x{mask:04x} force_flush={flush}")
+    }
+}
+
+pub fn init() -> Hart {
     let original = Window::current_root();
     let probe = Root::sv39(original.page(), u16::MAX);
     unsafe {
@@ -42,18 +47,14 @@ pub unsafe fn init(window: &mut WindowAccess) {
         arch::asm!("csrw satp, {0}", in(reg) original.0.get(), options(nostack));
     }
     asm::sfence_vma(None, None);
-    *window.hart_mut() = Hart {
+    Hart {
         mask,
         flush: mask == 0,
         next_asid: 1,
-    };
+    }
 }
 
-pub fn asid_mask(window: &WindowAccess) -> u16 {
-    window.hart().mask
-}
-
-pub fn force_flush(window: &WindowAccess) -> bool {
+fn force_flush(window: &WindowAccess) -> bool {
     window.hart().flush
 }
 

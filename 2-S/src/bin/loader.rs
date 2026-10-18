@@ -14,13 +14,19 @@
 
 use core::{arch, cell::UnsafeCell, hint, mem::MaybeUninit, num::NonZero, ops::Range, slice};
 
+use elf::{
+    ElfBytes,
+    abi::{PF_R, PF_W, PF_X, PT_LOAD},
+    endian::LittleEndian,
+};
+
 use supervisor::{
-    llfree::{Error, Allocator, FrameId},
     layout::{
-        MODULES, DTB_OFFSET, DTB_PAGES, SUPERVISOR_OFFSET, SUPERVISOR_SIZE, SYSTEM_OFFSET,
-        SYSTEM_SIZE, HEAP_START, HEAP_END,
+        DTB_OFFSET, DTB_PAGES, HEAP_END, HEAP_START, MODULES, SUPERVISOR_OFFSET, SUPERVISOR_SIZE,
+        SYSTEM_OFFSET, SYSTEM_SIZE,
     },
-    sbi, vmem,
+    llfree::{Allocator, Error, FrameId, Lower},
+    sbi, state, vmem,
 };
 
 #[cfg(all(not(debug_assertions), feature = "panic-never"))]
@@ -71,7 +77,7 @@ extern "C" fn inner(
     ro: *mut MaybeUninit<[usize; 512]>,
     hp: *mut MaybeUninit<[usize; 512]>,
 ) -> ! {
-    let (satp, info, info_pages, cores, frames) = if (opaque >> 56) == 0 {
+    let (satp, info, info_pages) = if (opaque >> 56) == 0 {
         let dtb_addr = st.cast::<u32>().with_addr(opaque);
         let size = u32::from_be(unsafe { *dtb_addr.add(1) }) as usize;
         let dtb = unsafe { slice::from_raw_parts(dtb_addr, size / size_of::<u32>()) };
@@ -97,9 +103,9 @@ extern "C" fn inner(
         let boot_addr = buffer.as_ptr().addr();
         let dtb_range = dtb_addr.addr()..dtb_addr.addr() + size;
         match init_memory(hart_id, dtb_range, dtb, reservations, st, ro, hp) {
-            Ok((satp, cores, frames)) => {
+            Ok(satp) => {
                 sbi::Printer.ch(*b"success\r\n");
-                (satp, boot_addr, boot_size.div_ceil(0x1000), cores, frames)
+                (satp, boot_addr, boot_size.div_ceil(0x1000))
             }
             Err(_err) => {
                 sbi::Printer.ch(*b"failed\r\n");
@@ -116,7 +122,7 @@ extern "C" fn inner(
         // is intentional; it does not define the eventual runtime storage scope.
         // Per-hart windows and supervisor stacks must be made private before
         // concurrent use. The runtime mapping transition is not yet implemented.
-        (opaque, 0, 0, 0, 0)
+        (opaque, 0, 0)
     };
 
     unsafe {
@@ -135,11 +141,8 @@ extern "C" fn inner(
             "sret",
             options(noreturn),
             in("a0") hart_id,
-            in("a1") st.addr(),
-            in("a2") info,
-            in("a3") info_pages,
-            in("a4") cores,
-            in("a5") frames,
+            in("a1") info,
+            in("a2") info_pages,
             satp = in(reg) satp,
             sepc = const { 0x_ffff_ffc0_0060_1000_usize },
             ctx = const { vmem::THREAD },
@@ -155,7 +158,7 @@ fn init_memory(
     st: *mut MaybeUninit<[usize; 512]>,
     ro: *mut MaybeUninit<[usize; 512]>,
     hp: *mut MaybeUninit<[usize; 512]>,
-) -> Result<(usize, usize, usize), Error> {
+) -> Result<usize, Error> {
     let mut cores = 0;
     let mut memory_size = 0;
     for (props, path) in dtb.iter() {
@@ -249,10 +252,6 @@ fn init_memory(
     for i in (ro.addr() >> 12)..(hp.addr() >> 12) {
         l2[i & 0o777] = (i << 10) + vmem::flags_new(b"r----");
     }
-    let system_start = (st.addr() >> 12) + SYSTEM_OFFSET;
-    for i in system_start..(system_start + SYSTEM_SIZE) {
-        l2[i & 0o777] = (i << 10) + vmem::flags_new(b"rw---");
-    }
 
     // memory map for SV39:
     // 0x0000_0040_0000_0000 .. 0xffff_ffc0_0000_0000 (unavailable)
@@ -297,7 +296,8 @@ fn init_memory(
     let mut l2 = gfp();
     // the branch of the supervisor image
     l1[0o003] = (l2.as_mut_ptr().addr() >> 2) + 1;
-    l2[0o000] = (gfp().as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw--g");
+    let context_page = gfp();
+    l2[0o000] = (context_page.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw--g");
 
     for p in 0..SUPERVISOR_SIZE {
         let virtual_page = 0x601 + p;
@@ -314,11 +314,172 @@ fn init_memory(
         l2[virtual_page % 0o1000] = ((ptr.addr() + (p << 12)) >> 2) + vmem::flags_new(b"rw--g");
     }
 
+    let boot = load_system_elf(hart_id, &allocator, st, l0)?;
+    let allocator = unsafe {
+        Allocator::new(frames, st.with_addr(vmem::ALLOCATOR).cast())
+            .ok_or(Error::Memory)?
+            .into_lower()
+    };
+    let bootstrap_root = vmem::Root::sv39(root_table, 0);
+    unsafe {
+        context_page
+            .as_mut_ptr()
+            .cast::<state::Context>()
+            .write(state::Context {
+                allocator,
+                base_addr: st.addr(),
+                bootstrap_root,
+                boot,
+            });
+    }
+
     // format can be x (hex), d (signed decimal), u (unsigned decimal), o (octal), c (char) or i (asm instruction).
     // size can be b (8 bits), h (16 bits), w (32 bits) or g (64 bits).
     // xp/8gx 0x80200000
 
-    Ok(((vmem::SV39 << 60) | (root_table >> 12), cores, frames.get()))
+    Ok(bootstrap_root.0.get())
+}
+
+fn load_system_elf(
+    hart_id: usize,
+    allocator: &Lower<'_>,
+    st: *mut MaybeUninit<[usize; 512]>,
+    l0: &mut [usize; 512],
+) -> Result<state::BootModule, Error> {
+    let elf_data =
+        unsafe { slice::from_raw_parts(st.add(SYSTEM_OFFSET).cast::<u8>(), SYSTEM_SIZE << 12) };
+    let elf = ElfBytes::<LittleEndian>::minimal_parse(elf_data).map_err(|_| Error::Address)?;
+    let segments = elf.segments().ok_or(Error::Address)?;
+
+    let image_ptr = |address: usize, len: usize| -> Result<*const u8, Error> {
+        let end = address.checked_add(len).ok_or(Error::Address)?;
+        for ph in segments.iter().filter(|p| p.p_type == PT_LOAD) {
+            let start = ph.p_vaddr as usize;
+            let limit = start
+                .checked_add(ph.p_filesz as usize)
+                .ok_or(Error::Address)?;
+            if address >= start && end <= limit {
+                let data = elf.segment_data(&ph).map_err(|_| Error::Address)?;
+                return Ok(unsafe { data.as_ptr().add(address - start) });
+            }
+        }
+        Err(Error::Address)
+    };
+
+    let mut map_page = |vaddr: usize, flags: &[u8; 5]| -> Result<&mut [usize; 512], Error> {
+        let vpn2 = (vaddr >> 30) & 0o777;
+        let vpn1 = (vaddr >> 21) & 0o777;
+        let vpn0 = (vaddr >> 12) & 0o777;
+        if l0[vpn2] == 0 {
+            let FrameId(frame) = allocator.alloc(hart_id, 0)?;
+            let page = unsafe { &mut *st.add(frame) }.write([0; 512]);
+            l0[vpn2] = (page.as_mut_ptr().addr() >> 2) | 1 | vmem::OWNED;
+        }
+        let l1 = unsafe { &mut *st.with_addr((l0[vpn2] >> 10) << 12).cast::<[usize; 512]>() };
+        if l1[vpn1] == 0 {
+            let FrameId(frame) = allocator.alloc(hart_id, 0)?;
+            let page = unsafe { &mut *st.add(frame) }.write([0; 512]);
+            l1[vpn1] = (page.as_mut_ptr().addr() >> 2) | 1 | vmem::OWNED;
+        }
+        let l2 = unsafe { &mut *st.with_addr((l1[vpn1] >> 10) << 12).cast::<[usize; 512]>() };
+        if l2[vpn0] != 0 {
+            return Err(Error::Address);
+        }
+        let FrameId(frame) = allocator.alloc(hart_id, 0)?;
+        let page = unsafe { &mut *st.add(frame) }.write([0; 512]);
+        l2[vpn0] = (page.as_mut_ptr().addr() >> 2) | vmem::flags_new(flags) | vmem::OWNED;
+        Ok(page)
+    };
+
+    for ph in segments {
+        if ph.p_type != PT_LOAD || ph.p_memsz == 0 {
+            continue;
+        }
+        let start = ph.p_vaddr as usize;
+        let end = start + ph.p_memsz as usize;
+        let pages = end.div_ceil(0x1000) - (start / 0x1000);
+        let mut flags = *b"---u-";
+        if ph.p_flags & PF_R != 0 {
+            flags[0] = b'r';
+        }
+        if ph.p_flags & PF_W != 0 {
+            flags[1] = b'w';
+        }
+        if ph.p_flags & PF_X != 0 {
+            flags[2] = b'x';
+        }
+        let data = elf.segment_data(&ph).map_err(|_| Error::Address)?;
+        let first = start & !0xfff;
+        let file_end = start + data.len();
+        for page_idx in 0..pages {
+            let page_va = first + (page_idx << 12);
+            let page = map_page(page_va, &flags)?;
+            let copy_start = page_va.max(start);
+            let copy_end = (page_va + 0x1000).min(file_end);
+            if copy_start < copy_end {
+                let src = data
+                    .get(copy_start - start..copy_end - start)
+                    .ok_or(Error::Address)?;
+                unsafe {
+                    page.as_mut_ptr()
+                        .cast::<u8>()
+                        .add(copy_start - page_va)
+                        .copy_from_nonoverlapping(src.as_ptr(), src.len());
+                }
+            }
+        }
+    }
+
+    let manifest = unsafe {
+        image_ptr(elf.ehdr.e_entry as usize, size_of::<tau::Manifest>())?
+            .cast::<tau::Manifest>()
+            .read_unaligned()
+    };
+    if !manifest.dependencies.is_empty() {
+        let dep_bytes = manifest
+            .dependencies
+            .len()
+            .checked_mul(size_of::<tau::ModuleId>())
+            .ok_or(Error::Address)?;
+        image_ptr(manifest.dependencies.as_ptr().addr(), dep_bytes)?;
+    }
+    if manifest.mapped_regions.len() != 1 {
+        return Err(Error::Address);
+    }
+    let region = unsafe {
+        image_ptr(
+            manifest.mapped_regions.as_ptr().addr(),
+            size_of::<tau::MappedRegion>(),
+        )?
+        .cast::<tau::MappedRegion>()
+        .read_unaligned()
+    };
+    if region.phys_start.is_some()
+        || !region.write
+        || region.pages == 0
+        || region.pages > 256
+        || (region.virtual_start as usize) != (region.pages << 12).wrapping_neg()
+    {
+        return Err(Error::Address);
+    }
+    let stack_start = region.virtual_start as usize;
+    for page_idx in 0..region.pages {
+        map_page(stack_start + (page_idx << 12), b"rw-u-")?;
+    }
+
+    let wait_slots_count = manifest.wait_slots.len();
+    let wait_slots_addr = if wait_slots_count == 0 {
+        0
+    } else {
+        manifest.wait_slots.as_ptr().addr()
+    };
+    unsafe { arch::asm!("fence.i") };
+    Ok(state::BootModule {
+        entry: manifest.entry as usize,
+        stack_pages: region.pages,
+        wait_slots_addr,
+        wait_slots_count,
+    })
 }
 
 mod boot_dtb {

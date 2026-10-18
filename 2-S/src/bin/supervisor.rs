@@ -12,10 +12,9 @@
     warn(implicit_provenance_casts)
 )]
 
-use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem, num::NonZero, sync::atomic::Ordering};
+use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem, sync::atomic::Ordering};
 
 use supervisor::{
-    llfree::Allocator,
     module, sbi, state, vmem, mmu, cpu, loading,
     scheduler::{self, Thread, ReturnKind, Scheduler, Dispatch},
 };
@@ -54,8 +53,6 @@ unsafe extern "C" {
     // System-wide scheduler backing, initialized before the first user entry.
     #[allow(improper_ctypes)]
     static __SCHEDULER: UnsafeCell<Scheduler>;
-    // System-wide physical-memory allocator metadata, shared between harts.
-    static __ALLOCATOR: UnsafeCell<u8>;
     // System-wide allocator access and physical-memory base, initialized by the
     // boot hart. Despite its name, this is not a thread's module context.
     #[allow(improper_ctypes)]
@@ -95,56 +92,15 @@ extern "C" fn _start() -> ! {
     }
 }
 
-extern "C" fn init(
-    hart_id: usize,
-    base_addr: usize,
-    info: usize,
-    info_pages: usize,
-    cores: usize,
-    frames: usize,
-) -> ! {
+extern "C" fn init(hart_id: usize, info: usize, info_pages: usize) -> ! {
     let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
     let module = UnsafeCell::raw_get(&raw const __MODULE_CONTEXT);
     let tables = UnsafeCell::raw_get(&raw const __MODULE);
     let scheduler = UnsafeCell::raw_get(&raw const __SCHEDULER);
 
-    // `cores != 0` means this is first run on the bootstrap core
-    // otherwise this is additional core bring up
-    if cores != 0 {
-        writeln!(
-            sbi::Console,
-            "SU: init hart={hart_id} cores={cores} frames=0x{frames:016x}\r"
-        )
-        .unwrap_or_default();
-
-        let Some(frames) = NonZero::new(frames) else {
-            writeln!(sbi::Console, "SU: amount of RAM is zero\r").unwrap_or_default();
-            loop {
-                hint::spin_loop();
-            }
-        };
-        let allocator = unsafe {
-            Allocator::new(frames, UnsafeCell::raw_get(&raw const __ALLOCATOR))
-                .unwrap_unchecked()
-                .into_lower()
-        };
-
-        unsafe {
-            UnsafeCell::raw_get(&raw const __CONTEXT).write(state::Context {
-                allocator,
-                base_addr,
-                bootstrap_root: vmem::Window::current_root(),
-            });
-        }
-        unsafe { mmu::init(&mut window) };
-        writeln!(
-            sbi::Console,
-            "SU: ASID mask=0x{:04x} force_flush={}\r",
-            mmu::asid_mask(&window),
-            mmu::force_flush(&window)
-        )
-        .unwrap_or_default();
-    }
+    let hart = mmu::init();
+    writeln!(sbi::Console, "SU: {hart}\r").unwrap_or_default();
+    *window.hart_mut() = hart;
 
     // initialize `__THREAD`
     let thread = {

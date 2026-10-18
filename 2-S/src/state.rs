@@ -2,21 +2,32 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{hint, num::NonZeroUsize, slice, ptr, mem};
+use core::{hint, num::NonZeroUsize, ptr};
 
 use super::{
-    vmem::{Window, WindowAccess, Mapping},
+    llfree, loading,
     module::{ModuleContext, ModuleTables},
+    sbi,
     scheduler::{Scheduler, Thread},
+    vmem::{self, Mapping, Window, WindowAccess},
     waiting::WaitTable,
-    llfree, loading, vmem, sbi, layout,
 };
+
+#[derive(Clone, Copy, Default, Debug)]
+#[repr(C)]
+pub struct BootModule {
+    pub entry: usize,
+    pub stack_pages: usize,
+    pub wait_slots_addr: usize,
+    pub wait_slots_count: usize,
+}
 
 pub struct Context {
     pub allocator: llfree::Lower<'static>,
     pub base_addr: usize,
     /// Kept independently of the active satp for later loader/hart startup.
     pub bootstrap_root: vmem::Root,
+    pub boot: BootModule,
 }
 
 impl Context {
@@ -59,7 +70,6 @@ impl Context {
 
 #[derive(Debug)]
 pub enum InitError {
-    Elf(elf::ParseError),
     Allocator(llfree::Error),
     Alloc(tau::AllocError),
     Manifest,
@@ -112,157 +122,8 @@ pub unsafe fn init(
         .map_err(InitError::Alloc)?;
     unsafe { ModuleTables::init_at(tables, true, false) };
 
-    let elf_base = context.base_addr + (layout::SYSTEM_OFFSET << 12);
-    let data = ptr::from_mut(window).cast::<u8>().with_addr(elf_base);
-    let data = unsafe { slice::from_raw_parts(data, layout::SYSTEM_SIZE << 12) };
-
-    use elf::{
-        ElfBytes,
-        endian::LittleEndian,
-        abi::{PT_LOAD, PF_R, PF_W, PF_X},
-    };
-    let elf = ElfBytes::<LittleEndian>::minimal_parse(data).map_err(InitError::Elf)?;
-    let mut manifest_segment = None;
-    let mut manifest_range = 0..0;
-    if let Some(s) = elf.segments() {
-        for ph in s.iter().filter(|s| s.p_type == PT_LOAD) {
-            if (ph.p_vaddr..(ph.p_vaddr + ph.p_memsz)).contains(&elf.ehdr.e_entry) {
-                // manifest is in this section
-                manifest_segment = Some(ph);
-                let offset = (elf.ehdr.e_entry - ph.p_vaddr) as usize;
-                manifest_range = offset..(offset + size_of::<tau::Manifest>());
-            }
-            let mut flags = *b"---u-";
-            if ph.p_flags & PF_R != 0 {
-                flags[0] = b'r';
-            }
-            if ph.p_flags & PF_W != 0 {
-                flags[1] = b'w';
-            }
-            if ph.p_flags & PF_X != 0 {
-                flags[2] = b'x';
-            }
-            let virtual_pages = ((ph.p_vaddr & 0xfff) + ph.p_memsz).div_ceil(0x1000) as usize;
-            let mapping = Mapping {
-                addr_virtual: (ph.p_vaddr as usize) & !0xfff,
-                virtual_pages,
-                addr_physical: None,
-                physical_pages: 0,
-                flags,
-            };
-
-            window
-                .map(root, mapping, || context.page(thread.hart_id()))
-                .map_err(InitError::Allocator)?;
-            // Bootstrap needs owned, zeroed segment backing too. Borrowing the
-            // file's last page exposes ELF metadata as nonzero BSS, and lets
-            // shared globals overwrite the source image.
-            let file = elf.segment_data(&ph).map_err(InitError::Elf)?;
-            let mut done = 0;
-            while done < file.len() {
-                let address = ph.p_vaddr as usize + done;
-                let (physical, _) = window.resolve(root, address).ok_or(InitError::Manifest)?;
-                let offset = physical & 0xfff;
-                let count = (vmem::PAGE - offset).min(file.len() - done);
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        file.as_ptr().add(done),
-                        window.page_mut(physical & !0xfff).as_mut_ptr().add(offset),
-                        count,
-                    )
-                };
-                done += count;
-            }
-        }
-    }
-
-    if manifest_range.is_empty() {
-        return Err(InitError::Manifest);
-    }
-    let Some(header) = manifest_segment else {
-        return Err(InitError::Manifest);
-    };
-    let Ok(data) = elf.segment_data(&header) else {
-        return Err(InitError::Manifest);
-    };
-    let Some(manifest) = data.get(manifest_range) else {
-        return Err(InitError::Manifest);
-    };
-    let read_usize = |offset| unsafe {
-        let entry = manifest
-            .get_unchecked(offset..)
-            .get_unchecked(..size_of::<usize>());
-        usize::from_ne_bytes(entry.try_into().unwrap_unchecked())
-    };
-
-    let sl = mem::offset_of!(tau::Manifest, dependencies);
-    let deps_vaddr = read_usize(sl);
-    let deps_num = read_usize(sl + size_of::<usize>());
-
-    let offset = deps_vaddr - header.p_vaddr as usize;
-    for i in 0..deps_num {
-        let range = (offset + i * size_of::<tau::ModuleId>())
-            ..(offset + (i + 1) * size_of::<tau::ModuleId>());
-        let Some(dep_repr) = data.get(range) else {
-            return Err(InitError::Manifest);
-        };
-        let module_id = unsafe { *dep_repr.as_ptr().cast::<tau::ModuleId>() };
-        // TODO: find the module and put in the table
-        // tables.insert_dependency(...);
-        let _ = module_id;
-    }
-
-    let sl = mem::offset_of!(tau::Manifest, mapped_regions);
-    let ranges_vaddr = read_usize(sl);
-    let ranges_num = read_usize(sl + size_of::<usize>());
-
-    let offset = ranges_vaddr - header.p_vaddr as usize;
-    for i in 0..ranges_num {
-        let range = (offset + i * size_of::<tau::MappedRegion>())
-            ..(offset + (i + 1) * size_of::<tau::MappedRegion>());
-        let Some(range_repr) = data.get(range) else {
-            return Err(InitError::Manifest);
-        };
-        let region = unsafe { *range_repr.as_ptr().cast::<tau::MappedRegion>() };
-        alloc_pages(
-            window,
-            thread,
-            context,
-            region.phys_start,
-            region.virtual_start as usize,
-            region.pages,
-            *b"rw-u-",
-        )
-        .map_err(InitError::Alloc)?;
-    }
-
-    if ranges_num != 1 {
-        return Err(InitError::Manifest);
-    }
-    let stack_offset = ranges_vaddr
-        .checked_sub(header.p_vaddr as usize)
-        .ok_or(InitError::Manifest)?;
-    let stack_bytes = data
-        .get(stack_offset..stack_offset + size_of::<tau::MappedRegion>())
-        .ok_or(InitError::Manifest)?;
-    let stack_pages = usize::from_ne_bytes(
-        stack_bytes[mem::offset_of!(tau::MappedRegion, pages)..][..8]
-            .try_into()
-            .unwrap(),
-    );
-    let stack_start = usize::from_ne_bytes(
-        stack_bytes[mem::offset_of!(tau::MappedRegion, virtual_start)..][..8]
-            .try_into()
-            .unwrap(),
-    );
-    if !(1..=256).contains(&stack_pages)
-        || stack_start != (stack_pages * vmem::PAGE).wrapping_neg()
-        || stack_bytes[..8] != [0; 8]
-        || stack_bytes[mem::offset_of!(tau::MappedRegion, write)] != 1
-    {
-        return Err(InitError::Manifest);
-    }
-    let sepc = read_usize(mem::offset_of!(tau::Manifest, entry));
+    let sepc = context.boot.entry;
+    let stack_pages = context.boot.stack_pages;
     let satp = Window::current_root();
     let stem = (sepc >> 30) & 511;
     let wait_table = WaitTable::prepare(
@@ -270,8 +131,8 @@ pub unsafe fn init(
         context,
         thread.hart_id(),
         stem,
-        read_usize(mem::offset_of!(tau::Manifest, wait_slots)),
-        read_usize(mem::offset_of!(tau::Manifest, wait_slots) + size_of::<usize>()),
+        context.boot.wait_slots_addr,
+        context.boot.wait_slots_count,
     )
     .map_err(|_| InitError::Manifest)?;
     // The boot ELF uses the same protected shared-stem rule as prepared ELFs.

@@ -18,6 +18,7 @@ use super::{
 pub const SV39: usize = 8;
 pub const PAGE: usize = 4096;
 pub const SCHEDULER: usize = 0xffff_ffc0_0040_0000;
+pub const ALLOCATOR: usize = 0xffff_ffc0_006e_0000;
 pub const THREAD: usize = 0xffff_ffc0_0020_0000;
 pub const MODULE_CONTEXT: usize = 0xffff_ffc0_0021_0000;
 pub const MODULE: usize = 0xffff_ffc0_0022_0000;
@@ -167,7 +168,7 @@ impl WindowAccess {
         }
     }
 
-    pub(super) fn hart_mut(&mut self) -> &mut Hart {
+    pub fn hart_mut(&mut self) -> &mut Hart {
         unsafe {
             &mut (&mut *UnsafeCell::raw_get(&raw const (*self.base).hart))
                 .assume_init_mut()
