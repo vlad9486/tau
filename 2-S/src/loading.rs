@@ -195,7 +195,7 @@ fn load_elf(
             unsafe {
                 ptr::copy_nonoverlapping(
                     file.as_ptr().add(done),
-                    window.page_pointer(physical & !0xfff).add(offset),
+                    window.page_mut(physical & !0xfff).as_mut_ptr().add(offset),
                     count,
                 )
             };
@@ -266,12 +266,12 @@ pub fn prepare(
                 return Err(memory(e));
             }
         };
-        let pointer = window.map_module_tables(module_tables);
+        let new_tables = window.map_module_tables(module_tables);
         unsafe {
-            ModuleTables::init_at(pointer, false, false);
-            ptr::addr_of_mut!((*pointer).wait_table).write(wait_table);
-            ptr::addr_of_mut!((*pointer).stem_index).write(dep.root_index);
-            ptr::addr_of_mut!((*pointer).stack_pages).write(dep.stack_pages);
+            ModuleTables::init_at(ptr::from_mut(new_tables), false, false);
+            ptr::addr_of_mut!(new_tables.wait_table).write(wait_table);
+            ptr::addr_of_mut!(new_tables.stem_index).write(dep.root_index);
+            ptr::addr_of_mut!(new_tables.stack_pages).write(dep.stack_pages);
         };
         dep.tables = module_tables;
         window.write_descriptor(descriptor, dep);
@@ -339,8 +339,7 @@ fn insert_dependency(
         Some(physical) => {
             // Alias only at publication, after snapshot/construction aliases
             // have expired. No window remapping may occur while borrowed.
-            let pointer = window.map_module_tables(physical);
-            unsafe { &*pointer }.insert_dependency(descriptor)
+            window.map_module_tables(physical).insert_dependency(descriptor)
         }
     }
 }
@@ -381,7 +380,7 @@ pub fn invoke(
     if let Some(root) = module.dependency(slot) {
         let dep = window.read_descriptor(descriptor);
         let target_tables = window.map_module_tables(dep.tables);
-        if unsafe { (*target_tables).poisoned.load(Ordering::Acquire) } {
+        if target_tables.poisoned.load(Ordering::Acquire) {
             return Err(ModuleError::Poisoned);
         }
         return Ok(root);
@@ -445,13 +444,13 @@ fn construct(
                 .map(root, mapping, || context.page(hart))
                 .map_err(memory)?;
         }
+        let tag = mmu::allocate_tag(window).ok_or(ModuleError::OutOfMemory)?;
+        let root = Root::sv39(root.page(), tag);
         let private = window
             .map_module_context(root)
             .ok_or(ModuleError::InvalidImage)?;
-        let tag = mmu::allocate_tag(window).ok_or(ModuleError::OutOfMemory)?;
-        let root = Root::sv39(root.page(), tag);
         unsafe {
-            ModuleContext::init_at(private, root, dep.entry, dep.root_index);
+            ModuleContext::init_at(ptr::from_mut(private), root, dep.entry, dep.root_index);
             // All registers start at zero, including sp (top of high stack).
         }
         Ok(root)
@@ -533,18 +532,18 @@ pub fn spawn(
                 .map(root, mapping, || context.page(hart))
                 .map_err(memory)?;
         }
+        let tag = mmu::allocate_tag(window).ok_or(SpawnError::OutOfMemory)?;
+        let root = Root::sv39(root.page(), tag);
         let private = window
             .map_module_context(root)
             .ok_or(SpawnError::OutOfMemory)?;
-        let tag = mmu::allocate_tag(window).ok_or(SpawnError::OutOfMemory)?;
-        let root = Root::sv39(root.page(), tag);
         unsafe {
-            ModuleContext::init_at(private, root, entry, index);
-            ptr::addr_of_mut!((*private).sepc).write(entry);
+            ModuleContext::init_at(ptr::from_mut(private), root, entry, index);
+            ptr::addr_of_mut!(private.sepc).write(entry);
         }
         message[0] = 0;
         let thread = Thread::new(hart, id, root, message, ReturnKind::Entry);
-        unsafe { window.thread_mut(thread_page).write(thread) };
+        window.write_thread(thread_page, thread);
         Ok(thread_page)
     })();
     if result.is_err() {

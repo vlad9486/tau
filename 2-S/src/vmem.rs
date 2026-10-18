@@ -86,7 +86,7 @@ fn branch(page: usize) -> usize {
 }
 
 #[repr(C, align(4096))]
-pub struct Page([u8; PAGE]);
+pub struct Page(pub [u8; PAGE]);
 
 #[repr(C, align(4096))]
 pub struct Padded<T> {
@@ -182,37 +182,32 @@ impl WindowAccess {
         }
     }
 
-    fn alias(&mut self, slot: usize, physical: usize) -> *mut u8 {
+    fn alias(&mut self, slot: usize, physical: usize) {
         debug_assert!(slot > 0 && slot < 511 && slot != HART_SLOT && physical & 0xfff == 0);
         let pte = (physical >> 2) | flags_new(b"rw---");
-        let target = self.base.cast::<u8>().wrapping_add(slot * PAGE).cast_mut();
+        let target = self.base.addr() + slot * PAGE;
         let table = unsafe { UnsafeCell::raw_get(&raw const (*self.base).table) };
         let cell = unsafe { table.cast::<usize>().add(slot) };
         if unsafe { cell.read_volatile() } != pte {
             unsafe { cell.write_volatile(pte) };
-            asm::sfence_vma(Some(target.addr()), None);
+            asm::sfence_vma(Some(target), None);
         }
-        target
     }
 
     fn read_pte(&mut self, table: usize, index: usize) -> usize {
         debug_assert!(index < 512);
-        unsafe {
-            self.alias(PTE_SLOT, table)
-                .cast::<usize>()
-                .add(index)
-                .read_volatile()
-        }
+        self.alias(PTE_SLOT, table);
+        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte) };
+        let cell = unsafe { ptr.cast::<usize>().add(index) };
+        unsafe { cell.read_volatile() }
     }
 
     fn write_pte(&mut self, table: usize, index: usize, pte: usize) {
         debug_assert!(index < 512);
-        unsafe {
-            self.alias(PTE_SLOT, table)
-                .cast::<usize>()
-                .add(index)
-                .write_volatile(pte)
-        };
+        self.alias(PTE_SLOT, table);
+        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte) };
+        let cell = unsafe { ptr.cast::<usize>().add(index) };
+        unsafe { cell.write_volatile(pte) };
     }
 
     fn new_page(
@@ -220,7 +215,7 @@ impl WindowAccess {
         page: impl Fn() -> Result<usize, llfree::Error>,
     ) -> Result<usize, llfree::Error> {
         let physical = page()?;
-        unsafe { self.page_pointer(physical).write_bytes(0, PAGE) };
+        self.page_mut(physical).fill(0);
         Ok(physical)
     }
 
@@ -232,59 +227,63 @@ impl WindowAccess {
         Ok(Root::sv39(self.new_page(page)?, asid))
     }
 
-    pub fn page_pointer(&mut self, physical: usize) -> *mut u8 {
-        self.alias(PAGE_SLOT, physical)
+    pub fn page_mut(&mut self, physical: usize) -> &mut [u8; PAGE] {
+        self.alias(PAGE_SLOT, physical);
+        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).page) };
+        unsafe { &mut (*ptr).assume_init_mut().0 }
     }
 
     pub fn read_descriptor(&mut self, physical: usize) -> PreparedModule {
-        let ptr = self
-            .alias(DESCRIPTOR_SLOT, physical)
-            .cast::<PreparedModule>();
-        unsafe { ptr.read() }
+        self.alias(DESCRIPTOR_SLOT, physical);
+        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).descriptor) };
+        unsafe { (*ptr).assume_init_ref().inner }
     }
 
     pub fn write_descriptor(&mut self, physical: usize, descriptor: PreparedModule) {
-        let ptr = self
-            .alias(DESCRIPTOR_SLOT, physical)
-            .cast::<PreparedModule>();
-        unsafe { ptr.write(descriptor) };
+        self.alias(DESCRIPTOR_SLOT, physical);
+        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).descriptor) };
+        unsafe { (*ptr).write(Padded { inner: descriptor }) };
     }
 
-    pub fn wait_pointer(&mut self, physical: usize) -> *mut u8 {
-        self.alias(WAIT_SLOT, physical)
+    pub fn wait_mut(&mut self, physical: usize) -> &mut [u8; PAGE] {
+        self.alias(WAIT_SLOT, physical);
+        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).wait) };
+        unsafe { &mut (*ptr).assume_init_mut().0 }
     }
 
-    pub fn thread(&mut self, physical: usize) -> *const Thread {
-        self.alias(THREAD_SLOT, physical).cast()
+    pub fn thread(&mut self, physical: usize) -> &Thread {
+        self.alias(THREAD_SLOT, physical);
+        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).thread) };
+        unsafe { &(*ptr).assume_init_ref().inner }
     }
 
-    pub fn thread_mut(&mut self, physical: usize) -> *mut Thread {
-        self.alias(THREAD_SLOT, physical).cast()
+    pub fn thread_mut(&mut self, physical: usize) -> &mut Thread {
+        self.alias(THREAD_SLOT, physical);
+        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).thread) };
+        unsafe { &mut (*ptr).assume_init_mut().inner }
     }
 
-    pub fn map_module_context(&mut self, root: Root) -> Option<*mut ModuleContext> {
+    pub fn write_thread(&mut self, physical: usize, thread: Thread) {
+        self.alias(THREAD_SLOT, physical);
+        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).thread) };
+        unsafe { (*ptr).write(Padded { inner: thread }) };
+    }
+
+    pub fn map_module_context(&mut self, root: Root) -> Option<&mut ModuleContext> {
         for i in 0..CONTEXT_PAGES {
             let (physical, _) = self.resolve(root, MODULE_CONTEXT + i * PAGE)?;
             self.alias(MODULE_CONTEXT_SLOT + i, physical);
         }
-        Some(
-            self.base
-                .cast::<u8>()
-                .wrapping_add(MODULE_CONTEXT_SLOT * PAGE)
-                .cast_mut()
-                .cast(),
-        )
+        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).module_context) };
+        Some(unsafe { &mut (&mut *ptr).assume_init_mut().inner })
     }
 
-    pub fn map_module_tables(&mut self, physical: usize) -> *mut ModuleTables {
+    pub fn map_module_tables(&mut self, physical: usize) -> &mut ModuleTables {
         for i in 0..TABLE_PAGES {
             self.alias(MODULE_SLOT + i, physical + i * PAGE);
         }
-        self.base
-            .cast::<u8>()
-            .wrapping_add(MODULE_SLOT * PAGE)
-            .cast_mut()
-            .cast()
+        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).module) };
+        unsafe { (&mut *ptr).assume_init_mut() }
     }
 
     pub fn map_snapshot(&mut self, physical: usize, pages: usize) -> *mut u8 {
@@ -292,10 +291,8 @@ impl WindowAccess {
         for i in 0..pages {
             self.alias(SNAPSHOT_SLOT + i, physical + i * PAGE);
         }
-        self.base
-            .cast::<u8>()
-            .wrapping_add(SNAPSHOT_SLOT * PAGE)
-            .cast_mut()
+        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).snapshot) };
+        ptr.cast::<u8>()
     }
 
     pub fn root_branch(&mut self, root: Root, index: usize) -> Option<usize> {
@@ -416,7 +413,9 @@ impl WindowAccess {
             }
             let offset = physical & 0xfff;
             let count = (PAGE - offset).min(destination.len() - done);
-            let source = self.alias(USER_SLOT, physical & !0xfff);
+            self.alias(USER_SLOT, physical & !0xfff);
+            let user_ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).user) };
+            let source = unsafe { (*user_ptr).assume_init_ref().0.as_ptr() };
             unsafe {
                 ptr::copy_nonoverlapping(
                     source.add(offset),

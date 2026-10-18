@@ -157,7 +157,7 @@ pub unsafe fn init(
                 unsafe {
                     ptr::copy_nonoverlapping(
                         file.as_ptr().add(done),
-                        window.page_pointer(physical & !0xfff).add(offset),
+                        window.page_mut(physical & !0xfff).as_mut_ptr().add(offset),
                         count,
                     )
                 };

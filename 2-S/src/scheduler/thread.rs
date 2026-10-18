@@ -108,14 +108,14 @@ impl Thread {
         window: &mut super::vmem::WindowAccess,
         physical: usize,
     ) -> ThreadState {
-        unsafe { (*window.thread(physical)).state }
+        window.thread(physical).state
     }
 
     pub(super) unsafe fn hart(
         window: &mut super::vmem::WindowAccess,
         physical: usize,
     ) -> usize {
-        unsafe { (*window.thread(physical)).hart_id }
+        window.thread(physical).hart_id
     }
 
     pub(super) unsafe fn write(
@@ -123,6 +123,6 @@ impl Thread {
         physical: usize,
         state: ThreadState,
     ) {
-        unsafe { (*window.thread_mut(physical)).state = state };
+        window.thread_mut(physical).state = state;
     }
 }

@@ -4,8 +4,14 @@
 
 //! Validated, immutable module wait-table backing. Record access requires the
 //! scheduler lock; temporary window pointers never leave these operations.
-use core::sync::atomic::{AtomicU8, Ordering};
+
+use core::{
+    ptr,
+    sync::atomic::{AtomicU8, Ordering},
+};
+
 use tau::{ModuleError, WaitError};
+
 use super::{
     state::Context,
     vmem::{self, Root, WindowAccess, PAGE},
@@ -76,11 +82,7 @@ impl WaitTable {
             .block(hart, order)
             .map_err(|_| ModuleError::OutOfMemory)?;
         for page in 0..pages {
-            unsafe {
-                window
-                    .page_pointer(records + page * PAGE)
-                    .write_bytes(0, PAGE)
-            };
+            window.page_mut(records + page * PAGE).fill(0);
         }
         Ok(Self {
             base,
@@ -119,13 +121,11 @@ impl WaitTable {
         if flags & 30 != 22 {
             return Err(WaitError::InvalidWaiter);
         }
-        let byte = unsafe {
-            &*window
-                .wait_pointer(physical & !(PAGE - 1))
-                .add(physical & (PAGE - 1))
-                .cast::<AtomicU8>()
-        }
-        .load(Ordering::SeqCst);
+        let byte = {
+            let page = window.wait_mut(physical & !(PAGE - 1));
+            let cell = unsafe { &*page[physical & (PAGE - 1)..].as_ptr().cast::<AtomicU8>() };
+            cell.load(Ordering::SeqCst)
+        };
         match byte {
             0 => Ok(false),
             1 => Ok(true),
@@ -141,13 +141,9 @@ impl WaitTable {
     pub unsafe fn read(self, window: &mut WindowAccess, index: usize) -> WaitRecord {
         debug_assert!(index < self.count);
         let address = self.records + index * size_of::<WaitRecord>();
-        unsafe {
-            window
-                .wait_pointer(address & !(PAGE - 1))
-                .add(address & (PAGE - 1))
-                .cast::<WaitRecord>()
-                .read()
-        }
+        let page = window.wait_mut(address & !(PAGE - 1));
+        let offset = address & (PAGE - 1);
+        unsafe { ptr::read(page[offset..].as_ptr().cast::<WaitRecord>()) }
     }
 
     /// Write one record through a temporary physical alias.
@@ -158,12 +154,8 @@ impl WaitTable {
     pub unsafe fn write(self, window: &mut WindowAccess, index: usize, record: WaitRecord) {
         debug_assert!(index < self.count);
         let address = self.records + index * size_of::<WaitRecord>();
-        unsafe {
-            window
-                .wait_pointer(address & !(PAGE - 1))
-                .add(address & (PAGE - 1))
-                .cast::<WaitRecord>()
-                .write(record)
-        };
+        let page = window.wait_mut(address & !(PAGE - 1));
+        let offset = address & (PAGE - 1);
+        unsafe { ptr::write(page[offset..].as_mut_ptr().cast::<WaitRecord>(), record) };
     }
 }
