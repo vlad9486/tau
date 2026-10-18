@@ -339,7 +339,9 @@ fn insert_dependency(
         Some(physical) => {
             // Alias only at publication, after snapshot/construction aliases
             // have expired. No window remapping may occur while borrowed.
-            window.map_module_tables(physical).insert_dependency(descriptor)
+            window
+                .map_module_tables(physical)
+                .insert_dependency(descriptor)
         }
     }
 }
@@ -469,7 +471,7 @@ pub fn spawn(
     module: &ModuleTables,
     context: &Context,
     entry: usize,
-    id: usize,
+    _id: usize,
     mut message: [usize; 6],
 ) -> Result<usize, tau::SpawnError> {
     use tau::SpawnError;
@@ -542,7 +544,7 @@ pub fn spawn(
             ptr::addr_of_mut!(private.sepc).write(entry);
         }
         message[0] = 0;
-        let thread = Thread::new(hart, id, root, message, ReturnKind::Entry);
+        let thread = Thread::new(hart, root, message, ReturnKind::Entry);
         window.write_thread(thread_page, thread);
         Ok(thread_page)
     })();

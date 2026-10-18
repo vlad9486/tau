@@ -14,7 +14,7 @@ use tau::Event;
 
 use super::{
     thread::{ActiveWait, Phase, Resume},
-    Context, Thread, cpu, sbi,
+    Context, cpu, sbi,
     vmem::{self, Mapping, Root, Window, WindowAccess},
 };
 
@@ -45,6 +45,7 @@ pub(super) struct State {
     pub(super) active: bool,
     pub(super) quantum: usize,
     pub(super) interrupt_targets: [Option<InterruptTarget>; 8],
+    pub(super) deadlines: [usize; CAPACITY],
 }
 
 // All access to the shared State is serialized by the interrupt-safe lock.
@@ -155,17 +156,15 @@ impl State {
         }
     }
 
-    pub(super) fn program(&self, window: &mut WindowAccess) {
+    pub(super) fn program(&self) {
         let mut next = if self.running != 0 && self.length != 0 {
             self.quantum
         } else {
             usize::MAX
         };
-        for physical in self.registry.iter().take(self.count) {
-            if let Some(wait) = unsafe { Thread::read(window, *physical) }.wait
-                && wait.deadline != 0
-            {
-                next = next.min(wait.deadline);
+        for &deadline in self.deadlines.iter().take(self.count) {
+            if deadline != 0 {
+                next = next.min(deadline);
             }
         }
         sbi::set_timer(next).unwrap_or_default();
@@ -187,7 +186,7 @@ impl State {
         else {
             return;
         };
-        let mut thread = unsafe { Thread::read(window, physical) };
+        let mut thread = window.thread(physical).state;
         let Some(current) = thread.wait else {
             return;
         };
@@ -202,7 +201,8 @@ impl State {
         slot.sequence = 0;
         unsafe { wait.table.write(window, wait.slot, slot) };
         let enqueue = thread.complete([0, event.encode(), 0, 0, 0, 0]);
-        unsafe { Thread::write(window, physical, thread) };
+        window.thread_mut(physical).state = thread;
+        unsafe { self.set_deadline(index, 0) };
         if enqueue {
             if high_priority {
                 self.push_front(index + 1);
@@ -215,14 +215,22 @@ impl State {
     fn expire(&mut self, window: &mut WindowAccess) {
         let time = now();
         for index in 0..self.count {
-            let physical = self.physical(index + 1);
-            if let Some(wait) = unsafe { Thread::read(window, physical) }.wait
-                && wait.deadline != 0
-                && wait.deadline <= time
-            {
-                self.complete(window, physical, wait, Event::Timeout, false);
+            let deadline = unsafe { self.deadline(index) };
+            if deadline != 0 && deadline <= time {
+                let physical = self.physical(index + 1);
+                if let Some(wait) = window.thread(physical).state.wait {
+                    self.complete(window, physical, wait, Event::Timeout, false);
+                }
             }
         }
+    }
+
+    pub(super) unsafe fn deadline(&self, id: usize) -> usize {
+        unsafe { *self.deadlines.get_unchecked(id) }
+    }
+
+    pub(super) unsafe fn set_deadline(&mut self, id: usize, deadline: usize) {
+        unsafe { *self.deadlines.get_unchecked_mut(id) = deadline };
     }
 }
 
@@ -269,10 +277,9 @@ impl Scheduler {
             ptr::addr_of_mut!((*state).active).write(false);
             ptr::addr_of_mut!((*state).quantum).write(0);
             ptr::addr_of_mut!((*state).interrupt_targets).write([None; 8]);
+            ptr::addr_of_mut!((*state).deadlines).write([0; CAPACITY]);
         }
-        let mut thread = unsafe { Thread::read(window, physical) };
-        thread.phase = Phase::Running;
-        unsafe { Thread::write(window, physical, thread) };
+        window.thread_mut(physical).state.phase = Phase::Running;
         Ok(())
     }
 
@@ -287,30 +294,21 @@ pub struct Dispatch {
     pub message: [usize; 6],
 }
 
-pub fn notify_hardware_interrupt(
-    window: &mut WindowAccess,
-    scheduler: &Scheduler,
-    hart_id: usize,
-) {
+pub fn notify_hardware_interrupt(window: &mut WindowAccess, scheduler: &Scheduler, hart_id: usize) {
     let mut scheduler = scheduler.lock();
-    let Some(target) = scheduler
-        .interrupt_targets
-        .get(hart_id)
-        .copied()
-        .flatten()
-    else {
+    let Some(target) = scheduler.interrupt_targets.get(hart_id).copied().flatten() else {
         return;
     };
-    let thread = unsafe { Thread::read(window, target.physical) };
-    if let Some(wait) = thread.wait {
-        scheduler.complete(window, target.physical, wait, Event::Notified { arg: 0 }, true);
+    if let Some(wait) = window.thread(target.physical).state.wait {
+        let event = Event::Notified { arg: 0 };
+        scheduler.complete(window, target.physical, wait, event, true);
     } else {
         let mut slot = unsafe { target.table.read(window, target.slot) };
         slot.pending = true;
         unsafe { target.table.write(window, target.slot, slot) };
     }
     if scheduler.active {
-        scheduler.program(window);
+        scheduler.program();
     }
 }
 
@@ -318,16 +316,16 @@ pub fn preempt(window: &mut WindowAccess, scheduler: &Scheduler) -> Dispatch {
     let hart = {
         let mut scheduler = scheduler.lock();
         let physical = scheduler.physical(scheduler.running);
-        let mut thread = unsafe { Thread::read(window, physical) };
-        thread.root = Window::current_root();
-        thread.resume = Resume::Interrupt;
-        thread.phase = Phase::Runnable;
-        unsafe { Thread::write(window, physical, thread) };
+        let thread = &mut window.thread_mut(physical);
+        thread.state.root = Window::current_root();
+        thread.state.resume = Resume::Interrupt;
+        thread.state.phase = Phase::Runnable;
+        let hart_id = thread.hart_id();
         scheduler.expire(window);
         let id = scheduler.running;
         scheduler.enqueue(id);
         scheduler.running = 0;
-        unsafe { Thread::hart(window, physical) }
+        hart_id
     };
     dispatch(window, scheduler, hart)
 }
@@ -342,41 +340,40 @@ pub fn dispatch(window: &mut WindowAccess, scheduler: &Scheduler, hart_id: usize
             scheduler.expire(window);
             if scheduler.running != 0 {
                 let physical = scheduler.physical(scheduler.running);
-                let mut thread = unsafe { Thread::read(window, physical) };
+                let thread = &mut window.thread_mut(physical).state;
                 if thread.phase != Phase::Parking {
                     invariant_failed();
                 }
                 let parked = thread.commit_parking();
                 if !parked {
-                    unsafe { Thread::write(window, physical, thread) };
-                    scheduler.program(window);
-                    return Dispatch {
+                    let dispatch = Dispatch {
                         root: thread.root,
                         kind: thread.resume,
                         message: thread.message,
                     };
+                    scheduler.program();
+                    return dispatch;
                 }
-                unsafe { Thread::write(window, physical, thread) };
                 scheduler.running = 0;
             }
             if let Some(id) = scheduler.pop() {
                 let physical = scheduler.physical(id);
-                let mut thread = unsafe { Thread::read(window, physical) };
+                let thread = &mut window.thread_mut(physical).state;
                 if thread.phase != Phase::Runnable {
                     invariant_failed();
                 }
                 thread.phase = Phase::Running;
-                unsafe { Thread::write(window, physical, thread) };
-                scheduler.running = id;
-                scheduler.quantum = now().saturating_add(QUANTUM);
-                scheduler.program(window);
-                return Dispatch {
+                let dispatch = Dispatch {
                     root: thread.root,
                     kind: thread.resume,
                     message: thread.message,
                 };
+                scheduler.running = id;
+                scheduler.quantum = now().saturating_add(QUANTUM);
+                scheduler.program();
+                return dispatch;
             }
-            scheduler.program(window);
+            scheduler.program();
         }
         unsafe { core::arch::asm!("wfi", options(nostack)) };
         if cpu::csrr!("sip") & (1 << 9) != 0 {

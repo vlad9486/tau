@@ -12,10 +12,7 @@
     warn(implicit_provenance_casts)
 )]
 
-use core::{
-    arch, cell::UnsafeCell, fmt::Write as _, hint, mem, num::NonZero,
-    sync::atomic::Ordering,
-};
+use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem, num::NonZero, sync::atomic::Ordering};
 
 use supervisor::{
     llfree::Allocator,
@@ -153,7 +150,7 @@ extern "C" fn init(
     let thread = {
         let thread_ptr = UnsafeCell::raw_get(&raw const __THREAD);
         let root = vmem::Window::current_root();
-        let thread = Thread::new(hart_id, 1, root, [0; 6], ReturnKind::Syscall);
+        let thread = Thread::new(hart_id, root, [0; 6], ReturnKind::Syscall);
         unsafe {
             thread_ptr.write(thread);
             &*thread_ptr

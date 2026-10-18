@@ -33,10 +33,11 @@ pub fn spawn(
         .registry
         .get_mut(id - 1)
         .unwrap_or_else(|| runtime::invariant_failed()) = physical;
+    unsafe { scheduler.set_deadline(id - 1, 0) };
     scheduler.count = id;
     scheduler.enqueue(id);
     scheduler.enable();
-    scheduler.program(window);
+    scheduler.program();
     Ok(id as u16)
 }
 
@@ -70,8 +71,12 @@ pub fn wait(
         .resolve(root, vmem::MODULE)
         .ok_or(WaitError::InvalidWaiter)?
         .0;
-    let physical = scheduler.physical(scheduler.running);
-    let mut thread = unsafe { Thread::read(window, physical) };
+    let running = scheduler.running;
+    let physical = scheduler.physical(running);
+    let (hart, mut thread) = {
+        let thread_ref = window.thread(physical);
+        (thread_ref.hart_id(), thread_ref.state)
+    };
     // No old timer references remain: deadlines are embedded in active waits.
     thread.sequence = thread.sequence.wrapping_add(1);
     thread.root = root;
@@ -82,26 +87,21 @@ pub fn wait(
         table,
         slot: index,
         sequence: thread.sequence,
-        deadline,
     });
     slot.thread = physical;
     slot.sequence = thread.sequence;
-    unsafe {
-        table.write(window, index, slot);
-        Thread::write(window, physical, thread);
-    }
-    if module.loader_authority {
-        let hart = unsafe { Thread::hart(window, physical) };
-        if index == hart {
-            if hart < scheduler.interrupt_targets.len() {
-                scheduler.interrupt_targets[hart] = Some(runtime::InterruptTarget {
-                    physical,
-                    table,
-                    slot: index,
-                });
-            }
-            cpu::csrrs!("sie", 1 << 9);
+    unsafe { table.write(window, index, slot) };
+    window.thread_mut(physical).state = thread;
+    unsafe { scheduler.set_deadline(running - 1, deadline) };
+    if module.loader_authority && index == hart {
+        if hart < scheduler.interrupt_targets.len() {
+            scheduler.interrupt_targets[hart] = Some(runtime::InterruptTarget {
+                physical,
+                table,
+                slot: index,
+            });
         }
+        cpu::csrrs!("sie", 1 << 9);
     }
     scheduler.enable();
     Ok(None)
@@ -133,12 +133,11 @@ pub fn notify(
         {
             return Err(WaitError::InvalidWaiter);
         }
-        let thread = unsafe { Thread::read(window, slot.thread) };
         let module = window
             .resolve(root, vmem::MODULE)
             .ok_or(WaitError::InvalidWaiter)?
             .0;
-        if let Some(wait) = thread.wait
+        if let Some(wait) = window.thread(slot.thread).state.wait
             && wait.module == module
             && wait.slot == index
             && wait.sequence == slot.sequence
@@ -147,16 +146,20 @@ pub fn notify(
         }
     }
     if scheduler.active {
-        scheduler.program(window);
+        scheduler.program();
     }
     Ok(())
 }
 
 pub fn exit(window: &mut WindowAccess, scheduler: &Scheduler) {
     let mut scheduler = scheduler.lock();
-    let physical = scheduler.physical(scheduler.running);
-    let mut thread = unsafe { Thread::read(window, physical) };
-    let hart = unsafe { Thread::hart(window, physical) };
+    let running = scheduler.running;
+    let physical = scheduler.physical(running);
+    unsafe { scheduler.set_deadline(running - 1, 0) };
+    let (hart, mut thread) = {
+        let thread_ref = window.thread(physical);
+        (thread_ref.hart_id(), thread_ref.state)
+    };
     if let Some(target) = scheduler.interrupt_targets.get_mut(hart)
         && target.as_ref().is_some_and(|t| t.physical == physical)
     {
@@ -174,7 +177,7 @@ pub fn exit(window: &mut WindowAccess, scheduler: &Scheduler) {
     thread.phase = Phase::Exited;
     thread.wait = None;
     thread.sequence = thread.sequence.wrapping_add(1);
-    unsafe { Thread::write(window, physical, thread) };
+    window.thread_mut(physical).state = thread;
     scheduler.running = 0;
     scheduler.enable();
 }

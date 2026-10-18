@@ -26,7 +26,6 @@ pub(super) struct ActiveWait {
     pub table: WaitTable,
     pub slot: usize,
     pub sequence: usize,
-    pub deadline: usize,
 }
 
 impl ActiveWait {
@@ -78,9 +77,8 @@ impl ThreadState {
 /// fields are accessed only under the scheduler lock, including through aliases.
 #[repr(C)]
 pub struct Thread {
-    hart_id: usize,
-    id: usize,
-    state: ThreadState,
+    pub(super) hart_id: usize,
+    pub(super) state: ThreadState,
 }
 
 impl Thread {
@@ -89,10 +87,9 @@ impl Thread {
     }
 
     /// Create thread before forming a shared reference.
-    pub fn new(hart: usize, id: usize, root: Root, message: [usize; 6], resume: Resume) -> Self {
+    pub fn new(hart: usize, root: Root, message: [usize; 6], resume: Resume) -> Self {
         Thread {
             hart_id: hart,
-            id,
             state: ThreadState {
                 phase: Phase::Runnable,
                 root,
@@ -102,27 +99,5 @@ impl Thread {
                 wait: None,
             },
         }
-    }
-
-    pub(super) unsafe fn read(
-        window: &mut super::vmem::WindowAccess,
-        physical: usize,
-    ) -> ThreadState {
-        window.thread(physical).state
-    }
-
-    pub(super) unsafe fn hart(
-        window: &mut super::vmem::WindowAccess,
-        physical: usize,
-    ) -> usize {
-        window.thread(physical).hart_id
-    }
-
-    pub(super) unsafe fn write(
-        window: &mut super::vmem::WindowAccess,
-        physical: usize,
-        state: ThreadState,
-    ) {
-        window.thread_mut(physical).state = state;
     }
 }

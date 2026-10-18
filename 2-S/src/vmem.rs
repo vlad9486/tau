@@ -100,19 +100,19 @@ pub struct Padded<T> {
 #[repr(C)]
 #[rustfmt::skip]
 pub struct Window {
-    table: UnsafeCell<[usize; 512]>,                                 // 1 page  (slot 0: recursive L2)
-    pte: UnsafeCell<[usize; 512]>,                                   // 1 page  (slot 1: page-table walk)
-    page: UnsafeCell<MaybeUninit<Page>>,                             // 1 page  (slot 2: zeroing / segment copy)
-    user: UnsafeCell<MaybeUninit<Page>>,                             // 1 page  (slot 3: copy_user)
-    descriptor: UnsafeCell<MaybeUninit<Padded<PreparedModule>>>,     // 1 page  (slot 4: module descriptor)
-    wait: UnsafeCell<MaybeUninit<Page>>,                             // 1 page  (slot 5: WaitRecord / wait slot)
-    pub(super) hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,          // 1 page  (slot 6: permanent per-hart MMU)
-    thread: UnsafeCell<MaybeUninit<Padded<Thread>>>,                 // 1 page  (slot 7: foreign Thread)
-    module_context: UnsafeCell<MaybeUninit<Padded<ModuleContext>>>,  // 5 pages (slots 8..13: foreign ModuleContext)
-    module: UnsafeCell<MaybeUninit<ModuleTables>>,                   // 5 pages (slots 13..18: foreign ModuleTables)
-    snapshot: UnsafeCell<MaybeUninit<[Page; 256]>>,                  // 256 pages (1 MiB ELF snapshot in prepare)
-    _reserved: UnsafeCell<MaybeUninit<[Page; 237]>>,                 // unused window slots
-    stack: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 511: supervisor stack)
+    table: UnsafeCell<[usize; 512]>,                              // 1 page  (slot 0: recursive L2)
+    pte: UnsafeCell<[usize; 512]>,                                // 1 page  (slot 1: page-table walk)
+    page: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 2: zeroing / segment copy)
+    user: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 3: copy_user)
+    descriptor: UnsafeCell<MaybeUninit<Padded<PreparedModule>>>,  // 1 page  (slot 4: module descriptor)
+    wait: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 5: WaitRecord / wait slot)
+    hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,                  // 1 page  (slot 6: permanent per-hart MMU)
+    thread: UnsafeCell<MaybeUninit<Padded<Thread>>>,              // 1 page  (slot 7: foreign Thread)
+    module_context: UnsafeCell<MaybeUninit<ModuleContext>>,       // 5 pages (slots 8..13: foreign ModuleContext)
+    module: UnsafeCell<MaybeUninit<ModuleTables>>,                // 5 pages (slots 13..18: foreign ModuleTables)
+    snapshot: UnsafeCell<MaybeUninit<[Page; 256]>>,               // 256 pages (1 MiB ELF snapshot in prepare)
+    _reserved: UnsafeCell<MaybeUninit<[Page; 237]>>,              // unused window slots
+    stack: UnsafeCell<MaybeUninit<Page>>,                         // 1 page  (slot 511: supervisor stack)
 }
 
 const PTE_SLOT: usize = mem::offset_of!(Window, pte) / PAGE;
@@ -275,7 +275,7 @@ impl WindowAccess {
             self.alias(MODULE_CONTEXT_SLOT + i, physical);
         }
         let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).module_context) };
-        Some(unsafe { &mut (&mut *ptr).assume_init_mut().inner })
+        Some(unsafe { (&mut *ptr).assume_init_mut() })
     }
 
     pub fn map_module_tables(&mut self, physical: usize) -> &mut ModuleTables {

@@ -29,7 +29,7 @@ pub const CONTEXT_PAGES: usize = size_of::<ModuleContext>().div_ceil(vmem::PAGE)
 /// The saved registers and PC resume this context after a dependency returns.
 /// The caller's satp implicitly links invocations; no invocation list is needed.
 /// Each dependency slot retains its own destination satp after first use.
-#[repr(C)]
+#[repr(C, align(4096))]
 pub struct ModuleContext {
     pub registers: [usize; 32],
     pub sepc: usize,
