@@ -159,6 +159,7 @@ fn module_status(status: usize) -> Result<(), ModuleError> {
         3 => Err(ModuleError::OutOfMemory),
         4 => Err(ModuleError::NoSlots),
         5 => Err(ModuleError::InvalidDependency),
+        0x8040 => Err(ModuleError::Poisoned),
         _ => Err(ModuleError::InvalidImage),
     }
 }

@@ -109,7 +109,7 @@ pub struct Window {
     pub(super) hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,          // 1 page  (slot 6: permanent per-hart MMU)
     thread: UnsafeCell<MaybeUninit<Padded<Thread>>>,                 // 1 page  (slot 7: foreign Thread)
     module_context: UnsafeCell<MaybeUninit<Padded<ModuleContext>>>,  // 5 pages (slots 8..13: foreign ModuleContext)
-    module: UnsafeCell<MaybeUninit<Padded<ModuleTables>>>,           // 5 pages (slots 13..18: foreign ModuleTables)
+    module: UnsafeCell<MaybeUninit<ModuleTables>>,                   // 5 pages (slots 13..18: foreign ModuleTables)
     snapshot: UnsafeCell<MaybeUninit<[Page; 256]>>,                  // 256 pages (1 MiB ELF snapshot in prepare)
     _reserved: UnsafeCell<MaybeUninit<[Page; 237]>>,                 // unused window slots
     stack: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 511: supervisor stack)

@@ -257,4 +257,5 @@ pub enum ModuleError {
     OutOfMemory = 3,
     NoSlots = 4,
     InvalidDependency = 5,
+    Poisoned = 0x8040,
 }

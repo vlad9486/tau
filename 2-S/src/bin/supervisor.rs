@@ -12,7 +12,10 @@
     warn(implicit_provenance_casts)
 )]
 
-use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem, num::NonZero};
+use core::{
+    arch, cell::UnsafeCell, fmt::Write as _, hint, mem, num::NonZero,
+    sync::atomic::Ordering,
+};
 
 use supervisor::{
     llfree::Allocator,
@@ -356,6 +359,9 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
         let selected = scheduler::preempt(&mut window, scheduler);
         resume_scheduled(&window, local, selected)
     } else if cause & INTERRUPT_BIT == 0 {
+        if !local.module.pure {
+            local.module.poisoned.store(true, Ordering::Release);
+        }
         let sepc = cpu::csrr!("sepc");
         let stval = cpu::csrr!("stval");
         let code = unsafe { u16::try_from(0x8000 | (cause & 0x7fff)).unwrap_unchecked() };
@@ -433,6 +439,11 @@ extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5:
             // The per-hart window/stack and global supervisor code retain the same
             // backing in both roots. Moving `local` ends all pre-switch borrows.
             let local = unsafe { mmu::switch(local, root, flush) };
+            if local.module.poisoned.load(Ordering::Acquire) {
+                let flush = mmu::switch_flush(&window, root, caller);
+                let _local = unsafe { mmu::switch(local, caller, flush) };
+                restore_syscall(tau::ModuleError::Poisoned as usize, 0, 0, 0, 0, 0);
+            }
             local.module_context.enter(caller);
             enter_invocation(arg as usize, a1, a2, a3, a4, a5)
         }

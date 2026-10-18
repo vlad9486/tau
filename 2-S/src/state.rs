@@ -100,7 +100,7 @@ pub unsafe fn init(
         .map(root, mapping, || context.page(thread.hart_id()))
         .map_err(|_| tau::AllocError::OutOfMemory)
         .map_err(InitError::Alloc)?;
-    unsafe { ModuleTables::init_at(tables, true) };
+    unsafe { ModuleTables::init_at(tables, true, false) };
 
     let elf_base = context.base_addr + (layout::SYSTEM_OFFSET << 12);
     let data = ptr::from_mut(window).cast::<u8>().with_addr(elf_base);

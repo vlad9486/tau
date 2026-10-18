@@ -427,6 +427,23 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             const ALIAS: usize = 0x2_0000_0000;
             tau::Ubi::map(NonZeroUsize::new(0x8020_0000), ALIAS, 1).unwrap();
             tau::Ubi::unmap(ALIAS, 1).unwrap();
+
+            // Sibling module triggers Load Page Fault (cause 13 -> 0x800d).
+            assert_eq!(
+                tau::Ubi::invoke::<0, 0>(sibling, 12, []).unwrap_err().get(),
+                0x800d
+            );
+            // Sibling is not pure, so it is quarantined/poisoned; subsequent calls fail with 0x8040.
+            assert_eq!(
+                tau::Ubi::invoke::<1, 0>(sibling, 3, [1]).unwrap_err().get(),
+                tau::ModuleError::Poisoned as usize
+            );
+            // Other modules (slot) remain healthy and unpoisoned.
+            assert_eq!(
+                tau::Ubi::invoke::<1, 1>(slot, 3, [42]).unwrap(),
+                [42 ^ 0x5344_494f]
+            );
+
             tau_test_passed(case, 128)
         }
         6 => graph::run(case, info, pages),

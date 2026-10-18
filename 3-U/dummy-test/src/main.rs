@@ -188,6 +188,11 @@ extern "C" fn dummy_main(
             let event = tau::Ubi::wait(&WAIT_SLOTS[1], NonZeroUsize::new(1)).unwrap();
             tau::Ubi::respond(0, [event.encode()])
         }
+        12 => {
+            let ptr = 0x20_0000_0000 as *const usize;
+            let val = unsafe { ptr.read_volatile() };
+            tau::Ubi::respond(0, [val])
+        }
         _ => tau::Ubi::respond(7, []),
     }
 }

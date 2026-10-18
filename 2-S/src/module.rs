@@ -3,7 +3,7 @@
 // See LICENSE for the full license text.
 
 use core::{
-    hint, ptr,
+    hint, mem, ptr,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
@@ -89,6 +89,8 @@ impl ModuleContext {
 #[repr(C, align(4096))]
 pub struct ModuleTables {
     pub loader_authority: bool,
+    pub pure: bool,
+    pub poisoned: AtomicBool,
     dependency_lock: AtomicBool,
     // Slot zero is the free-list head. Free entries contain the next slot;
     // occupied entries contain a tagged physical descriptor address.
@@ -97,6 +99,8 @@ pub struct ModuleTables {
     pub stem_index: usize,
     pub stack_pages: usize,
 }
+
+const _: () = assert!(mem::offset_of!(ModuleTables, dependencies) == 8);
 
 impl ModuleTables {
     const END: usize = 0x800;
@@ -109,8 +113,10 @@ impl ModuleTables {
     /// `this` must point to writable, aligned storage with exclusive access
     /// until initialization completes. Existing shared tables must not be reset
     /// when preparing another context of the same module.
-    pub unsafe fn init_at(this: *mut Self, loader_authority: bool) {
+    pub unsafe fn init_at(this: *mut Self, loader_authority: bool, pure: bool) {
         unsafe { ptr::addr_of_mut!((*this).loader_authority).write(loader_authority) };
+        unsafe { ptr::addr_of_mut!((*this).pure).write(pure) };
+        unsafe { ptr::addr_of_mut!((*this).poisoned).write(AtomicBool::new(false)) };
         unsafe { ptr::addr_of_mut!((*this).dependency_lock).write(AtomicBool::new(false)) };
         let dependencies = unsafe { ptr::addr_of_mut!((*this).dependencies).cast::<AtomicUsize>() };
         for index in 0..Self::END {

@@ -5,7 +5,7 @@
 //! ELF template preparation and lazy retained context construction. No language
 //! interpretation, global invocation registry, or thread control block.
 
-use core::{num::NonZeroUsize, ptr, slice, mem};
+use core::{num::NonZeroUsize, ptr, slice, mem, sync::atomic::Ordering};
 
 use elf::{
     ElfBytes,
@@ -268,7 +268,7 @@ pub fn prepare(
         };
         let pointer = window.map_module_tables(module_tables);
         unsafe {
-            ModuleTables::init_at(pointer, false);
+            ModuleTables::init_at(pointer, false, false);
             ptr::addr_of_mut!((*pointer).wait_table).write(wait_table);
             ptr::addr_of_mut!((*pointer).stem_index).write(dep.root_index);
             ptr::addr_of_mut!((*pointer).stack_pages).write(dep.stack_pages);
@@ -375,15 +375,17 @@ pub fn invoke(
     tables: &ModuleTables,
     slot: u16,
 ) -> Result<Root, ModuleError> {
-    // Bindings and successful roots live until shutdown. A retained root is
-    // already authorized; only a cache miss needs the shared descriptor table.
-    // Unload/rebinding must invalidate these caches before reusing a slot.
-    if let Some(root) = module.dependency(slot) {
-        return Ok(root);
-    }
     let descriptor = tables
         .get_dependency(slot)
         .ok_or(ModuleError::InvalidDependency)?;
+    if let Some(root) = module.dependency(slot) {
+        let dep = window.read_descriptor(descriptor);
+        let target_tables = window.map_module_tables(dep.tables);
+        if unsafe { (*target_tables).poisoned.load(Ordering::Acquire) } {
+            return Err(ModuleError::Poisoned);
+        }
+        return Ok(root);
+    }
     let root = construct(window, context, thread, module.root, descriptor)?;
     module.retain_dependency(slot, root);
     Ok(root)
