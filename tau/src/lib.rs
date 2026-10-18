@@ -15,8 +15,8 @@ pub mod asm;
 
 mod common;
 pub use self::common::{
-    Call, Entry, Event, Manifest, MappedRegion, ModuleError, ModuleHandle, ModuleId, WaitError,
-    WaitSlot, SpawnError,
+    Call, Entry, Event, Manifest, MappedRegion, MemoryZone, ModuleError, ModuleHandle, ModuleId,
+    PageFlags, SpawnError, WaitError, WaitSlot,
 };
 
 mod ubi;

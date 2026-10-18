@@ -6,7 +6,6 @@ use core::{
     cell::UnsafeCell,
     mem::{self, MaybeUninit},
     num::NonZeroUsize,
-    ptr,
 };
 
 use super::{
@@ -25,7 +24,7 @@ pub const MODULE: usize = 0xffff_ffc0_0022_0000;
 pub const SUPERVISOR_INDEX: usize = 256;
 // Sv39 RSW: this entry owns an allocator page (data or a child table).
 // Borrowed entries stop reclamation, including whole shared branches.
-const OWNED: usize = 1 << 8;
+pub const OWNED: usize = 1 << 8;
 
 pub const fn flags_new(&[r, w, x, u, g]: &[u8; 5]) -> usize {
     0xc1 | if r != b'-' { 2 } else { 0 }
@@ -103,41 +102,35 @@ pub struct Window {
     table: UnsafeCell<[usize; 512]>,                              // 1 page  (slot 0: recursive L2)
     pte: UnsafeCell<[usize; 512]>,                                // 1 page  (slot 1: page-table walk)
     page: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 2: zeroing / segment copy)
-    user: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 3: copy_user)
+    thread: UnsafeCell<MaybeUninit<Padded<Thread>>>,              // 1 page  (slot 3: foreign Thread)
     descriptor: UnsafeCell<MaybeUninit<Padded<PreparedModule>>>,  // 1 page  (slot 4: module descriptor)
     wait: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 5: WaitRecord / wait slot)
     hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,                  // 1 page  (slot 6: permanent per-hart MMU)
-    thread: UnsafeCell<MaybeUninit<Padded<Thread>>>,              // 1 page  (slot 7: foreign Thread)
-    module_context: UnsafeCell<MaybeUninit<ModuleContext>>,       // 5 pages (slots 8..13: foreign ModuleContext)
-    module: UnsafeCell<MaybeUninit<ModuleTables>>,                // 5 pages (slots 13..18: foreign ModuleTables)
-    snapshot: UnsafeCell<MaybeUninit<[Page; 256]>>,               // 256 pages (1 MiB ELF snapshot in prepare)
-    _reserved: UnsafeCell<MaybeUninit<[Page; 237]>>,              // unused window slots
+    module_context: UnsafeCell<MaybeUninit<ModuleContext>>,       // 5 pages (slots 7..12: foreign ModuleContext)
+    module: UnsafeCell<MaybeUninit<ModuleTables>>,                // 5 pages (slots 12..17: foreign ModuleTables)
+    _reserved: UnsafeCell<MaybeUninit<[Page; 494]>>,              // unused window slots
     stack: UnsafeCell<MaybeUninit<Page>>,                         // 1 page  (slot 511: supervisor stack)
 }
 
 const PTE_SLOT: usize = mem::offset_of!(Window, pte) / PAGE;
 const PAGE_SLOT: usize = mem::offset_of!(Window, page) / PAGE;
-const USER_SLOT: usize = mem::offset_of!(Window, user) / PAGE;
+const THREAD_SLOT: usize = mem::offset_of!(Window, thread) / PAGE;
 const DESCRIPTOR_SLOT: usize = mem::offset_of!(Window, descriptor) / PAGE;
 const WAIT_SLOT: usize = mem::offset_of!(Window, wait) / PAGE;
 pub const HART_SLOT: usize = mem::offset_of!(Window, hart) / PAGE;
-const THREAD_SLOT: usize = mem::offset_of!(Window, thread) / PAGE;
 const MODULE_CONTEXT_SLOT: usize = mem::offset_of!(Window, module_context) / PAGE;
 const MODULE_SLOT: usize = mem::offset_of!(Window, module) / PAGE;
-const SNAPSHOT_SLOT: usize = mem::offset_of!(Window, snapshot) / PAGE;
 pub const STACK_SLOT: usize = mem::offset_of!(Window, stack) / PAGE;
 
 const _: () = {
     assert!(PTE_SLOT == 1);
     assert!(PAGE_SLOT == 2);
-    assert!(USER_SLOT == 3);
+    assert!(THREAD_SLOT == 3);
     assert!(DESCRIPTOR_SLOT == 4);
     assert!(WAIT_SLOT == 5);
     assert!(HART_SLOT == 6);
-    assert!(THREAD_SLOT == 7);
-    assert!(MODULE_CONTEXT_SLOT == 8);
-    assert!(MODULE_SLOT == 13);
-    assert!(SNAPSHOT_SLOT == 18);
+    assert!(MODULE_CONTEXT_SLOT == 7);
+    assert!(MODULE_SLOT == 12);
     assert!(STACK_SLOT == 511);
     assert!(size_of::<Window>() == 512 * PAGE);
 };
@@ -210,7 +203,7 @@ impl WindowAccess {
         unsafe { cell.write_volatile(pte) };
     }
 
-    fn new_page(
+    pub fn new_page(
         &mut self,
         page: impl Fn() -> Result<usize, llfree::Error>,
     ) -> Result<usize, llfree::Error> {
@@ -286,15 +279,6 @@ impl WindowAccess {
         unsafe { (&mut *ptr).assume_init_mut() }
     }
 
-    pub fn map_snapshot(&mut self, physical: usize, pages: usize) -> *mut u8 {
-        debug_assert!(pages > 0 && pages <= 256);
-        for i in 0..pages {
-            self.alias(SNAPSHOT_SLOT + i, physical + i * PAGE);
-        }
-        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).snapshot) };
-        ptr.cast::<u8>()
-    }
-
     pub fn root_branch(&mut self, root: Root, index: usize) -> Option<usize> {
         let pte = self.read_pte(root.page(), index);
         (pte & 1 != 0 && pte & 14 == 0).then(|| pte_page(pte))
@@ -304,27 +288,64 @@ impl WindowAccess {
         self.write_pte(root.page(), index, branch(stem));
     }
 
+    fn leaf_stem(
+        &mut self,
+        stem: usize,
+        address: usize,
+        page: impl Fn() -> Result<usize, llfree::Error>,
+    ) -> Result<(usize, usize), llfree::Error> {
+        let index = (address >> 21) & 511;
+        let pte = self.read_pte(stem, index);
+        let table = if pte == 0 {
+            let next = self.new_page(&page)?;
+            self.write_pte(stem, index, branch(next) | OWNED);
+            next
+        } else if pte & 1 != 0 && pte & 14 == 0 {
+            pte_page(pte)
+        } else {
+            return Err(llfree::Error::Address);
+        };
+        Ok((table, (address >> 12) & 511))
+    }
+
     fn leaf(
         &mut self,
         root: Root,
         address: usize,
         page: impl Fn() -> Result<usize, llfree::Error>,
     ) -> Result<(usize, usize), llfree::Error> {
-        let mut table = root.page();
-        for shift in [30, 21] {
-            let index = (address >> shift) & 511;
-            let pte = self.read_pte(table, index);
-            table = if pte == 0 {
-                let next = self.new_page(&page)?;
-                self.write_pte(table, index, branch(next) | OWNED);
-                next
-            } else if pte & 1 != 0 && pte & 14 == 0 {
-                pte_page(pte)
-            } else {
-                return Err(llfree::Error::Address);
-            };
+        let ri = (address >> 30) & 511;
+        let pte = self.read_pte(root.page(), ri);
+        let stem = if pte == 0 {
+            let next = self.new_page(&page)?;
+            self.write_pte(root.page(), ri, branch(next) | OWNED);
+            next
+        } else if pte & 1 != 0 && pte & 14 == 0 {
+            pte_page(pte)
+        } else {
+            return Err(llfree::Error::Address);
+        };
+        self.leaf_stem(stem, address, page)
+    }
+
+    pub fn resolve_stem(&mut self, stem: usize, address: usize) -> Option<(usize, usize)> {
+        let mut table = stem;
+        for shift in [21, 12] {
+            let pte = self.read_pte(table, (address >> shift) & 511);
+            if pte & 1 == 0 {
+                return None;
+            }
+            if pte & 14 != 0 {
+                let mask = (1 << shift) - 1;
+                let physical = pte_page(pte);
+                if physical & mask != 0 {
+                    return None;
+                }
+                return Some((physical | (address & mask), pte));
+            }
+            table = pte_page(pte);
         }
-        Ok((table, (address >> 12) & 511))
+        None
     }
 
     pub fn resolve(&mut self, root: Root, address: usize) -> Option<(usize, usize)> {
@@ -345,6 +366,45 @@ impl WindowAccess {
             table = pte_page(pte);
         }
         None
+    }
+
+    pub fn map_stem(
+        &mut self,
+        stem: usize,
+        mapping: Mapping,
+        page: impl Fn() -> Result<usize, llfree::Error>,
+    ) -> Result<(), llfree::Error> {
+        let bytes = mapping
+            .virtual_pages
+            .checked_mul(PAGE)
+            .ok_or(llfree::Error::Address)?;
+        if bytes == 0
+            || mapping.addr_virtual & 0xfff != 0
+            || mapping.addr_virtual.checked_add(bytes - 1).is_none()
+            || mapping.physical_pages > mapping.virtual_pages
+            || mapping
+                .addr_physical
+                .is_some_and(|p| p.get() & 0xfff != 0 || p.get().checked_add(bytes).is_none())
+        {
+            return Err(llfree::Error::Address);
+        }
+        for i in 0..mapping.virtual_pages {
+            let address = mapping.addr_virtual + i * PAGE;
+            let (table, index) = self.leaf_stem(stem, address, &page)?;
+            if self.read_pte(table, index) != 0 {
+                return Err(llfree::Error::InvalidArgument);
+            }
+            let (physical, owned) = match mapping.addr_physical {
+                Some(p) if i < mapping.physical_pages => (p.get() + i * PAGE, 0),
+                _ => (self.new_page(&page)?, OWNED),
+            };
+            self.write_pte(
+                table,
+                index,
+                (physical >> 2) | flags_new(&mapping.flags) | owned,
+            );
+        }
+        Ok(())
     }
 
     pub fn map(
@@ -391,41 +451,6 @@ impl WindowAccess {
                 None
             },
         );
-        Ok(())
-    }
-
-    /// Read userspace through supervisor aliases, without enabling SUM. The
-    /// caller validates ranges before copying; unmapped/non-readable pages fail.
-    pub fn copy_user(
-        &mut self,
-        root: Root,
-        mut address: usize,
-        destination: &mut [u8],
-    ) -> Result<(), llfree::Error> {
-        if !user_range(address, destination.len()) {
-            return Err(llfree::Error::Address);
-        }
-        let mut done = 0;
-        while done < destination.len() {
-            let (physical, flags) = self.resolve(root, address).ok_or(llfree::Error::Address)?;
-            if flags & 18 != 18 {
-                return Err(llfree::Error::Address);
-            }
-            let offset = physical & 0xfff;
-            let count = (PAGE - offset).min(destination.len() - done);
-            self.alias(USER_SLOT, physical & !0xfff);
-            let user_ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).user) };
-            let source = unsafe { (*user_ptr).assume_init_ref().0.as_ptr() };
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    source.add(offset),
-                    destination.as_mut_ptr().add(done),
-                    count,
-                )
-            };
-            done += count;
-            address += count;
-        }
         Ok(())
     }
 
@@ -485,6 +510,37 @@ impl WindowAccess {
         (0..512).all(|i| self.read_pte(physical, i) == 0)
     }
 
+    pub fn unmap_stem(
+        &mut self,
+        stem: usize,
+        asid: Option<u16>,
+        address: usize,
+        free: impl Fn(usize) -> Result<(), llfree::Error>,
+    ) -> Result<(), llfree::Error> {
+        let si = (address >> 21) & 511;
+        let pte = self.read_pte(stem, si);
+        if pte & 1 != 0 && pte & 14 == 0 {
+            let leaf = pte_page(pte);
+            let index = (address >> 12) & 511;
+            let entry = self.read_pte(leaf, index);
+            self.write_pte(leaf, index, 0);
+            if let Some(asid) = asid {
+                asm::sfence_vma(Some(address), Some(asid));
+            }
+            if entry & OWNED != 0 {
+                free(pte_page(entry))?;
+            }
+            if self.empty_table(leaf) {
+                self.write_pte(stem, si, 0);
+                if let Some(asid) = asid {
+                    asm::sfence_vma(None, Some(asid));
+                }
+                free(leaf)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn unmap(
         &mut self,
         root: Root,
@@ -495,23 +551,7 @@ impl WindowAccess {
         let Some(stem) = self.root_branch(root, ri) else {
             return Ok(());
         };
-        let si = (address >> 21) & 511;
-        let pte = self.read_pte(stem, si);
-        if pte & 1 != 0 && pte & 14 == 0 {
-            let leaf = pte_page(pte);
-            let index = (address >> 12) & 511;
-            let entry = self.read_pte(leaf, index);
-            self.write_pte(leaf, index, 0);
-            asm::sfence_vma(Some(address), Some(root.asid()));
-            if entry & OWNED != 0 {
-                free(pte_page(entry))?;
-            }
-            if self.empty_table(leaf) {
-                self.write_pte(stem, si, 0);
-                asm::sfence_vma(None, Some(root.asid()));
-                free(leaf)?;
-            }
-        }
+        self.unmap_stem(stem, Some(root.asid()), address, &free)?;
         // Also reclaim empty intermediate tables left by a failed allocation.
         if self.empty_table(stem) {
             self.write_pte(root.page(), ri, 0);

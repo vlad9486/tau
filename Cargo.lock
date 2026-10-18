@@ -238,6 +238,9 @@ dependencies = [
 [[package]]
 name = "tau"
 version = "0.1.0"
+dependencies = [
+ "elf",
+]
 
 [[package]]
 name = "tau-firmware"

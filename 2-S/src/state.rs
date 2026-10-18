@@ -35,11 +35,21 @@ impl Context {
         page: usize,
         order: usize,
     ) -> Result<(), llfree::Error> {
-        self.allocator.put(
-            hart_id,
-            llfree::FrameId((page - self.base_addr) >> 12),
-            order,
-        )
+        if order > llfree::MAX_ORDER || page & ((1usize << (12 + order)) - 1) != 0 {
+            return Err(llfree::Error::Address);
+        }
+        let frame = page
+            .checked_sub(self.base_addr)
+            .ok_or(llfree::Error::Address)?
+            >> 12;
+        let count = 1usize << order;
+        if frame
+            .checked_add(count)
+            .is_none_or(|end| end > self.allocator.frames())
+        {
+            return Err(llfree::Error::Address);
+        }
+        self.allocator.put(hart_id, llfree::FrameId(frame), order)
     }
 
     pub fn free(&self, hart_id: usize, page: usize) -> Result<(), llfree::Error> {
@@ -221,6 +231,7 @@ pub unsafe fn init(
             region.phys_start,
             region.virtual_start as usize,
             region.pages,
+            *b"rw-u-",
         )
         .map_err(InitError::Alloc)?;
     }
@@ -258,7 +269,6 @@ pub unsafe fn init(
         window,
         context,
         thread.hart_id(),
-        satp,
         stem,
         read_usize(mem::offset_of!(tau::Manifest, wait_slots)),
         read_usize(mem::offset_of!(tau::Manifest, wait_slots) + size_of::<usize>()),
@@ -288,25 +298,52 @@ pub fn syscall(
     use core::fmt::Write;
 
     match tau::Call::decode(msg[0]) {
-        Ok(tau::Call::PrepareModule) => {
-            match loading::prepare(
+        Ok(tau::Call::AllocPhysical { order, zone: _ }) => {
+            if !tables.loader_authority {
+                msg[0] = tau::AllocError::AccessDenied as usize;
+                msg[1] = 0;
+            } else {
+                match context.block(thread.hart_id(), order as usize) {
+                    Ok(phys) => {
+                        msg[0] = 0;
+                        msg[1] = phys;
+                    }
+                    Err(_) => {
+                        msg[0] = tau::AllocError::OutOfMemory as usize;
+                        msg[1] = 0;
+                    }
+                }
+            }
+        }
+        Ok(tau::Call::FreePhysical { order, zone: _ }) => {
+            if !tables.loader_authority {
+                msg[0] = tau::FreeError::AccessDenied as usize;
+            } else {
+                msg[0] = match context.free_block(thread.hart_id(), msg[1], order as usize) {
+                    Ok(()) => 0,
+                    Err(llfree::Error::Address) => tau::FreeError::InvalidAddress as usize,
+                    Err(_) => tau::FreeError::AlreadyFree as usize,
+                };
+            }
+        }
+        Ok(tau::Call::CreateModule) => {
+            match loading::create(
                 window,
                 context,
                 thread.hart_id(),
                 tables,
-                msg[3],
                 msg[1],
                 msg[2],
+                msg[3],
+                msg[4],
             ) {
-                Ok((slot, handle)) => {
+                Ok(handle) => {
                     msg[0] = 0;
-                    msg[1] = slot as usize;
-                    msg[2] = handle;
+                    msg[1] = handle;
                 }
                 Err(error) => {
                     msg[0] = error as usize;
                     msg[1] = 0;
-                    msg[2] = 0;
                 }
             }
         }
@@ -335,35 +372,29 @@ pub fn syscall(
             msg = [tau::WaitError::Unsupported as usize, 0, 0, 0, 0, 0];
         }
         Ok(tau::Call::Map) => {
-            msg[0] = if (msg[1] != 0 && !tables.loader_authority)
-                || overlaps_stem(module, msg[2], msg[3])
-            {
-                tau::AllocError::AccessDenied as usize
-            } else {
-                match alloc_pages(
-                    window,
-                    thread,
-                    context,
-                    NonZeroUsize::new(msg[1]),
-                    msg[2],
-                    msg[3],
-                ) {
-                    Ok(()) => 0,
-                    Err(error) => error as usize,
-                }
+            msg[0] = match map_pages(
+                window,
+                thread,
+                module,
+                tables,
+                context,
+                NonZeroUsize::new(msg[2]),
+                msg[3],
+                msg[4],
+                msg[5],
+                msg[1],
+            ) {
+                Ok(()) => 0,
+                Err(error) => error as usize,
             };
         }
         Ok(tau::Call::Unmap) => {
-            if !valid_pages(msg[1], msg[2]) || overlaps_stem(module, msg[1], msg[2]) {
-                msg[0] = tau::FreeError::AlreadyFree as usize;
-            } else {
-                for i in 0..msg[2] {
-                    let _ = window.unmap(Window::current_root(), msg[1] + i * 4096, |page| {
-                        context.free(thread.hart_id(), page)
-                    });
-                }
-                msg[0] = 0;
-            }
+            msg[0] = match unmap_pages(
+                window, thread, module, tables, context, msg[2], msg[3], msg[1],
+            ) {
+                Ok(()) => 0,
+                Err(error) => error as usize,
+            };
         }
         Ok(tau::Call::Debug) => {
             write!(
@@ -408,6 +439,162 @@ fn overlaps_stem(module: &ModuleContext, address: usize, pages: usize) -> bool {
     first_index <= module.shared_index && module.shared_index <= last_index
 }
 
+fn decode_flags(flags: usize) -> Option<[u8; 5]> {
+    let r = flags & tau::PageFlags::READ.bits() != 0;
+    let w = flags & tau::PageFlags::WRITE.bits() != 0;
+    let x = flags & tau::PageFlags::EXEC.bits() != 0;
+    if flags & !7 != 0 || !r || (w && x) {
+        return None;
+    }
+    Some([
+        b'r',
+        if w { b'w' } else { b'-' },
+        if x { b'x' } else { b'-' },
+        b'u',
+        b'-',
+    ])
+}
+
+fn map_pages(
+    window: &mut WindowAccess,
+    thread: &Thread,
+    module: &ModuleContext,
+    tables: &ModuleTables,
+    context: &Context,
+    physical_addr: Option<NonZeroUsize>,
+    virtual_addr: usize,
+    number_of_pages: usize,
+    raw_flags: usize,
+    target: usize,
+) -> Result<(), tau::AllocError> {
+    let flags = decode_flags(raw_flags).ok_or(tau::AllocError::AccessDenied)?;
+    if (!tables.loader_authority
+        && (physical_addr.is_some() || target != 0 || raw_flags & tau::PageFlags::EXEC.bits() != 0))
+        || (target == 0 && overlaps_stem(module, virtual_addr, number_of_pages))
+    {
+        return Err(tau::AllocError::AccessDenied);
+    }
+    if target == 0 {
+        return alloc_pages(
+            window,
+            thread,
+            context,
+            physical_addr,
+            virtual_addr,
+            number_of_pages,
+            flags,
+        );
+    }
+    if !valid_pages(virtual_addr, number_of_pages)
+        || physical_addr.is_some_and(|p| {
+            p.get() & 0xfff != 0
+                || number_of_pages
+                    .checked_mul(4096)
+                    .and_then(|n| p.get().checked_add(n))
+                    .is_none()
+        })
+    {
+        return Err(tau::AllocError::InvalidAddress);
+    }
+    let descriptor =
+        loading::descriptor_page(context, target).map_err(|_| tau::AllocError::InvalidAddress)?;
+    let dep = window.read_descriptor(descriptor);
+    let last = virtual_addr + number_of_pages * 4096 - 1;
+    if (virtual_addr >> 30) & 511 != dep.root_index || (last >> 30) & 511 != dep.root_index {
+        return Err(tau::AllocError::InvalidAddress);
+    }
+    for i in 0..number_of_pages {
+        if window
+            .resolve_stem(dep.stem, virtual_addr + i * 4096)
+            .is_some()
+        {
+            return Err(tau::AllocError::AlreadyAllocated);
+        }
+    }
+    let mapping = Mapping {
+        addr_virtual: virtual_addr,
+        virtual_pages: number_of_pages,
+        addr_physical: physical_addr,
+        physical_pages: usize::from(physical_addr.is_some()) * number_of_pages,
+        flags,
+    };
+    if let Err(error) = window.map_stem(dep.stem, mapping, || context.page(thread.hart_id())) {
+        for i in 0..number_of_pages {
+            let _ = window.unmap_stem(dep.stem, None, virtual_addr + i * 4096, |page| {
+                context.free(thread.hart_id(), page)
+            });
+        }
+        return Err(match error {
+            llfree::Error::Address => tau::AllocError::InvalidAddress,
+            llfree::Error::InvalidArgument => tau::AllocError::AlreadyAllocated,
+            _ => tau::AllocError::OutOfMemory,
+        });
+    }
+    if raw_flags & tau::PageFlags::EXEC.bits() != 0 {
+        unsafe {
+            core::arch::asm!("fence.i", options(nostack));
+        }
+    }
+    Ok(())
+}
+
+fn unmap_pages(
+    window: &mut WindowAccess,
+    thread: &Thread,
+    module: &ModuleContext,
+    tables: &ModuleTables,
+    context: &Context,
+    virtual_addr: usize,
+    number_of_pages: usize,
+    target: usize,
+) -> Result<(), tau::FreeError> {
+    if target != 0 && !tables.loader_authority {
+        return Err(tau::FreeError::AccessDenied);
+    }
+    if !valid_pages(virtual_addr, number_of_pages) {
+        return Err(tau::FreeError::AlreadyFree);
+    }
+    if target == 0 {
+        if overlaps_stem(module, virtual_addr, number_of_pages) {
+            return Err(if tables.loader_authority {
+                tau::FreeError::AlreadyFree
+            } else {
+                tau::FreeError::AccessDenied
+            });
+        }
+        let root = Window::current_root();
+        if !tables.loader_authority {
+            for i in 0..number_of_pages {
+                if window
+                    .resolve(root, virtual_addr + i * 4096)
+                    .is_some_and(|(_, pte)| pte & vmem::OWNED == 0)
+                {
+                    return Err(tau::FreeError::AccessDenied);
+                }
+            }
+        }
+        for i in 0..number_of_pages {
+            let _ = window.unmap(root, virtual_addr + i * 4096, |page| {
+                context.free(thread.hart_id(), page)
+            });
+        }
+        return Ok(());
+    }
+    let descriptor =
+        loading::descriptor_page(context, target).map_err(|_| tau::FreeError::InvalidAddress)?;
+    let dep = window.read_descriptor(descriptor);
+    let last = virtual_addr + number_of_pages * 4096 - 1;
+    if (virtual_addr >> 30) & 511 != dep.root_index || (last >> 30) & 511 != dep.root_index {
+        return Err(tau::FreeError::InvalidAddress);
+    }
+    for i in 0..number_of_pages {
+        let _ = window.unmap_stem(dep.stem, None, virtual_addr + i * 4096, |page| {
+            context.free(thread.hart_id(), page)
+        });
+    }
+    Ok(())
+}
+
 pub fn alloc_pages(
     window: &mut WindowAccess,
     thread: &Thread,
@@ -415,6 +602,7 @@ pub fn alloc_pages(
     physical_addr: Option<NonZeroUsize>,
     virtual_addr: usize,
     number_of_pages: usize,
+    flags: [u8; 5],
 ) -> Result<(), tau::AllocError> {
     if !valid_pages(virtual_addr, number_of_pages)
         || physical_addr.is_some_and(|p| {
@@ -441,7 +629,7 @@ pub fn alloc_pages(
         virtual_pages: number_of_pages,
         addr_physical: physical_addr,
         physical_pages: usize::from(physical_addr.is_some()) * number_of_pages,
-        flags: *b"rw-u-",
+        flags,
     };
 
     let root = Window::current_root();

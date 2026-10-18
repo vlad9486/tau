@@ -8,12 +8,7 @@
 mod graph;
 mod scheduling;
 
-use core::{
-    arch::{self, naked_asm},
-    num::NonZeroUsize,
-    ptr,
-    sync::atomic::Ordering,
-};
+use core::{arch::naked_asm, num::NonZeroUsize, ptr, sync::atomic::Ordering};
 
 // Wire protocol v1: three little-endian u64 words: magic, version, scenario.
 // The host writes scenario only while stopped at tau_test_ready. Volatile access
@@ -87,22 +82,6 @@ extern "C" fn tau_test_fault() -> ! {
         address = const FAULT_ADDRESS,
         failed = sym tau_test_failed,
     );
-}
-
-fn prepare_raw(address: usize, length: usize) -> usize {
-    let status;
-    unsafe {
-        arch::asm!(
-            "ecall",
-            inout("a0") tau::Call::PrepareModule.encode() => status,
-            in("a1") address,
-            in("a2") length,
-            in("a3") 0usize,
-            clobber_abi("C"),
-            options(nostack),
-        );
-    }
-    status
 }
 
 // Exercise the module boundary with every preserved register set explicitly.
@@ -359,15 +338,25 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
                     Err(tau::ModuleError::InvalidImage)
                 );
             }
-            for (address, length) in [
-                (FAULT_ADDRESS, 4096),         // canonical but unmapped
-                (0xffff_ffc0_0021_0000, 4096), // supervisor-only storage
-                (usize::MAX, 2),               // range overflow
-                (0, 0),
+            let phys = tau::Ubi::alloc_physical(0, tau::MemoryZone::Normal).unwrap();
+            assert_eq!(
+                tau::Ubi::free_physical(0, 0, tau::MemoryZone::Normal),
+                Err(tau::FreeError::InvalidAddress)
+            );
+            assert_eq!(
+                tau::Ubi::free_physical(usize::MAX, 0, tau::MemoryZone::Normal),
+                Err(tau::FreeError::InvalidAddress)
+            );
+            tau::Ubi::free_physical(phys, 0, tau::MemoryZone::Normal).unwrap();
+            for (entry, stack_pages) in [
+                (0x1001, 1),                // unaligned entry
+                (0xffff_ffc0_0021_0000, 1), // supervisor-only storage
+                (usize::MAX, 1),            // high stack stem 511
+                (0x1000, 0),                // invalid stack pages
             ] {
                 assert_eq!(
-                    prepare_raw(address, length),
-                    tau::ModuleError::InvalidImage as usize
+                    tau::Ubi::create_module(entry, stack_pages, 0, 0),
+                    Err(tau::ModuleError::InvalidImage)
                 );
             }
             // Exercise mapping across a 1 GiB root boundary and reclaim both branches.

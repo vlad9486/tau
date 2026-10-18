@@ -141,6 +141,45 @@ impl Event {
     }
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryZone {
+    Normal = 0,
+    Dma = 1,
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageFlags(u8);
+
+impl PageFlags {
+    pub const READ: Self = Self(1 << 0);
+    pub const WRITE: Self = Self(1 << 1);
+    pub const EXEC: Self = Self(1 << 2);
+    pub const RW: Self = Self(Self::READ.0 | Self::WRITE.0);
+    pub const RX: Self = Self(Self::READ.0 | Self::EXEC.0);
+
+    pub const fn from_raw(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    pub const fn as_raw(self) -> u8 {
+        self.0
+    }
+
+    pub const fn bits(self) -> usize {
+        self.0 as usize
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
 /// The supervisor interface. Additional machine words are passed in registers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Call {
@@ -167,18 +206,22 @@ pub enum Call {
     Spawn { entry: usize },
     /// Exit the current thread with the given message. Never returns, the thread cease to exist.
     Exit,
-    /// Map the physical memory on the virtual address space of the thread.
-    /// The message may provide a desired physical address or zero.
-    /// If zero specified the system will allocate the physical address.
-    /// If physical address specified the system will check permission to access the address.
-    /// The message also must provide a desired virtual address and a number of pages.
+    /// Loader-only: allocate 2^order contiguous physical frames from `zone`.
+    /// Return status in a0 and the physical address in a1.
+    AllocPhysical { order: u8, zone: MemoryZone },
+    /// Loader-only: release 2^order contiguous physical frames at a1 back to `zone`.
+    FreePhysical { order: u8, zone: MemoryZone },
+    /// Map physical or anonymous memory into a target module's virtual address space:
+    /// a1 = target handle (0 for self), a2 = physical address (0 for anonymous),
+    /// a3 = virtual address, a4 = pages, a5 = PageFlags.
     Map,
-    /// Unmap the physical memory from the virtual address space of the thread.
-    /// The message must provide the virtual address and the number of pages.
+    /// Unmap virtual memory from a target module's virtual address space:
+    /// a1 = target handle (0 for self), a2 = virtual address, a3 = pages.
     Unmap,
-    /// Loader-only: prepare an ELF image at (a1, a2) under parent handle a3.
-    /// Return status in a0, a parent-local slot in a1, and the new handle in a2.
-    PrepareModule,
+    /// Loader-only: create an empty module template with a1 = entry,
+    /// a2 = stack_pages, a3 = wait_slots_addr, a4 = wait_slots_count.
+    /// Return status in a0 and the new ModuleHandle in a1.
+    CreateModule,
     /// Loader-only: bind dependency handle a2 under parent handle a1.
     /// Return status in a0 and a fresh parent-local slot in a1.
     BindDependency,
@@ -200,9 +243,15 @@ impl Call {
             Self::Notify => (7 << 4) + 0b1001,
             Self::Spawn { entry } => entry,
             Self::Exit => 0b1001,
+            Self::AllocPhysical { order, zone } => {
+                (((order as usize) | ((zone as usize) << 8)) << 16) + (1 << 4) + 0b1001
+            }
             Self::Map => (2 << 4) + 0b1001,
             Self::Unmap => (3 << 4) + 0b1001,
-            Self::PrepareModule => (8 << 4) + 0b1001,
+            Self::FreePhysical { order, zone } => {
+                (((order as usize) | ((zone as usize) << 8)) << 16) + (4 << 4) + 0b1001
+            }
+            Self::CreateModule => (8 << 4) + 0b1001,
             Self::BindDependency => (9 << 4) + 0b1001,
             Self::Debug => (5 << 4) + 0b1001,
         }
@@ -224,9 +273,27 @@ impl Call {
                     6 => Ok(Self::Wait),
                     7 => Ok(Self::Notify),
                     0 => Ok(Self::Exit),
+                    1 => {
+                        let order = (arg & 0xff) as u8;
+                        let zone = match arg >> 8 {
+                            0 => MemoryZone::Normal,
+                            1 => MemoryZone::Dma,
+                            _ => return Err(a0),
+                        };
+                        Ok(Self::AllocPhysical { order, zone })
+                    }
                     2 => Ok(Self::Map),
                     3 => Ok(Self::Unmap),
-                    8 => Ok(Self::PrepareModule),
+                    4 => {
+                        let order = (arg & 0xff) as u8;
+                        let zone = match arg >> 8 {
+                            0 => MemoryZone::Normal,
+                            1 => MemoryZone::Dma,
+                            _ => return Err(a0),
+                        };
+                        Ok(Self::FreePhysical { order, zone })
+                    }
+                    8 => Ok(Self::CreateModule),
                     9 => Ok(Self::BindDependency),
                     5 => Ok(Self::Debug),
                     _ => Err(a0),

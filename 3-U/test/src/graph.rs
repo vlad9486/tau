@@ -87,7 +87,7 @@ pub(super) fn run(case: usize, info: usize, pages: usize) -> ! {
         Err(ModuleError::InvalidDependency),
     );
     assert_eq!(
-        Ubi::prepare_module(ModuleHandle::from_raw(usize::MAX), application),
+        Ubi::bind_dependency(ModuleHandle::from_raw(usize::MAX), a),
         Err(ModuleError::InvalidDependency),
     );
     Ubi::unmap(image.as_ptr().addr(), image.len().div_ceil(4096)).unwrap();
@@ -130,15 +130,14 @@ pub(super) fn run(case: usize, info: usize, pages: usize) -> ! {
     }
 
     // Appending bindings after contexts exist preserves their cached roots.
-    // Binding itself allocates no pages; failing preparation must reclaim all
-    // of its newly allocated descriptor, tables, stem and temporary storage.
+    // Binding itself allocates no pages; failing creation must not retain pages.
     for slot in 2..0x800 {
         assert_eq!(Ubi::bind_dependency(b, service).unwrap(), slot);
     }
     assert_eq!(Ubi::bind_dependency(b, service), Err(ModuleError::NoSlots));
     assert_eq!(
-        Ubi::prepare_module(b, application),
-        Err(ModuleError::NoSlots)
+        Ubi::create_module(0x1001, 1, 0, 0),
+        Err(ModuleError::InvalidImage)
     );
     tau_test_passed(case, 128)
 }

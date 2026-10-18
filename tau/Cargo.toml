@@ -15,3 +15,7 @@ bench = false
 
 [features]
 nightly = []
+elf = ["dep:elf"]
+
+[dependencies]
+elf = { version = "0.8.0", default-features = false, optional = true }

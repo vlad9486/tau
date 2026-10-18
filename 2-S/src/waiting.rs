@@ -46,7 +46,6 @@ impl WaitTable {
         window: &mut WindowAccess,
         context: &Context,
         hart: usize,
-        root: Root,
         stem: usize,
         base: usize,
         count: usize,
@@ -61,14 +60,6 @@ impl WaitTable {
         let end = base.checked_add(bytes).ok_or(ModuleError::InvalidImage)?;
         if (base >> 30) & 511 != stem || ((end - 1) >> 30) & 511 != stem {
             return Err(ModuleError::InvalidImage);
-        }
-        for address in (base & !(PAGE - 1)..end).step_by(PAGE) {
-            let (_, flags) = window
-                .resolve(root, address)
-                .ok_or(ModuleError::InvalidImage)?;
-            if flags & 30 != 22 {
-                return Err(ModuleError::InvalidImage);
-            }
         }
         let storage = count
             .checked_mul(size_of::<WaitRecord>())

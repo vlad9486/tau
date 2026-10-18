@@ -14,4 +14,4 @@ doctest = false
 bench = false
 
 [dependencies]
-tau = { path = "../../tau" }
+tau = { path = "../../tau", features = ["elf"] }

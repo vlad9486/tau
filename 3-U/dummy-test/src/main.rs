@@ -84,7 +84,13 @@ extern "C" fn dummy_main(
                 tau::Ubi::map(NonZeroUsize::new(value), 0x1_0000_0000, 1),
                 Err(tau::AllocError::AccessDenied)
             ) && matches!(
-                tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, &[0]),
+                tau::Ubi::alloc_physical(0, tau::MemoryZone::Normal),
+                Err(tau::AllocError::AccessDenied)
+            ) && matches!(
+                tau::Ubi::free_physical(value, 0, tau::MemoryZone::Normal),
+                Err(tau::FreeError::AccessDenied)
+            ) && matches!(
+                tau::Ubi::create_module(0x1000, 1, 0, 0),
                 Err(tau::ModuleError::AccessDenied)
             ) && matches!(
                 tau::Ubi::map(None, 0xffff_ffc0_0020_0000, 1),
@@ -157,7 +163,7 @@ extern "C" fn dummy_main(
             let parent = tau::ModuleHandle::from_raw(value);
             let child = tau::ModuleHandle::from_raw(second);
             let denied = matches!(
-                tau::Ubi::prepare_module(parent, &[0]),
+                tau::Ubi::create_module(0x1000, 1, 0, 0),
                 Err(tau::ModuleError::AccessDenied)
             ) && matches!(
                 tau::Ubi::bind_dependency(parent, child),
