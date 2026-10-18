@@ -362,7 +362,8 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
         let sepc = cpu::csrr!("sepc");
         let stval = cpu::csrr!("stval");
         let code = unsafe { u16::try_from(0x8000 | (cause & 0x7fff)).unwrap_unchecked() };
-        respond_code(&mut window, local, code, sepc, stval, 0, 0, 0);
+        respond_code(code, sepc, stval, 0, 0, 0);
+        unsafe { hint::unreachable_unchecked() };
     } else {
         match cause & !INTERRUPT_BIT {
             SUPERVISOR_TIMER => {
@@ -375,77 +376,58 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
             _ => {
                 sbi::Printer.ch(*b"SU: unexpected interrupt\r\n");
             }
-        };
+        }
+        resume_after_interrupt()
     }
-
-    resume_after_interrupt()
 }
 
-extern "C" fn respond(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
+extern "C" fn respond(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
     let Ok(tau::Call::Respond { code }) = tau::Call::decode(a0) else {
         unsafe { hint::unreachable_unchecked() };
     };
-    let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
-    let local = unsafe { local_access() };
-    respond_code(&mut window, local, code, a1, a2, a3, a4, a5)
+    respond_code(code, a1, a2, a3, a4, a5)
 }
 
 #[inline(always)]
-fn respond_code(
-    window: &mut vmem::WindowAccess,
-    local: mmu::Local<'_>,
-    code: u16,
-    a1: usize,
-    a2: usize,
-    a3: usize,
-    a4: usize,
-    a5: usize,
-) -> ! {
-    let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
-
-    if let Some(caller) = local.module_context.take_caller() {
-        let flush = mmu::switch_flush(window, local.module_context.root, caller);
-        let _local = unsafe { mmu::switch(local, caller, flush) };
-
-        restore_syscall(code as _, a1, a2, a3, a4, a5)
-    } else {
-        respond_exit(window, local, scheduler)
-    }
+fn respond_code(code: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
+    let window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+    let local = unsafe { local_access() };
+    let Some(caller) = local.module_context.take_caller() else {
+        hint::cold_path();
+        respond_exit();
+    };
+    let flush = mmu::switch_flush(&window, local.module_context.root, caller);
+    let _local = unsafe { mmu::switch(local, caller, flush) };
+    restore_syscall_hot(code as _, a1, a2, a3, a4, a5)
 }
 
 #[cold]
 #[inline(never)]
-fn respond_exit(
-    window: &mut vmem::WindowAccess,
-    local: mmu::Local<'_>,
-    scheduler: &Scheduler,
-) -> ! {
+fn respond_exit() -> ! {
+    let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+    let local = unsafe { local_access() };
+    let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
     let hart = local.thread.hart_id();
-    scheduler::exit(window, scheduler);
-    let selected = scheduler::dispatch(window, scheduler, hart);
-    resume_scheduled(window, local, selected)
+    scheduler::exit(&mut window, scheduler);
+    let selected = scheduler::dispatch(&mut window, scheduler, hart);
+    resume_scheduled(&window, local, selected)
 }
 
-extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
+extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
     if let Ok(tau::Call::Invoke { slot, arg }) = tau::Call::decode(a0) {
-        invoke(slot, arg, a1, a2, a3, a4, a5);
+        return invoke(slot, arg, a1, a2, a3, a4, a5);
     }
+    hint::cold_path();
     syscall_slow(a0, a1, a2, a3, a4, a5)
 }
 
 #[inline(always)]
-fn invoke(slot: u16, arg: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
-    let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+fn invoke(slot: u16, arg: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
+    let window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
     let local = unsafe { local_access() };
-    let root = match local.module_context.dependency(slot) {
-        Some(root) => root,
-        None => invoke_slow(
-            &mut window,
-            local.thread,
-            local.module_context,
-            local.module,
-            slot,
-        ),
+    let Some(root) = local.module_context.dependency(slot) else {
+        hint::cold_path();
+        invoke_slow(slot, a1, a2, a3, a4, a5, arg);
     };
     let caller = local.module_context.root;
     let flush = mmu::switch_flush(&window, caller, root);
@@ -453,28 +435,41 @@ fn invoke(slot: u16, arg: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
     // backing in both roots. Moving `local` ends all pre-switch borrows.
     let local = unsafe { mmu::switch(local, root, flush) };
     if local.module.poisoned.load(Ordering::Acquire) {
-        let flush = mmu::switch_flush(&window, root, caller);
-        let _local = unsafe { mmu::switch(local, caller, flush) };
-        restore_syscall(tau::ModuleError::Poisoned as usize, 0, 0, 0, 0, 0);
+        hint::cold_path();
+        invoke_poisoned(caller);
     }
     local.module_context.enter(caller);
-    enter_invocation(arg as usize, a1, a2, a3, a4, a5)
+    enter_invocation_hot(arg as usize, a1, a2, a3, a4, a5)
 }
 
 #[cold]
 #[inline(never)]
-fn invoke_slow(
-    window: &mut vmem::WindowAccess,
-    thread: &Thread,
-    module_context: &mut module::ModuleContext,
-    module: &module::ModuleTables,
-    slot: u16,
-) -> vmem::Root {
+fn invoke_poisoned(caller: vmem::Root) -> ! {
+    let window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+    let local = unsafe { local_access() };
+    let flush = mmu::switch_flush(&window, local.module_context.root, caller);
+    let _local = unsafe { mmu::switch(local, caller, flush) };
+    restore_syscall(tau::ModuleError::Poisoned as usize, 0, 0, 0, 0, 0)
+}
+
+#[cold]
+#[inline(never)]
+fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, arg: u16) -> ! {
+    let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+    let local = unsafe { local_access() };
     let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
-    match loading::invoke(window, context, thread, module_context, module, slot) {
-        Ok(root) => root,
-        Err(error) => restore_syscall(error as usize, 0, 0, 0, 0, 0),
+    if let Err(error) = loading::invoke(
+        &mut window,
+        context,
+        local.thread,
+        local.module_context,
+        local.module,
+        slot,
+    ) {
+        restore_syscall(error as usize, 0, 0, 0, 0, 0);
     }
+    invoke(slot, arg, a1, a2, a3, a4, a5);
+    unsafe { hint::unreachable_unchecked() }
 }
 
 #[cold]
@@ -585,6 +580,15 @@ fn resume_scheduled(window: &vmem::WindowAccess, local: mmu::Local<'_>, selected
 /// The next user trap saves any register state required for resumption.
 #[inline(always)]
 fn enter_invocation(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
+    enter_invocation_hot(a0, a1, a2, a3, a4, a5);
+    unsafe { hint::unreachable_unchecked() }
+}
+
+/// Omitting `options(noreturn)` on the hot `sret` path keeps LLVM's
+/// `UnreachableHeuristics` from treating every path in `syscall`/`respond` as
+/// `unreachable` and ignoring `cold_path` branch weights.
+#[inline(always)]
+fn enter_invocation_hot(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
     unsafe {
         arch::asm! {
             "ld t0, {pc}(tp)",
@@ -617,7 +621,6 @@ fn enter_invocation(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
             // Install user tp = 0 and retain the context pointer in sscratch.
             "csrrw tp, sscratch, tp",
             "sret",
-            options(noreturn),
             in("a0") a0,
             in("a1") a1,
             in("a2") a2,
@@ -639,6 +642,12 @@ extern "C" fn restore_syscall(
     a4: usize,
     a5: usize,
 ) -> ! {
+    restore_syscall_hot(a0, a1, a2, a3, a4, a5);
+    unsafe { hint::unreachable_unchecked() }
+}
+
+#[inline(always)]
+fn restore_syscall_hot(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
     unsafe {
         arch::asm! {
             "ld t0, {pc}(tp)",
@@ -671,7 +680,6 @@ extern "C" fn restore_syscall(
             "ld s11, {s11}(tp)",
             "csrrw tp, sscratch, tp",
             "sret",
-            options(noreturn),
             in("a0") a0,
             in("a1") a1,
             in("a2") a2,

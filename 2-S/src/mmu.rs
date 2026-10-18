@@ -4,7 +4,7 @@
 //! Stable hart-local tags for retained roots. Successful contexts and their
 //! ASIDs live until shutdown; migration and thread teardown are still TODO.
 
-use core::{arch, ptr};
+use core::{arch, hint, ptr};
 
 use super::{
     asm,
@@ -44,7 +44,7 @@ pub unsafe fn init(window: &mut WindowAccess) {
     asm::sfence_vma(None, None);
     *window.hart_mut() = Hart {
         mask,
-        flush: false,
+        flush: mask == 0,
         next_asid: 1,
     };
 }
@@ -54,8 +54,7 @@ pub fn asid_mask(window: &WindowAccess) -> u16 {
 }
 
 pub fn force_flush(window: &WindowAccess) -> bool {
-    let hart = window.hart();
-    hart.flush || hart.mask == 0
+    window.hart().flush
 }
 
 /// Two different roots sharing ASID zero always need a fence. Check the roots
@@ -63,7 +62,12 @@ pub fn force_flush(window: &WindowAccess) -> bool {
 /// every switch. Keep the hart policy for tagged switches and forced flushing.
 #[inline(always)]
 pub fn switch_flush(window: &WindowAccess, source: Root, destination: Root) -> bool {
-    (source.asid() | destination.asid()) == 0 || force_flush(window)
+    if (source.asid() | destination.asid()) == 0 || force_flush(window) {
+        hint::cold_path();
+        true
+    } else {
+        false
+    }
 }
 
 /// Allocate only after construction succeeds, so failed attempts consume no tag.
@@ -91,6 +95,7 @@ pub unsafe fn switch<'a>(local: Local<'a>, root: Root, flush: bool) -> Local<'a>
     let module_context = ptr::from_mut(local.module_context);
     let module = ptr::from_mut(local.module);
     if flush {
+        hint::cold_path();
         // Keep the write and fence together: no compiler-generated access to
         // context storage may slip between changing roots and invalidation.
         // A non-x0 ASID operand preserves global translations, even for ASID 0.
