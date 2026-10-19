@@ -29,16 +29,27 @@ pub(super) struct ActiveWait {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct ThreadState {
-    pub phase: Phase,
+pub struct ThreadState {
+    pub(super) phase: Phase,
     pub root: Root,
     pub resume: Resume,
     pub message: [usize; 6],
     pub sequence: usize,
-    pub wait: Option<ActiveWait>,
+    pub(super) wait: Option<ActiveWait>,
 }
 
 impl ThreadState {
+    pub fn runnable(root: Root, message: [usize; 6], resume: Resume) -> Self {
+        ThreadState {
+            phase: Phase::Runnable,
+            root,
+            resume,
+            message,
+            sequence: 0,
+            wait: None,
+        }
+    }
+
     /// Final departure decision. A completed Parking wait keeps its hart and
     /// returns directly; an outstanding one releases ownership as Parked.
     pub fn commit_parking(&mut self) -> bool {
@@ -63,35 +74,6 @@ impl ThreadState {
         } else {
             self.phase = Phase::Runnable;
             true
-        }
-    }
-}
-
-/// Identity/affinity are immutable after publication. All non-bootstrap mutable
-/// fields are accessed only under the scheduler lock, including through aliases.
-#[repr(C)]
-pub struct Thread {
-    pub(super) hart_id: usize,
-    pub(super) state: ThreadState,
-}
-
-impl Thread {
-    pub fn hart_id(&self) -> usize {
-        self.hart_id
-    }
-
-    /// Create thread before forming a shared reference.
-    pub fn new(hart: usize, root: Root, message: [usize; 6], resume: Resume) -> Self {
-        Thread {
-            hart_id: hart,
-            state: ThreadState {
-                phase: Phase::Runnable,
-                root,
-                resume,
-                message,
-                sequence: 0,
-                wait: None,
-            },
         }
     }
 }

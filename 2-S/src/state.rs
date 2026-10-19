@@ -8,7 +8,7 @@ use super::{
     llfree, loading,
     module::{ModuleContext, ModuleTables},
     sbi,
-    scheduler::{Scheduler, Thread},
+    scheduler::{Scheduler, ThreadState},
     vmem::{self, Mapping, Window, WindowAccess},
     waiting::WaitTable,
 };
@@ -81,7 +81,8 @@ pub enum InitError {
 /// be initialized only once for this module.
 pub unsafe fn init(
     window: &mut WindowAccess,
-    thread: &mut Thread,
+    hart_id: usize,
+    thread: ThreadState,
     module: *mut ModuleContext,
     tables: *mut ModuleTables,
     scheduler: *mut Scheduler,
@@ -98,14 +99,14 @@ pub unsafe fn init(
     };
 
     window
-        .map(root, mapping, || context.page(thread.hart_id()))
+        .map(root, mapping, || context.page(hart_id))
         .map_err(|_| tau::AllocError::OutOfMemory)
         .map_err(InitError::Alloc)?;
 
     // Bootstrap constructs the initial module tables once. Future context
     // creation must reuse their backing pages, not allocate/reset these tables.
     let tables_backing = context
-        .block(thread.hart_id(), super::module::TABLE_ORDER)
+        .block(hart_id, super::module::TABLE_ORDER)
         .map_err(InitError::Allocator)?;
     let mapping = Mapping {
         addr_virtual: tables.addr(),
@@ -115,7 +116,7 @@ pub unsafe fn init(
         flags: *b"rw---",
     };
     window
-        .map(root, mapping, || context.page(thread.hart_id()))
+        .map(root, mapping, || context.page(hart_id))
         .map_err(|_| tau::AllocError::OutOfMemory)
         .map_err(InitError::Alloc)?;
     unsafe { ModuleTables::init_at(tables, true, false) };
@@ -127,7 +128,7 @@ pub unsafe fn init(
     let wait_table = WaitTable::prepare(
         window,
         context,
-        thread.hart_id(),
+        hart_id,
         stem,
         context.boot.wait_slots_addr,
         context.boot.wait_slots_count,
@@ -147,7 +148,6 @@ pub unsafe fn init(
 #[inline]
 pub fn syscall(
     window: &mut WindowAccess,
-    thread: &Thread,
     module: &mut ModuleContext,
     tables: &ModuleTables,
     context: &Context,
@@ -155,13 +155,15 @@ pub fn syscall(
 ) -> [usize; 6] {
     use core::fmt::Write;
 
+    let hart_id = window.hart().hart_id;
+
     match tau::Call::decode(msg[0]) {
         Ok(tau::Call::AllocPhysical { order, zone: _ }) => {
             if !tables.loader_authority {
                 msg[0] = tau::AllocError::AccessDenied as usize;
                 msg[1] = 0;
             } else {
-                match context.block(thread.hart_id(), order as usize) {
+                match context.block(hart_id, order as usize) {
                     Ok(phys) => {
                         msg[0] = 0;
                         msg[1] = phys;
@@ -177,7 +179,7 @@ pub fn syscall(
             if !tables.loader_authority {
                 msg[0] = tau::FreeError::AccessDenied as usize;
             } else {
-                msg[0] = match context.free_block(thread.hart_id(), msg[1], order as usize) {
+                msg[0] = match context.free_block(hart_id, msg[1], order as usize) {
                     Ok(()) => 0,
                     Err(llfree::Error::Address) => tau::FreeError::InvalidAddress as usize,
                     Err(_) => tau::FreeError::AlreadyFree as usize,
@@ -186,14 +188,7 @@ pub fn syscall(
         }
         Ok(tau::Call::CreateModule) => {
             match loading::create(
-                window,
-                context,
-                thread.hart_id(),
-                tables,
-                msg[1],
-                msg[2],
-                msg[3],
-                msg[4],
+                window, context, hart_id, tables, msg[1], msg[2], msg[3], msg[4],
             ) {
                 Ok(handle) => {
                     msg[0] = 0;
@@ -232,7 +227,7 @@ pub fn syscall(
         Ok(tau::Call::Map) => {
             msg[0] = match map_pages(
                 window,
-                thread,
+                hart_id,
                 module,
                 tables,
                 context,
@@ -248,7 +243,7 @@ pub fn syscall(
         }
         Ok(tau::Call::Unmap) => {
             msg[0] = match unmap_pages(
-                window, thread, module, tables, context, msg[2], msg[3], msg[1],
+                window, hart_id, module, tables, context, msg[2], msg[3], msg[1],
             ) {
                 Ok(()) => 0,
                 Err(error) => error as usize,
@@ -315,7 +310,7 @@ fn decode_flags(flags: usize) -> Option<[u8; 5]> {
 
 fn map_pages(
     window: &mut WindowAccess,
-    thread: &Thread,
+    hart_id: usize,
     module: &ModuleContext,
     tables: &ModuleTables,
     context: &Context,
@@ -335,7 +330,7 @@ fn map_pages(
     if target == 0 {
         return alloc_pages(
             window,
-            thread,
+            hart_id,
             context,
             physical_addr,
             virtual_addr,
@@ -368,14 +363,14 @@ fn map_pages(
         physical_pages: usize::from(physical_addr.is_some()) * number_of_pages,
         flags,
     };
-    if let Err(error) = window.map_stem(dep.stem, mapping, || context.page(thread.hart_id())) {
+    if let Err(error) = window.map_stem(dep.stem, mapping, || context.page(hart_id)) {
         if !matches!(
             error,
             llfree::Error::Address | llfree::Error::InvalidArgument
         ) {
             for i in 0..number_of_pages {
                 let _ = window.unmap_stem(dep.stem, None, virtual_addr + i * 4096, |page| {
-                    context.free(thread.hart_id(), page)
+                    context.free(hart_id, page)
                 });
             }
         }
@@ -395,7 +390,7 @@ fn map_pages(
 
 fn unmap_pages(
     window: &mut WindowAccess,
-    thread: &Thread,
+    hart_id: usize,
     module: &ModuleContext,
     tables: &ModuleTables,
     context: &Context,
@@ -423,7 +418,7 @@ fn unmap_pages(
         }
         for i in 0..number_of_pages {
             let _ = window.unmap(root, virtual_addr + i * 4096, |page| {
-                context.free(thread.hart_id(), page)
+                context.free(hart_id, page)
             });
         }
         return Ok(());
@@ -437,7 +432,7 @@ fn unmap_pages(
     }
     for i in 0..number_of_pages {
         let _ = window.unmap_stem(dep.stem, None, virtual_addr + i * 4096, |page| {
-            context.free(thread.hart_id(), page)
+            context.free(hart_id, page)
         });
     }
     Ok(())
@@ -445,7 +440,7 @@ fn unmap_pages(
 
 pub fn alloc_pages(
     window: &mut WindowAccess,
-    thread: &Thread,
+    hart_id: usize,
     context: &Context,
     physical_addr: Option<NonZeroUsize>,
     virtual_addr: usize,
@@ -472,7 +467,7 @@ pub fn alloc_pages(
     };
 
     let root = Window::current_root();
-    if let Err(error) = window.map(root, mapping, || context.page(thread.hart_id())) {
+    if let Err(error) = window.map(root, mapping, || context.page(hart_id)) {
         // Roll back pages allocated by this failed request; source physical
         // mappings are borrowed and are never returned to the allocator.
         if !matches!(
@@ -481,7 +476,7 @@ pub fn alloc_pages(
         ) {
             for i in 0..number_of_pages {
                 let _ = window.unmap(root, virtual_addr + i * 4096, |page| {
-                    context.free(thread.hart_id(), page)
+                    context.free(hart_id, page)
                 });
             }
         }

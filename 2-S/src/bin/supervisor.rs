@@ -15,8 +15,9 @@
 use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem, ptr, sync::atomic::Ordering};
 
 use supervisor::{
-    module, sbi, state, vmem, mmu, cpu, loading,
-    scheduler::{self, Thread, ReturnKind, Scheduler, Dispatch},
+    cpu, loading, mmu, module, sbi,
+    scheduler::{self, Dispatch, ReturnKind, Scheduler, ThreadState},
+    state, vmem,
 };
 
 #[cfg(all(not(debug_assertions), feature = "panic-never"))]
@@ -38,10 +39,6 @@ unsafe extern "C" {
     #[allow(improper_ctypes)]
     static __WINDOW: vmem::Window;
 
-    // Local thread metadata shared by this thread's module contexts; parent/child
-    // lifetime information belongs here, without a separate thread collection.
-    #[allow(improper_ctypes)]
-    static __THREAD: UnsafeCell<Thread>;
     // Context-private root, dependency roots, and active invocation state.
     // Linker-provided Rust storage, not a foreign-language representation.
     #[allow(improper_ctypes)]
@@ -62,13 +59,12 @@ unsafe extern "C" {
 pub const WINDOW_END: usize = 0xffff_ffc0_0020_0000;
 
 /// # Safety
-/// The current root's thread, module-context, and module pages must be mapped
+/// The current root's module-context, and module pages must be mapped
 /// and initialized, and no other references to them may exist on this hart.
 #[inline(always)]
 unsafe fn local_access<'a>() -> mmu::Local<'a> {
     unsafe {
         mmu::Local {
-            thread: &mut *UnsafeCell::raw_get(&raw const __THREAD),
             module_context: &mut *UnsafeCell::raw_get(&raw const __MODULE_CONTEXT),
             module: &mut *UnsafeCell::raw_get(&raw const __MODULE),
         }
@@ -98,23 +94,24 @@ extern "C" fn init(hart_id: usize, info: usize, info_pages: usize) -> ! {
     let tables = UnsafeCell::raw_get(&raw const __MODULE);
     let scheduler = UnsafeCell::raw_get(&raw const __SCHEDULER);
 
-    let hart = mmu::init();
+    let hart = mmu::init(hart_id);
     writeln!(sbi::Console, "SU: {hart}\r").unwrap_or_default();
     *window.hart_mut() = hart;
+    let root = vmem::Window::current_root();
 
-    // initialize `__THREAD`
-    let thread = {
-        let thread_ptr = UnsafeCell::raw_get(&raw const __THREAD);
-        let root = vmem::Window::current_root();
-        let thread = Thread::new(hart_id, root, [0; 6], ReturnKind::Syscall);
-        unsafe {
-            thread_ptr.write(thread);
-            &mut *thread_ptr
-        }
-    };
-
+    let thread = ThreadState::runnable(root, [0; 6], ReturnKind::Syscall);
     let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
-    match unsafe { state::init(&mut window, thread, module, tables, scheduler, context) } {
+    match unsafe {
+        state::init(
+            &mut window,
+            hart_id,
+            thread,
+            module,
+            tables,
+            scheduler,
+            context,
+        )
+    } {
         Ok((satp, sepc)) => unsafe {
             arch::asm! {
                 "li t0, 0x100",
@@ -301,15 +298,16 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
     const SUPERVISOR_EXTERNAL: usize = 9;
 
     let local = unsafe { local_access() };
-    let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
+    let scheduler = unsafe { &mut *UnsafeCell::raw_get(&raw const __SCHEDULER) };
     let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+    let hart_id = window.hart().hart_id;
     if cause == INTERRUPT_BIT | SUPERVISOR_TIMER && scheduler.active() {
-        let selected = scheduler::preempt(&mut window, local.thread, scheduler);
+        let selected = scheduler::preempt(&mut window, scheduler);
         resume_scheduled(&window, local, selected)
     } else if cause == INTERRUPT_BIT | SUPERVISOR_EXTERNAL && scheduler.active() {
         cpu::csrrc!("sie", 1 << 9);
-        scheduler::notify_hardware_interrupt(&mut window, scheduler, local.thread.hart_id());
-        let selected = scheduler::preempt(&mut window, local.thread, scheduler);
+        scheduler::notify_hardware_interrupt(&mut window, scheduler, hart_id);
+        let selected = scheduler::preempt(&mut window, scheduler);
         resume_scheduled(&window, local, selected)
     } else if cause & INTERRUPT_BIT == 0 {
         if !local.module.pure {
@@ -361,11 +359,11 @@ fn respond_code(code: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize
 #[inline(never)]
 fn respond_exit() -> ! {
     let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+    let hart_id = window.hart().hart_id;
     let local = unsafe { local_access() };
-    let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
-    let hart = local.thread.hart_id();
-    scheduler::exit(&mut window, local.thread, scheduler);
-    let selected = scheduler::dispatch(&mut window, scheduler, hart);
+    let scheduler = unsafe { &mut *UnsafeCell::raw_get(&raw const __SCHEDULER) };
+    scheduler::exit(&mut window, scheduler, hart_id);
+    let selected = scheduler::dispatch(&mut window, scheduler, hart_id);
     resume_scheduled(&window, local, selected)
 }
 
@@ -417,7 +415,6 @@ fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize,
     let (root, entry) = match loading::invoke(
         &mut window,
         context,
-        local.thread,
         local.module_context,
         local.module,
         slot,
@@ -449,17 +446,17 @@ fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize,
 #[inline(never)]
 extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
     let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+    let hart_id = window.hart().hart_id;
     let local = unsafe { local_access() };
     if matches!(
         tau::Call::decode(a0),
         Ok(tau::Call::Spawn { .. } | tau::Call::Exit | tau::Call::Wait | tau::Call::Notify)
     ) {
-        scheduled_syscall(&mut window, local, [a0, a1, a2, a3, a4, a5]);
+        scheduled_syscall(&mut window, hart_id, local, [a0, a1, a2, a3, a4, a5]);
     }
     let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
     let [a0, a1, a2, a3, a4, a5] = state::syscall(
         &mut window,
-        local.thread,
         local.module_context,
         local.module,
         context,
@@ -472,33 +469,25 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
 #[inline(never)]
 fn scheduled_syscall(
     window: &mut vmem::WindowAccess,
+    hart_id: usize,
     local: mmu::Local<'_>,
     message: [usize; 6],
 ) -> ! {
     let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
-    let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
+    let scheduler = unsafe { &mut *UnsafeCell::raw_get(&raw const __SCHEDULER) };
     let mut result = [0; 6];
     match tau::Call::decode(message[0]) {
         Ok(tau::Call::Spawn { entry }) => {
-            match scheduler::spawn(
-                window,
-                local.thread,
-                local.module,
-                context,
-                scheduler,
-                entry,
-                message,
-            ) {
+            match scheduler::spawn(window, local.module, context, scheduler, entry, message) {
                 Ok(id) => result[1] = id as usize,
                 Err(error) => result[0] = error as usize,
             }
         }
         Ok(tau::Call::Wait) => {
-            let hart = local.thread.hart_id();
             match scheduler::wait(window, local.module, scheduler, message[1], message[2]) {
                 Ok(Some(event)) => result[1] = event.encode(),
                 Ok(None) => {
-                    let selected = scheduler::dispatch(window, scheduler, hart);
+                    let selected = scheduler::dispatch(window, scheduler, hart_id);
                     resume_scheduled(window, local, selected)
                 }
                 Err(error) => result[0] = error as usize,
@@ -512,9 +501,8 @@ fn scheduled_syscall(
             }
         }
         Ok(tau::Call::Exit) => {
-            let hart = local.thread.hart_id();
-            scheduler::exit(window, local.thread, scheduler);
-            let selected = scheduler::dispatch(window, scheduler, hart);
+            scheduler::exit(window, scheduler, hart_id);
+            let selected = scheduler::dispatch(window, scheduler, hart_id);
             resume_scheduled(window, local, selected)
         }
         _ => {

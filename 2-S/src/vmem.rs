@@ -12,14 +12,12 @@ use super::{
     asm, cpu, llfree,
     mmu::Hart,
     module::{ModuleTables, PreparedModule, TABLE_PAGES},
-    scheduler::Thread,
 };
 
 pub const SV39: usize = 8;
 pub const PAGE: usize = 4096;
 pub const SCHEDULER: usize = 0xffff_ffc0_0040_0000;
 pub const ALLOCATOR: usize = 0xffff_ffc0_006e_0000;
-pub const THREAD: usize = 0xffff_ffc0_0020_0000;
 pub const MODULE_CONTEXT: usize = 0xffff_ffc0_0021_0000;
 pub const MODULE: usize = 0xffff_ffc0_0022_0000;
 pub const SUPERVISOR_INDEX: usize = 256;
@@ -103,7 +101,7 @@ pub struct Window {
     table: UnsafeCell<[usize; 512]>,                              // 1 page  (slot 0: recursive L2)
     pte: UnsafeCell<[usize; 512]>,                                // 1 page  (slot 1: page-table walk)
     page: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 2: zeroing / segment copy)
-    thread: UnsafeCell<MaybeUninit<Padded<Thread>>>,              // 1 page  (slot 3: foreign Thread)
+    _reserved3: UnsafeCell<MaybeUninit<Page>>,                    // 1 page  (slot 3: reserved)
     descriptor: UnsafeCell<MaybeUninit<Padded<PreparedModule>>>,  // 1 page  (slot 4: module descriptor)
     wait: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 5: WaitRecord / wait slot)
     hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,                  // 1 page  (slot 6: permanent per-hart MMU)
@@ -114,7 +112,6 @@ pub struct Window {
 
 const PTE_SLOT: usize = mem::offset_of!(Window, pte) / PAGE;
 const PAGE_SLOT: usize = mem::offset_of!(Window, page) / PAGE;
-const THREAD_SLOT: usize = mem::offset_of!(Window, thread) / PAGE;
 const DESCRIPTOR_SLOT: usize = mem::offset_of!(Window, descriptor) / PAGE;
 const WAIT_SLOT: usize = mem::offset_of!(Window, wait) / PAGE;
 pub const HART_SLOT: usize = mem::offset_of!(Window, hart) / PAGE;
@@ -124,7 +121,6 @@ pub const STACK_SLOT: usize = mem::offset_of!(Window, stack) / PAGE;
 const _: () = {
     assert!(PTE_SLOT == 1);
     assert!(PAGE_SLOT == 2);
-    assert!(THREAD_SLOT == 3);
     assert!(DESCRIPTOR_SLOT == 4);
     assert!(WAIT_SLOT == 5);
     assert!(HART_SLOT == 6);
@@ -157,7 +153,7 @@ impl WindowAccess {
         Self { base }
     }
 
-    pub(super) fn hart(&self) -> &Hart {
+    pub fn hart(&self) -> &Hart {
         unsafe {
             &(&*UnsafeCell::raw_get(&raw const (*self.base).hart))
                 .assume_init_ref()
@@ -240,24 +236,6 @@ impl WindowAccess {
         self.alias(WAIT_SLOT, physical);
         let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).wait) };
         unsafe { &mut (*ptr).assume_init_mut().0 }
-    }
-
-    pub fn thread(&mut self, physical: usize) -> &Thread {
-        self.alias(THREAD_SLOT, physical);
-        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).thread) };
-        unsafe { &(*ptr).assume_init_ref().inner }
-    }
-
-    pub fn thread_mut(&mut self, physical: usize) -> &mut Thread {
-        self.alias(THREAD_SLOT, physical);
-        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).thread) };
-        unsafe { &mut (*ptr).assume_init_mut().inner }
-    }
-
-    pub fn write_thread(&mut self, physical: usize, thread: Thread) {
-        self.alias(THREAD_SLOT, physical);
-        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).thread) };
-        unsafe { (*ptr).write(Padded { inner: thread }) };
     }
 
     pub fn map_module_tables(&mut self, physical: usize) -> &mut ModuleTables {
@@ -553,7 +531,7 @@ impl WindowAccess {
     }
 
     /// Reclaim an inactive root and its owned pages/tables. Shared ELF stems,
-    /// module tables, thread pages and supervisor mappings are borrowed entries.
+    /// module tables and supervisor mappings are borrowed entries.
     /// The root's translations must be invalidated before reclamation.
     pub fn destroy(
         &mut self,

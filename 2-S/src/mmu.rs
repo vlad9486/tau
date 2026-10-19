@@ -9,15 +9,13 @@ use core::{arch, fmt, hint, ptr};
 use super::{
     asm,
     module::{ModuleContext, ModuleTables},
-    scheduler::Thread,
     vmem::{Root, Window, WindowAccess},
 };
 
-/// Exclusive references to the active root's thread, context, and module pages.
+/// Exclusive references to the active root's context and module pages.
 /// Moving this token into [`switch`] statically ends all borrows derived from
 /// these root-dependent mappings before `satp` changes.
 pub struct Local<'a> {
-    pub thread: &'a mut Thread,
     pub module_context: &'a mut ModuleContext,
     pub module: &'a mut ModuleTables,
 }
@@ -27,6 +25,7 @@ pub struct Hart {
     mask: u16,
     flush: bool,
     next_asid: usize,
+    pub hart_id: usize,
 }
 
 impl fmt::Display for Hart {
@@ -36,7 +35,7 @@ impl fmt::Display for Hart {
     }
 }
 
-pub fn init() -> Hart {
+pub fn init(hart_id: usize) -> Hart {
     let original = Window::current_root();
     let probe = Root::sv39(original.page(), u16::MAX);
     unsafe {
@@ -51,6 +50,7 @@ pub fn init() -> Hart {
         mask,
         flush: mask == 0,
         next_asid: 1,
+        hart_id,
     }
 }
 
@@ -87,12 +87,11 @@ pub fn allocate_tag(window: &mut WindowAccess) -> Option<u16> {
 
 /// # Safety
 /// Both roots must share executing supervisor code, stack and hart mappings,
-/// and `root` must map initialized thread, module-context, and module pages.
+/// and `root` must map initialized module-context and module pages.
 /// All global mappings must have identical backing and permissions on this hart.
 /// Unique live ASIDs and ordered page-table publication are required without a fence.
 #[inline(always)]
 pub unsafe fn switch<'a>(local: Local<'a>, root: Root, flush: bool) -> Local<'a> {
-    let thread = ptr::from_mut(local.thread);
     let module_context = ptr::from_mut(local.module_context);
     let module = ptr::from_mut(local.module);
     if flush {
@@ -117,7 +116,6 @@ pub unsafe fn switch<'a>(local: Local<'a>, root: Root, flush: bool) -> Local<'a>
     }
     unsafe {
         Local {
-            thread: &mut *thread,
             module_context: &mut *module_context,
             module: &mut *module,
         }

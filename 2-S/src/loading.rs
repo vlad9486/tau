@@ -13,7 +13,6 @@ use super::{
     module::{
         ModuleContext, ModuleTables, PreparedModule, CONTEXT_PAGES, TABLE_ORDER, TABLE_PAGES,
     },
-    scheduler::{Thread, ReturnKind},
     waiting::WaitTable,
     state::Context,
     llfree, mmu,
@@ -171,7 +170,6 @@ pub fn bind(
 pub fn invoke(
     window: &mut WindowAccess,
     context: &Context,
-    thread: &Thread,
     module: &mut ModuleContext,
     tables: &ModuleTables,
     slot: u16,
@@ -179,7 +177,7 @@ pub fn invoke(
     let descriptor = tables
         .get_dependency(slot)
         .ok_or(ModuleError::InvalidDependency)?;
-    let (root, entry) = construct(window, context, thread, module.root, descriptor)?;
+    let (root, entry) = construct(window, context, module.root, descriptor)?;
     module.retain_dependency(slot, root);
     Ok((root, entry))
 }
@@ -191,11 +189,10 @@ pub fn invoke(
 fn construct(
     window: &mut WindowAccess,
     context: &Context,
-    thread: &Thread,
     caller: Root,
     descriptor: usize,
 ) -> Result<(Root, usize), ModuleError> {
-    let hart = thread.hart_id();
+    let hart = window.hart().hart_id;
     let dep = window.read_descriptor(descriptor);
     if (dep.entry >> 30) & 511 != dep.root_index
         || !window
@@ -210,22 +207,12 @@ fn construct(
         window
             .supervisor_mappings(caller, root, || context.page(hart))
             .map_err(memory)?;
-        let (thread_page, _) = window
-            .resolve(caller, vmem::THREAD)
-            .ok_or(ModuleError::InvalidImage)?;
         for mapping in [
             Mapping {
                 addr_virtual: (dep.stack_pages * PAGE).wrapping_neg(),
                 virtual_pages: dep.stack_pages,
                 flags: *b"rw-u-",
                 ..Mapping::default()
-            },
-            Mapping {
-                addr_virtual: vmem::THREAD,
-                virtual_pages: 1,
-                addr_physical: NonZeroUsize::new(thread_page),
-                physical_pages: 1,
-                flags: *b"rw---",
             },
             Mapping {
                 addr_virtual: vmem::MODULE_CONTEXT,
@@ -259,16 +246,13 @@ fn construct(
 /// retained until reboot; all failed constructions reclaim their private pages.
 pub fn spawn(
     window: &mut WindowAccess,
-    thread: &Thread,
     module: &ModuleTables,
     context: &Context,
     entry: usize,
-    _id: usize,
-    mut message: [usize; 6],
-) -> Result<usize, tau::SpawnError> {
+) -> Result<vmem::Root, tau::SpawnError> {
     use tau::SpawnError;
     let caller = Window::current_root();
-    let hart = thread.hart_id();
+    let hart = window.hart().hart_id;
     let index = module.stem_index;
     if entry & 1 != 0 || (entry >> 30) & 511 != index {
         return Err(SpawnError::InvalidEntry);
@@ -284,13 +268,11 @@ pub fn spawn(
     }
     let memory = |_| SpawnError::OutOfMemory;
     let root = window.create(0, || context.page(hart)).map_err(memory)?;
-    let mut thread_page = 0;
     let result = (|| {
         window.attach(root, index, stem);
         window
             .supervisor_mappings(caller, root, || context.page(hart))
             .map_err(memory)?;
-        thread_page = context.page(hart).map_err(memory)?;
         let module_tables = window
             .resolve(caller, vmem::MODULE)
             .ok_or(SpawnError::InvalidEntry)?
@@ -301,13 +283,6 @@ pub fn spawn(
                 virtual_pages: module.stack_pages,
                 flags: *b"rw-u-",
                 ..Mapping::default()
-            },
-            Mapping {
-                addr_virtual: vmem::THREAD,
-                virtual_pages: 1,
-                addr_physical: NonZeroUsize::new(thread_page),
-                physical_pages: 1,
-                flags: *b"rw---",
             },
             Mapping {
                 addr_virtual: vmem::MODULE_CONTEXT,
@@ -329,16 +304,10 @@ pub fn spawn(
         }
         let tag = mmu::allocate_tag(window).ok_or(SpawnError::OutOfMemory)?;
         let root = Root::sv39(root.page(), tag);
-        message[0] = 0;
-        let thread = Thread::new(hart, root, message, ReturnKind::Entry(entry));
-        window.write_thread(thread_page, thread);
-        Ok(thread_page)
+        Ok(root)
     })();
     if result.is_err() {
         let _ = window.destroy(root, |page| context.free(hart, page));
-        if thread_page != 0 {
-            let _ = context.free(hart, thread_page);
-        }
     }
     result
 }

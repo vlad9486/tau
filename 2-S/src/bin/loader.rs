@@ -127,8 +127,6 @@ extern "C" fn inner(
 
     unsafe {
         arch::asm! {
-            "li t0, {ctx}",
-            "csrw sscratch, t0",
             "li t0, {sepc}",
             "csrw sepc, t0",
             "li t0, 8",
@@ -145,7 +143,6 @@ extern "C" fn inner(
             in("a2") info_pages,
             satp = in(reg) satp,
             sepc = const { 0x_ffff_ffc0_0060_1000_usize },
-            ctx = const { vmem::THREAD },
         }
     }
 }
@@ -285,13 +282,7 @@ fn init_memory(
     let stack = gfp();
     l2[vmem::STACK_SLOT] = (stack.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
 
-    let l2 = gfp();
-    // the branch of the thread context
-    l1[0o001] = (l2.as_mut_ptr().addr() >> 2) + 1;
-    let thread = gfp();
-    l2[0o000] = (thread.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
-
-    // The supervisor allocates and maps the shared scheduler branch at startup.
+    // The supervisor allocates and maps the module context and shared scheduler branches at startup.
 
     let mut l2 = gfp();
     // the branch of the supervisor image

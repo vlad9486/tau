@@ -7,8 +7,8 @@
 use tau::{Event, SpawnError, WaitError};
 
 use super::{
-    thread::{ActiveWait, Phase, Resume},
-    runtime, cpu, Context, Thread, Scheduler, loading,
+    thread::{ActiveWait, Phase, Resume, ThreadState},
+    runtime, cpu, Context, Scheduler, loading,
     vmem::{self, Window, WindowAccess},
     module::ModuleTables,
     waiting::WaitTable,
@@ -16,23 +16,25 @@ use super::{
 
 pub fn spawn(
     window: &mut WindowAccess,
-    thread: &Thread,
     module: &ModuleTables,
     context: &Context,
-    scheduler: &Scheduler,
+    scheduler: &mut Scheduler,
     entry: usize,
     message: [usize; 6],
 ) -> Result<u16, SpawnError> {
     let mut scheduler = scheduler.lock();
-    if scheduler.count == scheduler.registry.len() {
+    if scheduler.count == scheduler.threads.len() {
         return Err(SpawnError::NoSlots);
     }
     let id = scheduler.count + 1;
-    let physical = loading::spawn(window, thread, module, context, entry, id, message)?;
+    let root = loading::spawn(window, module, context, entry)?;
+    let mut message = message;
+    message[0] = 0;
+    let thread = ThreadState::runnable(root, message, Resume::Entry(entry));
     *scheduler
-        .registry
+        .threads
         .get_mut(id - 1)
-        .unwrap_or_else(|| runtime::invariant_failed()) = physical;
+        .unwrap_or_else(|| runtime::invariant_failed()) = Some(thread);
     unsafe { scheduler.set_deadline(id - 1, 0) };
     scheduler.count = id;
     scheduler.enqueue(id);
@@ -44,7 +46,7 @@ pub fn spawn(
 pub fn wait(
     window: &mut WindowAccess,
     module: &ModuleTables,
-    scheduler: &Scheduler,
+    scheduler: &mut Scheduler,
     pointer: usize,
     deadline: usize,
 ) -> Result<Option<Event>, WaitError> {
@@ -56,7 +58,7 @@ pub fn wait(
         return Err(WaitError::InvalidWaiter);
     }
     let mut slot = unsafe { table.read(window, index) };
-    if slot.thread != 0 {
+    if slot.thread_id != 0 {
         return Err(WaitError::Busy);
     }
     if slot.pending {
@@ -72,11 +74,8 @@ pub fn wait(
         .ok_or(WaitError::InvalidWaiter)?
         .0;
     let running = scheduler.running;
-    let physical = scheduler.physical(running);
-    let (hart, mut thread) = {
-        let thread_ref = window.thread(physical);
-        (thread_ref.hart_id(), thread_ref.state)
-    };
+    let hart = window.hart().hart_id;
+    let thread = scheduler.thread_state_mut(running);
     // No old timer references remain: deadlines are embedded in active waits.
     thread.sequence = thread.sequence.wrapping_add(1);
     thread.root = root;
@@ -88,16 +87,14 @@ pub fn wait(
         slot: index,
         sequence: thread.sequence,
     });
-    slot.thread = physical;
+    slot.thread_id = running;
     slot.sequence = thread.sequence;
     unsafe { table.write(window, index, slot) };
-    window.thread_mut(physical).state = thread;
     unsafe { scheduler.set_deadline(running - 1, deadline) };
     if module.loader_authority && index == hart {
         if hart < scheduler.interrupt_targets.len() {
             scheduler.interrupt_targets[hart] = Some(runtime::InterruptTarget {
-                index: running - 1,
-                physical,
+                thread_id: running,
                 table,
                 slot: index,
             });
@@ -110,7 +107,7 @@ pub fn wait(
 
 pub fn notify(
     window: &mut WindowAccess,
-    scheduler: &Scheduler,
+    scheduler: &mut Scheduler,
     table: WaitTable,
     pointer: usize,
 ) -> Result<(), WaitError> {
@@ -121,40 +118,24 @@ pub fn notify(
         return Ok(());
     }
     let mut slot = unsafe { table.read(window, index) };
-    if slot.thread == 0 {
+    if slot.thread_id == 0 {
         slot.pending = true;
         unsafe { table.write(window, index, slot) };
     } else {
-        // Resolve only a live, protected registry entry before touching backing.
-        let Some(thread_index) = scheduler
-            .registry
-            .iter()
-            .take(scheduler.count)
-            .position(|&p| p == slot.thread)
-        else {
-            return Err(WaitError::InvalidWaiter);
-        };
         let module = window
             .resolve(root, vmem::MODULE)
             .ok_or(WaitError::InvalidWaiter)?
             .0;
-        let thread = window.thread(slot.thread).state;
+        let Some(&thread) = scheduler.get_thread(slot.thread_id) else {
+            return Err(WaitError::InvalidWaiter);
+        };
         if let Some(wait) = thread.wait
             && wait.module == module
             && wait.slot == index
             && wait.sequence == slot.sequence
         {
             let event = Event::Notified { arg: 0 };
-            scheduler.complete(
-                window,
-                thread_index,
-                slot.thread,
-                thread,
-                wait,
-                slot,
-                event,
-                false,
-            );
+            scheduler.complete(window, slot.thread_id, thread, wait, slot, event, false);
         }
     }
     if scheduler.active {
@@ -163,23 +144,21 @@ pub fn notify(
     Ok(())
 }
 
-pub fn exit(window: &mut WindowAccess, thread: &mut Thread, scheduler: &Scheduler) {
+pub fn exit(window: &mut WindowAccess, scheduler: &mut Scheduler, hart_id: usize) {
     let mut scheduler = scheduler.lock();
     let running = scheduler.running;
-    let physical = scheduler.physical(running);
     unsafe { scheduler.set_deadline(running - 1, 0) };
-    let hart = thread.hart_id();
-    let thread = &mut thread.state;
-    if let Some(target) = scheduler.interrupt_targets.get_mut(hart)
-        && target.as_ref().is_some_and(|t| t.physical == physical)
+    if let Some(target) = scheduler.interrupt_targets.get_mut(hart_id)
+        && target.as_ref().is_some_and(|t| t.thread_id == running)
     {
         *target = None;
         cpu::csrrc!("sie", 1 << 9);
     }
+    let thread = scheduler.thread_state_mut(running);
     if let Some(wait) = thread.wait {
         let mut slot = unsafe { wait.table.read(window, wait.slot) };
-        if slot.thread == physical && slot.sequence == wait.sequence {
-            slot.thread = 0;
+        if slot.thread_id == running && slot.sequence == wait.sequence {
+            slot.thread_id = 0;
             slot.sequence = 0;
             unsafe { wait.table.write(window, wait.slot, slot) };
         }

@@ -30,7 +30,7 @@ pub struct WaitTable {
 #[repr(C, align(32))]
 pub struct WaitRecord {
     pub pending: bool,
-    pub thread: usize,
+    pub thread_id: usize,
     pub sequence: usize,
 }
 
