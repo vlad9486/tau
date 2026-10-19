@@ -13,7 +13,8 @@ use core::{
 use tau::Event;
 
 use super::{
-    thread::{ActiveWait, Phase, Resume},
+    thread::{ActiveWait, Phase, Resume, Thread, ThreadState},
+    waiting::WaitRecord,
     Context, cpu, sbi,
     vmem::{self, Mapping, Root, Window, WindowAccess},
 };
@@ -30,6 +31,7 @@ pub struct Scheduler {
 
 #[derive(Clone, Copy)]
 pub struct InterruptTarget {
+    pub index: usize,
     pub physical: usize,
     pub table: super::waiting::WaitTable,
     pub slot: usize,
@@ -173,30 +175,14 @@ impl State {
     pub(super) fn complete(
         &mut self,
         window: &mut WindowAccess,
+        index: usize,
         physical: usize,
+        mut thread: ThreadState,
         wait: ActiveWait,
+        mut slot: WaitRecord,
         event: Event,
         high_priority: bool,
     ) {
-        let Some(index) = self
-            .registry
-            .iter()
-            .take(self.count)
-            .position(|&p| p == physical)
-        else {
-            return;
-        };
-        let mut thread = window.thread(physical).state;
-        let Some(current) = thread.wait else {
-            return;
-        };
-        if !current.matches(wait) {
-            return;
-        }
-        let mut slot = unsafe { wait.table.read(window, wait.slot) };
-        if slot.thread != physical || slot.sequence != wait.sequence {
-            return;
-        }
         slot.thread = 0;
         slot.sequence = 0;
         unsafe { wait.table.write(window, wait.slot, slot) };
@@ -212,17 +198,62 @@ impl State {
         }
     }
 
+    fn complete_wait(
+        &mut self,
+        window: &mut WindowAccess,
+        index: usize,
+        physical: usize,
+        event: Event,
+        high_priority: bool,
+    ) -> bool {
+        let thread = window.thread(physical).state;
+        let Some(wait) = thread.wait else {
+            return false;
+        };
+        let slot = unsafe { wait.table.read(window, wait.slot) };
+        if slot.thread == physical && slot.sequence == wait.sequence {
+            self.complete(
+                window,
+                index,
+                physical,
+                thread,
+                wait,
+                slot,
+                event,
+                high_priority,
+            );
+        }
+        true
+    }
+
     fn expire(&mut self, window: &mut WindowAccess) {
         let time = now();
         for index in 0..self.count {
             let deadline = unsafe { self.deadline(index) };
             if deadline != 0 && deadline <= time {
                 let physical = self.physical(index + 1);
-                if let Some(wait) = window.thread(physical).state.wait {
-                    self.complete(window, physical, wait, Event::Timeout, false);
-                }
+                self.complete_wait(window, index, physical, Event::Timeout, false);
             }
         }
+    }
+
+    fn pop_running(&mut self, window: &mut WindowAccess) -> Option<Dispatch> {
+        let id = self.pop()?;
+        let physical = self.physical(id);
+        let thread = &mut window.thread_mut(physical).state;
+        if thread.phase != Phase::Runnable {
+            invariant_failed();
+        }
+        thread.phase = Phase::Running;
+        let dispatch = Dispatch {
+            root: thread.root,
+            kind: thread.resume,
+            message: thread.message,
+        };
+        self.running = id;
+        self.quantum = now().saturating_add(QUANTUM);
+        self.program();
+        Some(dispatch)
     }
 
     pub(super) unsafe fn deadline(&self, id: usize) -> usize {
@@ -245,8 +276,9 @@ impl Scheduler {
         this: *mut Self,
         window: &mut WindowAccess,
         context: &Context,
-        hart: usize,
+        thread: &mut Thread,
     ) -> Result<(), tau::AllocError> {
+        let hart = thread.hart_id();
         window
             .map(
                 Window::current_root(),
@@ -279,7 +311,7 @@ impl Scheduler {
             ptr::addr_of_mut!((*state).interrupt_targets).write([None; 8]);
             ptr::addr_of_mut!((*state).deadlines).write([0; CAPACITY]);
         }
-        window.thread_mut(physical).state.phase = Phase::Running;
+        thread.state.phase = Phase::Running;
         Ok(())
     }
 
@@ -299,10 +331,8 @@ pub fn notify_hardware_interrupt(window: &mut WindowAccess, scheduler: &Schedule
     let Some(target) = scheduler.interrupt_targets.get(hart_id).copied().flatten() else {
         return;
     };
-    if let Some(wait) = window.thread(target.physical).state.wait {
-        let event = Event::Notified { arg: 0 };
-        scheduler.complete(window, target.physical, wait, event, true);
-    } else {
+    let event = Event::Notified { arg: 0 };
+    if !scheduler.complete_wait(window, target.index, target.physical, event, true) {
         let mut slot = unsafe { target.table.read(window, target.slot) };
         slot.pending = true;
         unsafe { target.table.write(window, target.slot, slot) };
@@ -312,22 +342,30 @@ pub fn notify_hardware_interrupt(window: &mut WindowAccess, scheduler: &Schedule
     }
 }
 
-pub fn preempt(window: &mut WindowAccess, scheduler: &Scheduler) -> Dispatch {
-    let hart = {
-        let mut scheduler = scheduler.lock();
-        let physical = scheduler.physical(scheduler.running);
-        let thread = &mut window.thread_mut(physical);
-        thread.state.root = Window::current_root();
-        thread.state.resume = Resume::Interrupt;
-        thread.state.phase = Phase::Runnable;
-        let hart_id = thread.hart_id();
-        scheduler.expire(window);
-        let id = scheduler.running;
-        scheduler.enqueue(id);
-        scheduler.running = 0;
-        hart_id
-    };
-    dispatch(window, scheduler, hart)
+pub fn preempt(window: &mut WindowAccess, thread: &mut Thread, scheduler: &Scheduler) -> Dispatch {
+    let mut scheduler = scheduler.lock();
+    scheduler.expire(window);
+    let id = scheduler.running;
+    let thread = &mut thread.state;
+    thread.root = Window::current_root();
+    thread.resume = Resume::Interrupt;
+    if scheduler.length == 0 {
+        thread.phase = Phase::Running;
+        let dispatch = Dispatch {
+            root: thread.root,
+            kind: thread.resume,
+            message: thread.message,
+        };
+        scheduler.quantum = now().saturating_add(QUANTUM);
+        scheduler.program();
+        return dispatch;
+    }
+    thread.phase = Phase::Runnable;
+    scheduler.enqueue(id);
+    scheduler.running = 0;
+    scheduler
+        .pop_running(window)
+        .unwrap_or_else(|| invariant_failed())
 }
 
 /// Interrupts remain disabled between committing departure and installing the
@@ -356,21 +394,7 @@ pub fn dispatch(window: &mut WindowAccess, scheduler: &Scheduler, hart_id: usize
                 }
                 scheduler.running = 0;
             }
-            if let Some(id) = scheduler.pop() {
-                let physical = scheduler.physical(id);
-                let thread = &mut window.thread_mut(physical).state;
-                if thread.phase != Phase::Runnable {
-                    invariant_failed();
-                }
-                thread.phase = Phase::Running;
-                let dispatch = Dispatch {
-                    root: thread.root,
-                    kind: thread.resume,
-                    message: thread.message,
-                };
-                scheduler.running = id;
-                scheduler.quantum = now().saturating_add(QUANTUM);
-                scheduler.program();
+            if let Some(dispatch) = scheduler.pop_running(window) {
                 return dispatch;
             }
             scheduler.program();

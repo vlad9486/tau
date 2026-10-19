@@ -96,6 +96,7 @@ pub fn wait(
     if module.loader_authority && index == hart {
         if hart < scheduler.interrupt_targets.len() {
             scheduler.interrupt_targets[hart] = Some(runtime::InterruptTarget {
+                index: running - 1,
                 physical,
                 table,
                 slot: index,
@@ -125,24 +126,35 @@ pub fn notify(
         unsafe { table.write(window, index, slot) };
     } else {
         // Resolve only a live, protected registry entry before touching backing.
-        if !scheduler
+        let Some(thread_index) = scheduler
             .registry
             .iter()
             .take(scheduler.count)
-            .any(|&p| p == slot.thread)
-        {
+            .position(|&p| p == slot.thread)
+        else {
             return Err(WaitError::InvalidWaiter);
-        }
+        };
         let module = window
             .resolve(root, vmem::MODULE)
             .ok_or(WaitError::InvalidWaiter)?
             .0;
-        if let Some(wait) = window.thread(slot.thread).state.wait
+        let thread = window.thread(slot.thread).state;
+        if let Some(wait) = thread.wait
             && wait.module == module
             && wait.slot == index
             && wait.sequence == slot.sequence
         {
-            scheduler.complete(window, slot.thread, wait, Event::Notified { arg: 0 }, false);
+            let event = Event::Notified { arg: 0 };
+            scheduler.complete(
+                window,
+                thread_index,
+                slot.thread,
+                thread,
+                wait,
+                slot,
+                event,
+                false,
+            );
         }
     }
     if scheduler.active {
@@ -151,15 +163,13 @@ pub fn notify(
     Ok(())
 }
 
-pub fn exit(window: &mut WindowAccess, scheduler: &Scheduler) {
+pub fn exit(window: &mut WindowAccess, thread: &mut Thread, scheduler: &Scheduler) {
     let mut scheduler = scheduler.lock();
     let running = scheduler.running;
     let physical = scheduler.physical(running);
     unsafe { scheduler.set_deadline(running - 1, 0) };
-    let (hart, mut thread) = {
-        let thread_ref = window.thread(physical);
-        (thread_ref.hart_id(), thread_ref.state)
-    };
+    let hart = thread.hart_id();
+    let thread = &mut thread.state;
     if let Some(target) = scheduler.interrupt_targets.get_mut(hart)
         && target.as_ref().is_some_and(|t| t.physical == physical)
     {
@@ -177,7 +187,6 @@ pub fn exit(window: &mut WindowAccess, scheduler: &Scheduler) {
     thread.phase = Phase::Exited;
     thread.wait = None;
     thread.sequence = thread.sequence.wrapping_add(1);
-    window.thread_mut(physical).state = thread;
     scheduler.running = 0;
     scheduler.enable();
 }

@@ -12,7 +12,7 @@
     warn(implicit_provenance_casts)
 )]
 
-use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem, sync::atomic::Ordering};
+use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem, ptr, sync::atomic::Ordering};
 
 use supervisor::{
     module, sbi, state, vmem, mmu, cpu, loading,
@@ -109,7 +109,7 @@ extern "C" fn init(hart_id: usize, info: usize, info_pages: usize) -> ! {
         let thread = Thread::new(hart_id, root, [0; 6], ReturnKind::Syscall);
         unsafe {
             thread_ptr.write(thread);
-            &*thread_ptr
+            &mut *thread_ptr
         }
     };
 
@@ -304,12 +304,12 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
     let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
     let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
     if cause == INTERRUPT_BIT | SUPERVISOR_TIMER && scheduler.active() {
-        let selected = scheduler::preempt(&mut window, scheduler);
+        let selected = scheduler::preempt(&mut window, local.thread, scheduler);
         resume_scheduled(&window, local, selected)
     } else if cause == INTERRUPT_BIT | SUPERVISOR_EXTERNAL && scheduler.active() {
         cpu::csrrc!("sie", 1 << 9);
         scheduler::notify_hardware_interrupt(&mut window, scheduler, local.thread.hart_id());
-        let selected = scheduler::preempt(&mut window, scheduler);
+        let selected = scheduler::preempt(&mut window, local.thread, scheduler);
         resume_scheduled(&window, local, selected)
     } else if cause & INTERRUPT_BIT == 0 {
         if !local.module.pure {
@@ -364,7 +364,7 @@ fn respond_exit() -> ! {
     let local = unsafe { local_access() };
     let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
     let hart = local.thread.hart_id();
-    scheduler::exit(&mut window, scheduler);
+    scheduler::exit(&mut window, local.thread, scheduler);
     let selected = scheduler::dispatch(&mut window, scheduler, hart);
     resume_scheduled(&window, local, selected)
 }
@@ -414,7 +414,7 @@ fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize,
     let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
     let local = unsafe { local_access() };
     let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
-    if let Err(error) = loading::invoke(
+    let (root, entry) = match loading::invoke(
         &mut window,
         context,
         local.thread,
@@ -422,10 +422,27 @@ fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize,
         local.module,
         slot,
     ) {
-        restore_syscall(error as usize, 0, 0, 0, 0, 0);
+        Ok(target) => target,
+        Err(error) => restore_syscall(error as usize, 0, 0, 0, 0, 0),
+    };
+    let caller = local.module_context.root;
+    let flush = mmu::switch_flush(&window, caller, root);
+    let local = unsafe { mmu::switch(local, root, flush) };
+    unsafe {
+        module::ModuleContext::init_zeroed(
+            ptr::from_mut(local.module_context),
+            root,
+            entry,
+            0,
+            local.module.stem_index,
+        );
     }
-    invoke(slot, arg, a1, a2, a3, a4, a5);
-    unsafe { hint::unreachable_unchecked() }
+    if local.module.poisoned.load(Ordering::Acquire) {
+        hint::cold_path();
+        invoke_poisoned(caller);
+    }
+    local.module_context.enter(caller);
+    enter_invocation(arg as usize, a1, a2, a3, a4, a5)
 }
 
 #[cold]
@@ -496,7 +513,7 @@ fn scheduled_syscall(
         }
         Ok(tau::Call::Exit) => {
             let hart = local.thread.hart_id();
-            scheduler::exit(window, scheduler);
+            scheduler::exit(window, local.thread, scheduler);
             let selected = scheduler::dispatch(window, scheduler, hart);
             resume_scheduled(window, local, selected)
         }
@@ -510,7 +527,7 @@ fn scheduled_syscall(
 
 fn resume_scheduled(window: &vmem::WindowAccess, local: mmu::Local<'_>, selected: Dispatch) -> ! {
     let source = vmem::Window::current_root();
-    let _local = if source != selected.root {
+    let local = if source != selected.root {
         let flush = mmu::switch_flush(window, source, selected.root);
         unsafe { mmu::switch(local, selected.root, flush) }
     } else {
@@ -521,7 +538,16 @@ fn resume_scheduled(window: &vmem::WindowAccess, local: mmu::Local<'_>, selected
     cpu::csrrs!("sstatus", 1 << 5);
     match selected.kind {
         ReturnKind::Interrupt => resume_after_interrupt(),
-        ReturnKind::Entry => {
+        ReturnKind::Entry(entry) => {
+            unsafe {
+                module::ModuleContext::init_zeroed(
+                    ptr::from_mut(local.module_context),
+                    selected.root,
+                    entry,
+                    entry,
+                    local.module.stem_index,
+                );
+            }
             let [a0, a1, a2, a3, a4, a5] = selected.message;
             enter_invocation(a0, a1, a2, a3, a4, a5)
         }

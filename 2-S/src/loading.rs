@@ -175,13 +175,13 @@ pub fn invoke(
     module: &mut ModuleContext,
     tables: &ModuleTables,
     slot: u16,
-) -> Result<Root, ModuleError> {
+) -> Result<(Root, usize), ModuleError> {
     let descriptor = tables
         .get_dependency(slot)
         .ok_or(ModuleError::InvalidDependency)?;
-    let root = construct(window, context, thread, module.root, descriptor)?;
+    let (root, entry) = construct(window, context, thread, module.root, descriptor)?;
     module.retain_dependency(slot, root);
-    Ok(root)
+    Ok((root, entry))
 }
 
 // Keep the hart-ID read and allocation code off the warm invocation path.
@@ -194,18 +194,19 @@ fn construct(
     thread: &Thread,
     caller: Root,
     descriptor: usize,
-) -> Result<Root, ModuleError> {
+) -> Result<(Root, usize), ModuleError> {
     let hart = thread.hart_id();
     let dep = window.read_descriptor(descriptor);
+    if (dep.entry >> 30) & 511 != dep.root_index
+        || !window
+            .resolve_stem(dep.stem, dep.entry)
+            .is_some_and(|(_, flags)| flags & 26 == 26)
+    {
+        return Err(ModuleError::InvalidImage);
+    }
     let root = window.create(0, || context.page(hart)).map_err(memory)?;
     let result = (|| {
         window.attach(root, dep.root_index, dep.stem);
-        if !window
-            .resolve(root, dep.entry)
-            .is_some_and(|(_, flags)| flags & 26 == 26)
-        {
-            return Err(ModuleError::InvalidImage);
-        }
         window
             .supervisor_mappings(caller, root, || context.page(hart))
             .map_err(memory)?;
@@ -213,6 +214,12 @@ fn construct(
             .resolve(caller, vmem::THREAD)
             .ok_or(ModuleError::InvalidImage)?;
         for mapping in [
+            Mapping {
+                addr_virtual: (dep.stack_pages * PAGE).wrapping_neg(),
+                virtual_pages: dep.stack_pages,
+                flags: *b"rw-u-",
+                ..Mapping::default()
+            },
             Mapping {
                 addr_virtual: vmem::THREAD,
                 virtual_pages: 1,
@@ -233,12 +240,6 @@ fn construct(
                 physical_pages: TABLE_PAGES,
                 flags: *b"rw---",
             },
-            Mapping {
-                addr_virtual: (dep.stack_pages * PAGE).wrapping_neg(),
-                virtual_pages: dep.stack_pages,
-                flags: *b"rw-u-",
-                ..Mapping::default()
-            },
         ] {
             window
                 .map(root, mapping, || context.page(hart))
@@ -246,14 +247,7 @@ fn construct(
         }
         let tag = mmu::allocate_tag(window).ok_or(ModuleError::OutOfMemory)?;
         let root = Root::sv39(root.page(), tag);
-        let private = window
-            .map_module_context(root)
-            .ok_or(ModuleError::InvalidImage)?;
-        unsafe {
-            ModuleContext::init_at(ptr::from_mut(private), root, dep.entry, dep.root_index);
-            // All registers start at zero, including sp (top of high stack).
-        }
-        Ok(root)
+        Ok((root, dep.entry))
     })();
     if result.is_err() {
         let _ = window.destroy(root, |page| context.free(hart, page));
@@ -276,11 +270,15 @@ pub fn spawn(
     let caller = Window::current_root();
     let hart = thread.hart_id();
     let index = module.stem_index;
-    if entry & 1 != 0
-        || (entry >> 30) & 511 != index
-        || !window
-            .resolve(caller, entry)
-            .is_some_and(|(_, flags)| flags & 26 == 26)
+    if entry & 1 != 0 || (entry >> 30) & 511 != index {
+        return Err(SpawnError::InvalidEntry);
+    }
+    let stem = window
+        .root_branch(caller, index)
+        .ok_or(SpawnError::InvalidEntry)?;
+    if !window
+        .resolve_stem(stem, entry)
+        .is_some_and(|(_, flags)| flags & 26 == 26)
     {
         return Err(SpawnError::InvalidEntry);
     }
@@ -288,9 +286,6 @@ pub fn spawn(
     let root = window.create(0, || context.page(hart)).map_err(memory)?;
     let mut thread_page = 0;
     let result = (|| {
-        let stem = window
-            .root_branch(caller, index)
-            .ok_or(SpawnError::InvalidEntry)?;
         window.attach(root, index, stem);
         window
             .supervisor_mappings(caller, root, || context.page(hart))
@@ -301,6 +296,12 @@ pub fn spawn(
             .ok_or(SpawnError::InvalidEntry)?
             .0;
         for mapping in [
+            Mapping {
+                addr_virtual: (module.stack_pages * PAGE).wrapping_neg(),
+                virtual_pages: module.stack_pages,
+                flags: *b"rw-u-",
+                ..Mapping::default()
+            },
             Mapping {
                 addr_virtual: vmem::THREAD,
                 virtual_pages: 1,
@@ -321,12 +322,6 @@ pub fn spawn(
                 physical_pages: TABLE_PAGES,
                 flags: *b"rw---",
             },
-            Mapping {
-                addr_virtual: (module.stack_pages * PAGE).wrapping_neg(),
-                virtual_pages: module.stack_pages,
-                flags: *b"rw-u-",
-                ..Mapping::default()
-            },
         ] {
             window
                 .map(root, mapping, || context.page(hart))
@@ -334,15 +329,8 @@ pub fn spawn(
         }
         let tag = mmu::allocate_tag(window).ok_or(SpawnError::OutOfMemory)?;
         let root = Root::sv39(root.page(), tag);
-        let private = window
-            .map_module_context(root)
-            .ok_or(SpawnError::OutOfMemory)?;
-        unsafe {
-            ModuleContext::init_at(ptr::from_mut(private), root, entry, index);
-            ptr::addr_of_mut!(private.sepc).write(entry);
-        }
         message[0] = 0;
-        let thread = Thread::new(hart, root, message, ReturnKind::Entry);
+        let thread = Thread::new(hart, root, message, ReturnKind::Entry(entry));
         window.write_thread(thread_page, thread);
         Ok(thread_page)
     })();

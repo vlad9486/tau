@@ -15,7 +15,7 @@ pub(super) enum Phase {
 
 #[derive(Clone, Copy)]
 pub enum Resume {
-    Entry,
+    Entry(usize),
     Syscall,
     Interrupt,
 }
@@ -26,12 +26,6 @@ pub(super) struct ActiveWait {
     pub table: WaitTable,
     pub slot: usize,
     pub sequence: usize,
-}
-
-impl ActiveWait {
-    pub fn matches(self, other: Self) -> bool {
-        self.module == other.module && self.slot == other.slot && self.sequence == other.sequence
-    }
 }
 
 #[derive(Clone, Copy)]

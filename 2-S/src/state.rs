@@ -81,7 +81,7 @@ pub enum InitError {
 /// be initialized only once for this module.
 pub unsafe fn init(
     window: &mut WindowAccess,
-    thread: &Thread,
+    thread: &mut Thread,
     module: *mut ModuleContext,
     tables: *mut ModuleTables,
     scheduler: *mut Scheduler,
@@ -101,8 +101,6 @@ pub unsafe fn init(
         .map(root, mapping, || context.page(thread.hart_id()))
         .map_err(|_| tau::AllocError::OutOfMemory)
         .map_err(InitError::Alloc)?;
-    // The mapping is fresh; initialize the complete context value before access.
-    unsafe { ModuleContext::init_at(module, root, 0, usize::MAX) };
 
     // Bootstrap constructs the initial module tables once. Future context
     // creation must reuse their backing pages, not allocate/reset these tables.
@@ -140,9 +138,8 @@ pub unsafe fn init(
         ptr::addr_of_mut!((*tables).wait_table).write(wait_table);
         ptr::addr_of_mut!((*tables).stem_index).write(stem);
         ptr::addr_of_mut!((*tables).stack_pages).write(stack_pages);
-        ModuleContext::init_at(module, satp, sepc, stem);
-        Scheduler::initialize(scheduler, window, context, thread.hart_id())
-            .map_err(InitError::Alloc)?;
+        ModuleContext::init_zeroed(module, satp, sepc, 0, stem);
+        Scheduler::initialize(scheduler, window, context, thread).map_err(InitError::Alloc)?;
     }
     Ok((satp, sepc))
 }
@@ -364,14 +361,6 @@ fn map_pages(
     if (virtual_addr >> 30) & 511 != dep.root_index || (last >> 30) & 511 != dep.root_index {
         return Err(tau::AllocError::InvalidAddress);
     }
-    for i in 0..number_of_pages {
-        if window
-            .resolve_stem(dep.stem, virtual_addr + i * 4096)
-            .is_some()
-        {
-            return Err(tau::AllocError::AlreadyAllocated);
-        }
-    }
     let mapping = Mapping {
         addr_virtual: virtual_addr,
         virtual_pages: number_of_pages,
@@ -380,10 +369,15 @@ fn map_pages(
         flags,
     };
     if let Err(error) = window.map_stem(dep.stem, mapping, || context.page(thread.hart_id())) {
-        for i in 0..number_of_pages {
-            let _ = window.unmap_stem(dep.stem, None, virtual_addr + i * 4096, |page| {
-                context.free(thread.hart_id(), page)
-            });
+        if !matches!(
+            error,
+            llfree::Error::Address | llfree::Error::InvalidArgument
+        ) {
+            for i in 0..number_of_pages {
+                let _ = window.unmap_stem(dep.stem, None, virtual_addr + i * 4096, |page| {
+                    context.free(thread.hart_id(), page)
+                });
+            }
         }
         return Err(match error {
             llfree::Error::Address => tau::AllocError::InvalidAddress,
@@ -424,15 +418,8 @@ fn unmap_pages(
             });
         }
         let root = Window::current_root();
-        if !tables.loader_authority {
-            for i in 0..number_of_pages {
-                if window
-                    .resolve(root, virtual_addr + i * 4096)
-                    .is_some_and(|(_, pte)| pte & vmem::OWNED == 0)
-                {
-                    return Err(tau::FreeError::AccessDenied);
-                }
-            }
+        if !tables.loader_authority && !window.range_owned(root, virtual_addr, number_of_pages) {
+            return Err(tau::FreeError::AccessDenied);
         }
         for i in 0..number_of_pages {
             let _ = window.unmap(root, virtual_addr + i * 4096, |page| {
@@ -476,15 +463,6 @@ pub fn alloc_pages(
     {
         return Err(tau::AllocError::InvalidAddress);
     }
-    // Check the whole range first so a duplicate mapping cannot partially replace it.
-    for i in 0..number_of_pages {
-        if window
-            .resolve(Window::current_root(), virtual_addr + i * 4096)
-            .is_some()
-        {
-            return Err(tau::AllocError::AlreadyAllocated);
-        }
-    }
     let mapping = Mapping {
         addr_virtual: virtual_addr,
         virtual_pages: number_of_pages,
@@ -497,10 +475,15 @@ pub fn alloc_pages(
     if let Err(error) = window.map(root, mapping, || context.page(thread.hart_id())) {
         // Roll back pages allocated by this failed request; source physical
         // mappings are borrowed and are never returned to the allocator.
-        for i in 0..number_of_pages {
-            let _ = window.unmap(root, virtual_addr + i * 4096, |page| {
-                context.free(thread.hart_id(), page)
-            });
+        if !matches!(
+            error,
+            llfree::Error::Address | llfree::Error::InvalidArgument
+        ) {
+            for i in 0..number_of_pages {
+                let _ = window.unmap(root, virtual_addr + i * 4096, |page| {
+                    context.free(thread.hart_id(), page)
+                });
+            }
         }
         return Err(match error {
             llfree::Error::Address => tau::AllocError::InvalidAddress,

@@ -63,6 +63,30 @@ impl ModuleContext {
         }
     }
 
+    /// Initialize a context whose backing pages have already been zeroed.
+    ///
+    /// # Safety
+    /// The first page at `this` must be writable, aligned, and zeroed, and all
+    /// remaining pages of `Self` must already be zeroed.
+    pub unsafe fn init_zeroed(
+        this: *mut Self,
+        root: vmem::Root,
+        entry: usize,
+        sepc: usize,
+        shared_index: usize,
+    ) {
+        const {
+            assert!(mem::offset_of!(Self, dependencies) <= vmem::PAGE);
+            assert!(mem::size_of::<Option<vmem::Root>>() == mem::size_of::<usize>());
+        }
+        unsafe {
+            ptr::addr_of_mut!((*this).sepc).write(sepc);
+            ptr::addr_of_mut!((*this).shared_index).write(shared_index);
+            ptr::addr_of_mut!((*this).root).write(root);
+            ptr::addr_of_mut!((*this).entry).write(entry);
+        }
+    }
+
     /// Set linkage and PC for a fresh invocation, retaining dependency roots.
     /// Saved registers remain stale until the next user trap; fresh entry must
     /// clear the hardware registers rather than restore this saved state.
