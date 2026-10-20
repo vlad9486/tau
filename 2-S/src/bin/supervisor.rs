@@ -349,6 +349,9 @@ fn respond_code(code: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize
     let local = unsafe { local_access() };
     let Some(caller) = local.module_context.take_caller() else {
         hint::cold_path();
+        unsafe {
+            arch::asm!("li sp, {stack}", stack = const { WINDOW_END });
+        }
         respond_exit();
     };
     let flush = mmu::switch_flush(&window, local.module_context.root, caller);
