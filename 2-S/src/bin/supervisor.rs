@@ -45,6 +45,7 @@ unsafe extern "C" {
     static __MODULE_CONTEXT: UnsafeCell<module::ModuleContext>;
     // Module-wide privileged tables shared across its contexts: synchronized
     // dependency stems/templates and validated wait-table metadata.
+    #[allow(improper_ctypes)]
     static __MODULE: UnsafeCell<module::ModuleTables>;
 
     // System-wide scheduler backing, initialized before the first user entry.
@@ -431,7 +432,7 @@ fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize,
             root,
             entry,
             0,
-            local.module.stem_index,
+            local.module.header.root_index,
         );
     }
     if local.module.poisoned.load(Ordering::Acquire) {
@@ -495,7 +496,7 @@ fn scheduled_syscall(
         }
         Ok(tau::Call::Notify) => {
             if let Err(error) =
-                scheduler::notify(window, scheduler, local.module.wait_table, message[1])
+                scheduler::notify(window, local.module, scheduler, message[1])
             {
                 result[0] = error as usize;
             }
@@ -533,7 +534,7 @@ fn resume_scheduled(window: &vmem::WindowAccess, local: mmu::Local<'_>, selected
                     selected.root,
                     entry,
                     entry,
-                    local.module.stem_index,
+                    local.module.header.root_index,
                 );
             }
             let [a0, a1, a2, a3, a4, a5] = selected.message;

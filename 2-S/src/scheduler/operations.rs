@@ -9,9 +9,8 @@ use tau::{Event, SpawnError, WaitError};
 use super::{
     thread::{ActiveWait, Phase, Resume, ThreadState},
     runtime, cpu, Context, Scheduler, loading,
-    vmem::{self, Window, WindowAccess},
+    vmem::{Window, WindowAccess},
     module::ModuleTables,
-    waiting::WaitTable,
 };
 
 pub fn spawn(
@@ -69,10 +68,7 @@ pub fn wait(
     if deadline != 0 && deadline <= runtime::now() {
         return Ok(Some(Event::Timeout));
     }
-    let module_addr = window
-        .resolve(root, vmem::MODULE)
-        .ok_or(WaitError::InvalidWaiter)?
-        .0;
+    let module_addr = module.header.tables;
     let running = scheduler.running;
     let hart = window.hart().hart_id;
     let thread = scheduler.thread_state_mut(running);
@@ -107,12 +103,13 @@ pub fn wait(
 
 pub fn notify(
     window: &mut WindowAccess,
+    module: &ModuleTables,
     scheduler: &mut Scheduler,
-    table: WaitTable,
     pointer: usize,
 ) -> Result<(), WaitError> {
     let mut scheduler = scheduler.lock();
     let root = Window::current_root();
+    let table = module.wait_table;
     let index = table.index(pointer)?;
     if !table.occupied(window, root, index)? {
         return Ok(());
@@ -122,15 +119,12 @@ pub fn notify(
         slot.pending = true;
         unsafe { table.write(window, index, slot) };
     } else {
-        let module = window
-            .resolve(root, vmem::MODULE)
-            .ok_or(WaitError::InvalidWaiter)?
-            .0;
+        let module_addr = module.header.tables;
         let Some(&thread) = scheduler.get_thread(slot.thread_id) else {
             return Err(WaitError::InvalidWaiter);
         };
         if let Some(wait) = thread.wait
-            && wait.module == module
+            && wait.module == module_addr
             && wait.slot == index
             && wait.sequence == slot.sequence
         {

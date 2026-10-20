@@ -135,11 +135,18 @@ pub unsafe fn init(
     )
     .map_err(|_| InitError::Manifest)?;
     // The boot ELF uses the same protected shared-stem rule as prepared ELFs.
+    let stem_phys = window.root_branch(satp, stem).unwrap_or(0);
+    let root_index = Some(stem as u16);
     unsafe {
         ptr::addr_of_mut!((*tables).wait_table).write(wait_table);
-        ptr::addr_of_mut!((*tables).stem_index).write(stem);
-        ptr::addr_of_mut!((*tables).stack_pages).write(stack_pages);
-        ModuleContext::init_zeroed(module, satp, sepc, 0, stem);
+        ptr::addr_of_mut!((*tables).header).write(super::module::PreparedModule {
+            stem: stem_phys,
+            root_index,
+            entry: sepc,
+            stack_pages,
+            tables: tables_backing,
+        });
+        ModuleContext::init_zeroed(module, satp, sepc, 0, root_index);
         Scheduler::initialize(scheduler, window, context, thread).map_err(InitError::Alloc)?;
     }
     Ok((satp, sepc))
@@ -277,9 +284,9 @@ fn valid_pages(address: usize, pages: usize) -> bool {
 }
 
 fn overlaps_stem(module: &ModuleContext, address: usize, pages: usize) -> bool {
-    if module.shared_index == usize::MAX {
+    let Some(index) = module.shared_index else {
         return false;
-    }
+    };
     let Some(last) = pages
         .checked_mul(4096)
         .and_then(|bytes| bytes.checked_sub(1))
@@ -287,9 +294,9 @@ fn overlaps_stem(module: &ModuleContext, address: usize, pages: usize) -> bool {
     else {
         return false;
     };
-    let first_index = (address >> 30) & 511;
-    let last_index = (last >> 30) & 511;
-    first_index <= module.shared_index && module.shared_index <= last_index
+    let first_index = ((address >> 30) & 511) as u16;
+    let last_index = ((last >> 30) & 511) as u16;
+    first_index <= index && index <= last_index
 }
 
 fn decode_flags(flags: usize) -> Option<[u8; 5]> {
@@ -352,8 +359,12 @@ fn map_pages(
     let descriptor =
         loading::descriptor_page(context, target).map_err(|_| tau::AllocError::InvalidAddress)?;
     let dep = window.read_descriptor(descriptor);
+    let Some(root_index) = dep.root_index else {
+        return Err(tau::AllocError::InvalidAddress);
+    };
+    let root_index = root_index as usize;
     let last = virtual_addr + number_of_pages * 4096 - 1;
-    if (virtual_addr >> 30) & 511 != dep.root_index || (last >> 30) & 511 != dep.root_index {
+    if (virtual_addr >> 30) & 511 != root_index || (last >> 30) & 511 != root_index {
         return Err(tau::AllocError::InvalidAddress);
     }
     let mapping = Mapping {
@@ -426,8 +437,12 @@ fn unmap_pages(
     let descriptor =
         loading::descriptor_page(context, target).map_err(|_| tau::FreeError::InvalidAddress)?;
     let dep = window.read_descriptor(descriptor);
+    let Some(root_index) = dep.root_index else {
+        return Err(tau::FreeError::InvalidAddress);
+    };
+    let root_index = root_index as usize;
     let last = virtual_addr + number_of_pages * 4096 - 1;
-    if (virtual_addr >> 30) & 511 != dep.root_index || (last >> 30) & 511 != dep.root_index {
+    if (virtual_addr >> 30) & 511 != root_index || (last >> 30) & 511 != root_index {
         return Err(tau::FreeError::InvalidAddress);
     }
     for i in 0..number_of_pages {

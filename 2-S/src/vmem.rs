@@ -102,7 +102,7 @@ pub struct Window {
     pte: UnsafeCell<[usize; 512]>,                                // 1 page  (slot 1: page-table walk)
     page: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 2: zeroing / segment copy)
     _reserved3: UnsafeCell<MaybeUninit<Page>>,                    // 1 page  (slot 3: reserved)
-    descriptor: UnsafeCell<MaybeUninit<Padded<PreparedModule>>>,  // 1 page  (slot 4: module descriptor)
+    descriptor: UnsafeCell<MaybeUninit<Padded<PreparedModule>>>,  // 1 page  (slot 4: foreign module tables page 0 / descriptor)
     wait: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 5: WaitRecord / wait slot)
     hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,                  // 1 page  (slot 6: permanent per-hart MMU)
     module: UnsafeCell<MaybeUninit<ModuleTables>>,                // 5 pages (slots 7..12: foreign ModuleTables)
@@ -220,16 +220,11 @@ impl WindowAccess {
         unsafe { &mut (*ptr).assume_init_mut().0 }
     }
 
+    /// Read the prepared module header from page 0 of foreign module tables.
     pub fn read_descriptor(&mut self, physical: usize) -> PreparedModule {
         self.alias(DESCRIPTOR_SLOT, physical);
         let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).descriptor) };
         unsafe { (*ptr).assume_init_ref().inner }
-    }
-
-    pub fn write_descriptor(&mut self, physical: usize, descriptor: PreparedModule) {
-        self.alias(DESCRIPTOR_SLOT, physical);
-        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).descriptor) };
-        unsafe { (*ptr).write(Padded { inner: descriptor }) };
     }
 
     pub fn wait_mut(&mut self, physical: usize) -> &mut [u8; PAGE] {

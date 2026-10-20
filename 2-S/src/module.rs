@@ -9,18 +9,6 @@ use core::{
 
 use super::{vmem, waiting::WaitTable};
 
-/// Immutable prepared module descriptor, held in an owned physical page.
-/// Shared module dependency slots contain its physical address.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct PreparedModule {
-    pub stem: usize,
-    pub root_index: usize,
-    pub entry: usize,
-    pub stack_pages: usize,
-    pub tables: usize,
-}
-
 pub const TABLE_PAGES: usize = size_of::<ModuleTables>().div_ceil(4096);
 pub const TABLE_ORDER: usize = TABLE_PAGES.next_power_of_two().ilog2() as usize;
 pub const CONTEXT_PAGES: usize = size_of::<ModuleContext>().div_ceil(vmem::PAGE);
@@ -34,7 +22,7 @@ pub struct ModuleContext {
     pub registers: [usize; 32],
     pub sepc: usize,
     caller: Option<vmem::Root>,
-    pub shared_index: usize,
+    pub shared_index: Option<u16>,
     pub root: vmem::Root,
     entry: usize,
     dependencies: [Option<vmem::Root>; 0x800],
@@ -47,7 +35,12 @@ impl ModuleContext {
     /// # Safety
     /// `this` must point to writable, aligned storage with exclusive access
     /// until initialization completes.
-    pub unsafe fn init_at(this: *mut Self, root: vmem::Root, entry: usize, shared_index: usize) {
+    pub unsafe fn init_at(
+        this: *mut Self,
+        root: vmem::Root,
+        entry: usize,
+        shared_index: Option<u16>,
+    ) {
         unsafe {
             ptr::addr_of_mut!((*this).registers).write([0; 32]);
             ptr::addr_of_mut!((*this).sepc).write(0);
@@ -73,7 +66,7 @@ impl ModuleContext {
         root: vmem::Root,
         entry: usize,
         sepc: usize,
-        shared_index: usize,
+        shared_index: Option<u16>,
     ) {
         const {
             assert!(mem::offset_of!(Self, dependencies) <= vmem::PAGE);
@@ -108,23 +101,45 @@ impl ModuleContext {
     }
 }
 
+/// Immutable prepared module descriptor, held in an owned physical page.
+/// Shared module dependency slots contain its physical address.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PreparedModule {
+    pub stem: usize,
+    pub root_index: Option<u16>,
+    pub entry: usize,
+    pub stack_pages: usize,
+    pub tables: usize,
+}
+
+impl PreparedModule {
+    pub const EMPTY: Self = Self {
+        stem: 0,
+        root_index: None,
+        entry: 0,
+        stack_pages: 0,
+        tables: 0,
+    };
+}
+
 /// Supervisor-only metadata shared by all contexts of one module.
 /// Dependency templates identify reusable shared branches, not thread contexts.
 #[repr(C, align(4096))]
 pub struct ModuleTables {
+    pub header: PreparedModule,
     pub loader_authority: bool,
     pub pure: bool,
     pub poisoned: AtomicBool,
     dependency_lock: AtomicBool,
+    pub wait_table: WaitTable,
+
     // Slot zero is the free-list head. Free entries contain the next slot;
     // occupied entries contain a tagged physical descriptor address.
     dependencies: [AtomicUsize; 0x800],
-    pub wait_table: WaitTable,
-    pub stem_index: usize,
-    pub stack_pages: usize,
 }
 
-const _: () = assert!(mem::offset_of!(ModuleTables, dependencies) == 8);
+const _: () = assert!(mem::offset_of!(ModuleTables, dependencies) == 80);
 
 impl ModuleTables {
     const END: usize = 0x800;
@@ -138,6 +153,10 @@ impl ModuleTables {
     /// until initialization completes. Existing shared tables must not be reset
     /// when preparing another context of the same module.
     pub unsafe fn init_at(this: *mut Self, loader_authority: bool, pure: bool) {
+        unsafe {
+            ptr::addr_of_mut!((*this).header).write(PreparedModule::EMPTY);
+            ptr::addr_of_mut!((*this).wait_table).write(WaitTable::EMPTY);
+        }
         unsafe { ptr::addr_of_mut!((*this).loader_authority).write(loader_authority) };
         unsafe { ptr::addr_of_mut!((*this).pure).write(pure) };
         unsafe { ptr::addr_of_mut!((*this).poisoned).write(AtomicBool::new(false)) };
@@ -145,11 +164,6 @@ impl ModuleTables {
         let dependencies = unsafe { ptr::addr_of_mut!((*this).dependencies).cast::<AtomicUsize>() };
         for index in 0..Self::END {
             unsafe { dependencies.add(index).write(AtomicUsize::new(index + 1)) };
-        }
-        unsafe {
-            ptr::addr_of_mut!((*this).wait_table).write(WaitTable::EMPTY);
-            ptr::addr_of_mut!((*this).stem_index).write(usize::MAX);
-            ptr::addr_of_mut!((*this).stack_pages).write(0);
         }
     }
 

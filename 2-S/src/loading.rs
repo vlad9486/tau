@@ -68,33 +68,19 @@ pub fn create(
             return Err(memory(e));
         }
     };
-    let descriptor = match context.page(hart) {
-        Ok(page) => page,
-        Err(e) => {
-            let _ = context.free_block(hart, module_tables, TABLE_ORDER);
-            let _ = context.free(hart, stem);
-            wait_table.release(context, hart);
-            return Err(memory(e));
-        }
-    };
     let new_tables = window.map_module_tables(module_tables);
     unsafe {
         ModuleTables::init_at(ptr::from_mut(new_tables), false, false);
         ptr::addr_of_mut!(new_tables.wait_table).write(wait_table);
-        ptr::addr_of_mut!(new_tables.stem_index).write(root_index);
-        ptr::addr_of_mut!(new_tables.stack_pages).write(stack_pages);
-    }
-    window.write_descriptor(
-        descriptor,
-        PreparedModule {
+        ptr::addr_of_mut!(new_tables.header).write(PreparedModule {
             stem,
-            root_index,
+            root_index: Some(root_index as u16),
             entry,
             stack_pages,
             tables: module_tables,
-        },
-    );
-    Ok(descriptor / PAGE)
+        });
+    }
+    Ok(module_tables / PAGE)
 }
 
 /// Handles are supplied by the trusted loader, not arbitrary module code.
@@ -115,7 +101,6 @@ pub fn descriptor_page(context: &Context, handle: usize) -> Result<usize, Module
 }
 
 fn parent_tables(
-    window: &mut WindowAccess,
     context: &Context,
     parent: usize,
 ) -> Result<Option<usize>, ModuleError> {
@@ -123,8 +108,7 @@ fn parent_tables(
         return Ok(None);
     }
     let descriptor = descriptor_page(context, parent)?;
-    let module = window.read_descriptor(descriptor);
-    Ok(Some(module.tables))
+    Ok(Some(descriptor))
 }
 
 fn insert_dependency(
@@ -160,7 +144,7 @@ pub fn bind(
         return Err(ModuleError::InvalidDependency);
     }
     let descriptor = descriptor_page(context, dependency)?;
-    let parent_tables = parent_tables(window, context, parent)?;
+    let parent_tables = parent_tables(context, parent)?;
     // Longer cycles are the loader's responsibility. Slots and descriptors
     // remain installed until shutdown; existing context caches stay valid.
     insert_dependency(window, tables, parent_tables, descriptor).ok_or(ModuleError::NoSlots)
@@ -194,7 +178,11 @@ fn construct(
 ) -> Result<(Root, usize), ModuleError> {
     let hart = window.hart().hart_id;
     let dep = window.read_descriptor(descriptor);
-    if (dep.entry >> 30) & 511 != dep.root_index
+    let Some(root_index) = dep.root_index else {
+        return Err(ModuleError::InvalidImage);
+    };
+    let root_index = root_index as usize;
+    if (dep.entry >> 30) & 511 != root_index
         || !window
             .resolve_stem(dep.stem, dep.entry)
             .is_some_and(|(_, flags)| flags & 26 == 26)
@@ -203,7 +191,7 @@ fn construct(
     }
     let root = window.create(0, || context.page(hart)).map_err(memory)?;
     let result = (|| {
-        window.attach(root, dep.root_index, dep.stem);
+        window.attach(root, root_index, dep.stem);
         window
             .supervisor_mappings(caller, root, || context.page(hart))
             .map_err(memory)?;
@@ -253,13 +241,14 @@ pub fn spawn(
     use tau::SpawnError;
     let caller = Window::current_root();
     let hart = window.hart().hart_id;
-    let index = module.stem_index;
+    let Some(index) = module.header.root_index else {
+        return Err(SpawnError::InvalidEntry);
+    };
+    let index = index as usize;
     if entry & 1 != 0 || (entry >> 30) & 511 != index {
         return Err(SpawnError::InvalidEntry);
     }
-    let stem = window
-        .root_branch(caller, index)
-        .ok_or(SpawnError::InvalidEntry)?;
+    let stem = module.header.stem;
     if !window
         .resolve_stem(stem, entry)
         .is_some_and(|(_, flags)| flags & 26 == 26)
@@ -273,14 +262,11 @@ pub fn spawn(
         window
             .supervisor_mappings(caller, root, || context.page(hart))
             .map_err(memory)?;
-        let module_tables = window
-            .resolve(caller, vmem::MODULE)
-            .ok_or(SpawnError::InvalidEntry)?
-            .0;
+        let module_tables = module.header.tables;
         for mapping in [
             Mapping {
-                addr_virtual: (module.stack_pages * PAGE).wrapping_neg(),
-                virtual_pages: module.stack_pages,
+                addr_virtual: (module.header.stack_pages * PAGE).wrapping_neg(),
+                virtual_pages: module.header.stack_pages,
                 flags: *b"rw-u-",
                 ..Mapping::default()
             },
