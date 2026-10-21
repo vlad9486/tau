@@ -22,7 +22,7 @@ pub struct ModuleContext {
     pub registers: [usize; 32],
     pub sepc: usize,
     caller: Option<vmem::Root>,
-    pub shared_index: Option<u16>,
+    shared_index: Option<u16>,
     pub root: vmem::Root,
     entry: usize,
     dependencies: [Option<vmem::Root>; 0x800],
@@ -98,6 +98,22 @@ impl ModuleContext {
 
     pub fn take_caller(&mut self) -> Option<vmem::Root> {
         self.caller.take()
+    }
+
+    pub fn overlaps_stem(&self, address: usize, pages: usize) -> bool {
+        let Some(index) = self.shared_index else {
+            return false;
+        };
+        let Some(last) = pages
+            .checked_mul(4096)
+            .and_then(|bytes| bytes.checked_sub(1))
+            .and_then(|n| address.checked_add(n))
+        else {
+            return false;
+        };
+        let first_index = ((address >> 30) & 511) as u16;
+        let last_index = ((last >> 30) & 511) as u16;
+        first_index <= index && index <= last_index
     }
 }
 

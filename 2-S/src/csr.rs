@@ -15,7 +15,7 @@ macro_rules! csrr {
         v
     }};
 }
-pub use csrr;
+pub use csrr as r;
 
 #[macro_export]
 macro_rules! csrw {
@@ -26,7 +26,7 @@ macro_rules! csrw {
         }
     }};
 }
-pub use csrw;
+pub use csrw as w;
 
 #[macro_export]
 macro_rules! csrrs {
@@ -42,19 +42,20 @@ macro_rules! csrrs {
         }
     }};
 }
-pub use csrrs;
+pub use csrrs as rs;
 
 #[macro_export]
 macro_rules! csrrc {
     ($r:expr, $v:expr) => {{
+        let v = $v;
         unsafe {
             core::arch::asm! {
                 concat!("csrrc {tmp}, ", $r, ", {mask}"),
-                mask = in(reg) $v,
+                mask = in(reg) v,
                 tmp = out(reg) _,
                 options(nomem, nostack)
             }
         }
     }};
 }
-pub use csrrc;
+pub use csrrc as rc;

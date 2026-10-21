@@ -3,14 +3,15 @@
 // See LICENSE for the full license text.
 
 use core::{
+    arch,
     cell::UnsafeCell,
+    fmt, hint,
     mem::{self, MaybeUninit},
     num::NonZeroUsize,
 };
 
 use super::{
-    asm, cpu, llfree,
-    mmu::Hart,
+    csr, llfree,
     module::{ModuleTables, PreparedModule, TABLE_PAGES},
 };
 
@@ -91,6 +92,21 @@ pub struct Padded<T> {
     pub inner: T,
 }
 
+#[repr(C)]
+pub struct Hart {
+    mask: u16,
+    flush: bool,
+    next_asid: usize,
+    pub hart_id: usize,
+}
+
+impl fmt::Display for Hart {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Hart { mask, flush, .. } = self;
+        writeln!(f, "ASID mask=0x{mask:04x} force_flush={flush}")
+    }
+}
+
 /// Linker-provided layout of the 2 MiB hart-local window. The first page maps
 /// itself, slot 6 holds MMU state, and slot 511 is the supervisor stack.
 /// Reserved bytes may be unmapped or temporarily aliased; never borrow or copy
@@ -138,7 +154,7 @@ pub struct WindowAccess {
 
 impl Window {
     pub fn current_root() -> Root {
-        Root(unsafe { NonZeroUsize::new_unchecked(cpu::csrr!("satp")) })
+        Root(unsafe { NonZeroUsize::new_unchecked(csr::r!("satp")) })
     }
 }
 
@@ -151,6 +167,54 @@ impl WindowAccess {
     /// retain the same window backing.
     pub unsafe fn new(base: *const Window) -> Self {
         Self { base }
+    }
+
+    pub fn init(&mut self, hart_id: usize) -> Root {
+        let original = Window::current_root();
+        let probe = Root::sv39(original.page(), u16::MAX);
+        unsafe {
+            arch::asm!("csrw satp, {0}", in(reg) probe.0.get(), options(nostack));
+        }
+        let mask = Window::current_root().asid();
+        unsafe {
+            arch::asm!("csrw satp, {0}", in(reg) original.0.get(), options(nostack));
+        }
+        sfence_vma(None, None);
+        *self.hart_mut() = Hart {
+            mask,
+            flush: mask == 0,
+            next_asid: 1,
+            hart_id,
+        };
+
+        original
+    }
+
+    /// Two different roots sharing ASID zero always need a fence. Check the roots
+    /// first so an untagged MMU need not translate/load the separate hart page on
+    /// every switch. Keep the hart policy for tagged switches and forced flushing.
+    #[inline(always)]
+    pub fn switch_flush(&self, source: Root, destination: Root) -> bool {
+        if (source.asid() | destination.asid()) == 0 || self.hart().flush {
+            hint::cold_path();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Allocate only after construction succeeds, so failed attempts consume no tag.
+    pub fn allocate_tag(&mut self) -> Option<u16> {
+        let hart = self.hart_mut();
+        if hart.mask == 0 {
+            Some(0)
+        } else if hart.next_asid <= hart.mask as usize {
+            let tag = hart.next_asid as u16;
+            hart.next_asid += 1;
+            Some(tag)
+        } else {
+            None
+        }
     }
 
     pub fn hart(&self) -> &Hart {
@@ -177,7 +241,7 @@ impl WindowAccess {
         let cell = unsafe { table.cast::<usize>().add(slot) };
         if unsafe { cell.read_volatile() } != pte {
             unsafe { cell.write_volatile(pte) };
-            asm::sfence_vma(Some(target), None);
+            sfence_vma(Some(target), None);
         }
     }
 
@@ -493,14 +557,7 @@ impl WindowAccess {
             );
         }
         if mapping.flags[4] != b'-' || root.page() == Window::current_root().page() {
-            asm::sfence_vma(
-                None,
-                if mapping.flags[4] == b'-' {
-                    Some(root.asid())
-                } else {
-                    None
-                },
-            );
+            sfence_vma(None, (mapping.flags[4] == b'-').then(|| root.asid()));
         }
         Ok(())
     }
@@ -583,7 +640,7 @@ impl WindowAccess {
             if entry != 0 {
                 self.write_pte(leaf, index, 0);
                 if let Some(asid) = asid {
-                    asm::sfence_vma(Some(address), Some(asid));
+                    sfence_vma(Some(address), Some(asid));
                 }
                 if entry & OWNED != 0 {
                     free(pte_page(entry))?;
@@ -592,7 +649,7 @@ impl WindowAccess {
             if self.empty_table(leaf) {
                 self.write_pte(stem, si, 0);
                 if let Some(asid) = asid {
-                    asm::sfence_vma(None, Some(asid));
+                    sfence_vma(None, Some(asid));
                 }
                 free(leaf)?;
                 return Ok(true);
@@ -627,9 +684,33 @@ impl WindowAccess {
         if self.unmap_stem_leaf(stem, Some(root.asid()), address, &free)? && self.empty_table(stem)
         {
             self.write_pte(root.page(), ri, 0);
-            asm::sfence_vma(None, Some(root.asid()));
+            sfence_vma(None, Some(root.asid()));
             free(stem)?;
         }
         Ok(())
+    }
+}
+
+#[inline(always)]
+fn sfence_vma(addr: Option<usize>, asid: Option<u16>) {
+    use core::arch;
+
+    // Keep a compiler memory barrier as well as the hardware fence: page-table
+    // stores must be visible before subsequent address translations.
+    unsafe {
+        match (addr, asid) {
+            (None, None) => {
+                arch::asm!("sfence.vma zero, zero", options(nostack))
+            }
+            (None, Some(asid)) => {
+                arch::asm!("sfence.vma zero, a1", in("a1") asid, options(nostack))
+            }
+            (Some(addr), None) => {
+                arch::asm!("sfence.vma a0, zero", in("a0") addr, options(nostack))
+            }
+            (Some(addr), Some(asid)) => {
+                arch::asm!("sfence.vma a0, a1", in("a0") addr, in("a1") asid, options(nostack))
+            }
+        }
     }
 }

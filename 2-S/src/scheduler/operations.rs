@@ -7,8 +7,9 @@
 use tau::{Event, SpawnError, WaitError};
 
 use super::{
+    csr,
     thread::{ActiveWait, Phase, Resume, ThreadState},
-    runtime, cpu, Context, Scheduler, loading,
+    runtime, Context, Scheduler, loading,
     vmem::{Window, WindowAccess},
     module::ModuleTables,
 };
@@ -95,7 +96,7 @@ pub fn wait(
                 slot: index,
             });
         }
-        cpu::csrrs!("sie", 1 << 9);
+        csr::rs!("sie", 1 << 9);
     }
     scheduler.enable();
     Ok(None)
@@ -146,7 +147,7 @@ pub fn exit(window: &mut WindowAccess, scheduler: &mut Scheduler, hart_id: usize
         && target.as_ref().is_some_and(|t| t.thread_id == running)
     {
         *target = None;
-        cpu::csrrc!("sie", 1 << 9);
+        csr::rc!("sie", 1 << 9);
     }
     let thread = scheduler.thread_state_mut(running);
     if let Some(wait) = thread.wait {

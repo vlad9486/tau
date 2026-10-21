@@ -21,10 +21,6 @@ use elf::{
 };
 
 use supervisor::{
-    layout::{
-        DTB_OFFSET, DTB_PAGES, HEAP_END, HEAP_START, MODULES, SUPERVISOR_OFFSET, SUPERVISOR_SIZE,
-        SYSTEM_OFFSET, SYSTEM_SIZE,
-    },
     llfree::{Allocator, Error, FrameId, Lower},
     sbi, state, vmem,
 };
@@ -69,6 +65,16 @@ extern "C" fn _start() -> ! {
         inner = sym inner,
     }
 }
+
+/// Static image layout generated from modules.toml.
+pub struct StaticModule {
+    pub name: [u8; 20],
+    pub offset: usize,
+    pub pages: usize,
+    pub user: bool,
+}
+
+include!(concat!(env!("OUT_DIR"), "/modules.rs"));
 
 extern "C" fn inner(
     hart_id: usize,
@@ -477,7 +483,7 @@ mod boot_dtb {
     //! Copy a firmware FDT and add /chosen/tau,modules in caller-reserved memory.
     //! No allocation, ELF parsing, or page-table operations are needed here.
 
-    use supervisor::layout::StaticModule;
+    use super::StaticModule;
 
     #[derive(Debug, PartialEq, Eq)]
     pub enum Error {

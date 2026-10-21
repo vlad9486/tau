@@ -11,9 +11,7 @@
     warn(implicit_provenance_casts)
 )]
 
-mod asm;
-
-pub mod cpu;
+pub mod csr;
 
 pub mod sbi;
 
@@ -21,17 +19,12 @@ pub mod llfree;
 
 pub mod vmem;
 
-pub mod mmu;
+pub mod scheduler;
 
 pub mod module;
 
 pub mod loading;
 
-pub mod scheduler;
-
 pub mod waiting;
 
 pub mod state;
-
-/// Static image layout generated from modules.toml.
-pub mod layout;

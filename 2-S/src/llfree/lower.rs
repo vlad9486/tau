@@ -306,7 +306,10 @@ impl<'a> Lower<'a> {
             for i in 0..TREE_HUGE / 2 {
                 let i = (child_off / 2 + i) % (TREE_HUGE / 2);
                 let table_pair = table_pair.get(i).ok_or(Error::InvalidArgument)?;
-                if let Ok(_) = table_pair.fetch_update(|v| v.map(|v| v.mark_huge())) {
+                if table_pair
+                    .fetch_update(|v| v.map(|v| v.mark_huge()))
+                    .is_ok()
+                {
                     return Ok(FrameId(tree_start.0 + 2 * i * HUGE_FRAMES));
                 }
             }
@@ -314,7 +317,7 @@ impl<'a> Lower<'a> {
             for i in 0..TREE_HUGE {
                 let i = (child_off + i) % TREE_HUGE;
                 let child = children.get(i).ok_or(Error::InvalidArgument)?;
-                if let Ok(_) = child.fetch_update(|v| v.mark_huge()) {
+                if child.fetch_update(|v| v.mark_huge()).is_ok() {
                     return Ok(FrameId(tree_start.0 + i * HUGE_FRAMES));
                 }
             }
@@ -324,7 +327,7 @@ impl<'a> Lower<'a> {
             for j in 0..TREE_HUGE {
                 let i = (child_off + j) % TREE_HUGE;
                 let child = children.get(i).ok_or(Error::InvalidArgument)?;
-                if let Ok(_) = child.fetch_update(|v| v.dec(size)) {
+                if child.fetch_update(|v| v.dec(size)).is_ok() {
                     let bf_i = HugeId(first_child.0 + i);
                     // start with the bitfield row from the last allocation
                     if let Ok(offset) = self.bitfield(bf_i)?.set_first_zeros(start, order) {
@@ -354,21 +357,26 @@ impl<'a> Lower<'a> {
             .ok_or(Error::InvalidArgument)?;
 
         if order == MAX_ORDER {
-            if let Ok(_) = self
+            if self
                 .child_pairs(frame.as_tree())?
                 .get(i / 2)
                 .ok_or(Error::InvalidArgument)?
                 .fetch_update(|v| v.map(|v| v.mark_huge()))
+                .is_ok()
             {
                 return Ok(());
             }
         } else if order == HUGE_ORDER {
-            if let Ok(_) = children.fetch_update(|v| v.mark_huge()) {
+            if children.fetch_update(|v| v.mark_huge()).is_ok() {
                 return Ok(());
             }
         } else if order <= Bitfield::ORDER {
-            if let Ok(_) = children.fetch_update(|v| v.dec(size)) {
-                if let Ok(()) = self.bitfield(frame.as_huge())?.toggle(frame, order, false) {
+            if children.fetch_update(|v| v.dec(size)).is_ok() {
+                if self
+                    .bitfield(frame.as_huge())?
+                    .toggle(frame, order, false)
+                    .is_ok()
+                {
                     return Ok(());
                 }
                 // Undo decrement

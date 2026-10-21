@@ -243,9 +243,7 @@ impl<'a> Iterator for DtbIter<'a> {
                             start_ptr,
                             end_ptr.offset_from(start_ptr) as usize,
                         );
-                        str::from_utf8(bytes)
-                            .unwrap_unchecked()
-                            .trim_end_matches('\0')
+                        str::from_utf8_unchecked(bytes).trim_end_matches('\0')
                     };
                     self.cursor.path.push(str);
                 }

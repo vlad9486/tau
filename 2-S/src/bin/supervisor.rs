@@ -12,10 +12,10 @@
     warn(implicit_provenance_casts)
 )]
 
-use core::{arch, cell::UnsafeCell, fmt::Write as _, hint, mem, ptr, sync::atomic::Ordering};
+use core::{arch, fmt, cell::UnsafeCell, fmt::Write as _, hint, mem, ptr, sync::atomic::Ordering};
 
 use supervisor::{
-    cpu, loading, mmu, module, sbi,
+    csr, loading, module, sbi,
     scheduler::{self, Dispatch, ReturnKind, Scheduler, ThreadState},
     state, vmem,
 };
@@ -59,6 +59,79 @@ unsafe extern "C" {
 
 pub const WINDOW_END: usize = 0xffff_ffc0_0020_0000;
 
+#[cold]
+fn su_try<T, E>(v: Result<T, E>) -> T
+where
+    E: fmt::Debug,
+{
+    match v {
+        Ok(v) => v,
+        Err(err) => {
+            writeln!(sbi::Console, "SU: {err:?}\r").unwrap_or_default();
+            loop {
+                hint::spin_loop();
+            }
+        }
+    }
+}
+
+mod mmu {
+    //! Stable hart-local tags for retained roots. Successful contexts and their
+    //! ASIDs live until shutdown; migration and thread teardown are still TODO.
+
+    use core::{arch, hint, ptr};
+
+    use super::{
+        module::{ModuleContext, ModuleTables},
+        vmem::Root,
+    };
+
+    /// Exclusive references to the active root's context and module pages.
+    /// Moving this token into [`switch`] statically ends all borrows derived from
+    /// these root-dependent mappings before `satp` changes.
+    pub struct Local<'a> {
+        pub module_context: &'a mut ModuleContext,
+        pub module: &'a mut ModuleTables,
+    }
+
+    /// # Safety
+    /// Both roots must share executing supervisor code, stack and hart mappings,
+    /// and `root` must map initialized module-context and module pages.
+    /// All global mappings must have identical backing and permissions on this hart.
+    /// Unique live ASIDs and ordered page-table publication are required without a fence.
+    #[inline(always)]
+    pub unsafe fn switch<'a>(local: Local<'a>, root: Root, flush: bool) -> Local<'a> {
+        let module_context = ptr::from_mut(local.module_context);
+        let module = ptr::from_mut(local.module);
+        if flush {
+            hint::cold_path();
+            // Keep the write and fence together: no compiler-generated access to
+            // context storage may slip between changing roots and invalidation.
+            // A non-x0 ASID operand preserves global translations, even for ASID 0.
+            // Flush the destination tag when policy also requests a tagged switch.
+            unsafe {
+                arch::asm!(
+                    "csrw satp, {root}",
+                    "sfence.vma zero, t0",
+                    root = in(reg) root.0.get(),
+                    in("t0") usize::from(root.asid()),
+                    options(nostack),
+                );
+            }
+        } else {
+            unsafe {
+                arch::asm!("csrw satp, {0}", in(reg) root.0.get(), options(nostack));
+            }
+        }
+        unsafe {
+            Local {
+                module_context: &mut *module_context,
+                module: &mut *module,
+            }
+        }
+    }
+}
+
 /// # Safety
 /// The current root's module-context, and module pages must be mapped
 /// and initialized, and no other references to them may exist on this hart.
@@ -94,52 +167,36 @@ extern "C" fn init(hart_id: usize, info: usize, info_pages: usize) -> ! {
     let module = UnsafeCell::raw_get(&raw const __MODULE_CONTEXT);
     let tables = UnsafeCell::raw_get(&raw const __MODULE);
     let scheduler = UnsafeCell::raw_get(&raw const __SCHEDULER);
+    let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
 
-    let hart = mmu::init(hart_id);
-    writeln!(sbi::Console, "SU: {hart}\r").unwrap_or_default();
-    *window.hart_mut() = hart;
-    let root = vmem::Window::current_root();
+    let root = window.init(hart_id);
+    writeln!(sbi::Console, "SU: {}\r", window.hart()).unwrap_or_default();
 
     let thread = ThreadState::runnable(root, [0; 6], ReturnKind::Syscall);
-    let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
-    match unsafe {
-        state::init(
-            &mut window,
-            hart_id,
-            thread,
-            module,
-            tables,
-            scheduler,
-            context,
-        )
-    } {
-        Ok((satp, sepc)) => unsafe {
-            arch::asm! {
-                "li t0, 0x100",
-                "csrrc t1, sstatus, t0", // set unprivileged mode
-                "li t0, 0x20",
-                "csrrs t1, sstatus, t0", // enable interrupts
-                "csrw satp, t2",
-                "csrw sepc, t3",
-                "la t0, {module_context}",
-                "csrw sscratch, t0",
-                "li sp, 0",
-                "sret",
-                options(noreturn),
-                module_context = sym __MODULE_CONTEXT,
-                in("a0") 0,
-                in("a1") hart_id,
-                in("a2") info,
-                in("a3") info_pages,
-                in("t2") satp.0.get(),
-                in("t3") sepc,
-            }
-        },
-        Err(err) => {
-            writeln!(sbi::Console, "{err:?}\r").unwrap_or_default();
-            loop {
-                hint::spin_loop();
-            }
+    unsafe { su_try(Scheduler::init(scheduler, &mut window, context, thread)) };
+
+    let (satp, sepc) =
+        su_try(unsafe { state::init(&mut window, hart_id, module, tables, context) });
+    unsafe {
+        arch::asm! {
+            "li t0, 0x100",
+            "csrrc t1, sstatus, t0", // set unprivileged mode
+            "li t0, 0x20",
+            "csrrs t1, sstatus, t0", // enable interrupts
+            "csrw satp, t2",
+            "csrw sepc, t3",
+            "la t0, {module_context}",
+            "csrw sscratch, t0",
+            "li sp, 0",
+            "sret",
+            options(noreturn),
+            module_context = sym __MODULE_CONTEXT,
+            in("a0") 0,
+            in("a1") hart_id,
+            in("a2") info,
+            in("a3") info_pages,
+            in("t2") satp.0.get(),
+            in("t3") sepc,
         }
     }
 }
@@ -306,7 +363,7 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
         let selected = scheduler::preempt(&mut window, scheduler);
         resume_scheduled(&window, local, selected)
     } else if cause == INTERRUPT_BIT | SUPERVISOR_EXTERNAL && scheduler.active() {
-        cpu::csrrc!("sie", 1 << 9);
+        csr::rc!("sie", 1 << 9);
         scheduler::notify_hardware_interrupt(&mut window, scheduler, hart_id);
         let selected = scheduler::preempt(&mut window, scheduler);
         resume_scheduled(&window, local, selected)
@@ -314,8 +371,8 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
         if !local.module.pure {
             local.module.poisoned.store(true, Ordering::Release);
         }
-        let sepc = cpu::csrr!("sepc");
-        let stval = cpu::csrr!("stval");
+        let sepc = csr::r!("sepc");
+        let stval = csr::r!("stval");
         let code = unsafe { u16::try_from(0x8000 | (cause & 0x7fff)).unwrap_unchecked() };
         respond_code(code, sepc, stval, 0, 0, 0);
         unsafe { hint::unreachable_unchecked() };
@@ -326,7 +383,7 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
             }
             SUPERVISOR_EXTERNAL => {
                 // Keep the level interrupt gated until userspace drains the PLIC.
-                cpu::csrrc!("sie", 1 << SUPERVISOR_EXTERNAL);
+                csr::rc!("sie", 1 << SUPERVISOR_EXTERNAL);
             }
             _ => {
                 sbi::Printer.ch(*b"SU: unexpected interrupt\r\n");
@@ -354,7 +411,7 @@ fn respond_code(code: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize
         }
         respond_exit();
     };
-    let flush = mmu::switch_flush(&window, local.module_context.root, caller);
+    let flush = window.switch_flush(local.module_context.root, caller);
     let _local = unsafe { mmu::switch(local, caller, flush) };
     restore_syscall_hot(code as _, a1, a2, a3, a4, a5)
 }
@@ -388,7 +445,7 @@ fn invoke(slot: u16, arg: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
         invoke_slow(slot, a1, a2, a3, a4, a5, arg);
     };
     let caller = local.module_context.root;
-    let flush = mmu::switch_flush(&window, caller, root);
+    let flush = window.switch_flush(caller, root);
     // The per-hart window/stack and global supervisor code retain the same
     // backing in both roots. Moving `local` ends all pre-switch borrows.
     let local = unsafe { mmu::switch(local, root, flush) };
@@ -405,7 +462,7 @@ fn invoke(slot: u16, arg: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
 fn invoke_poisoned(caller: vmem::Root) -> ! {
     let window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
     let local = unsafe { local_access() };
-    let flush = mmu::switch_flush(&window, local.module_context.root, caller);
+    let flush = window.switch_flush(local.module_context.root, caller);
     let _local = unsafe { mmu::switch(local, caller, flush) };
     restore_syscall(tau::ModuleError::Poisoned as usize, 0, 0, 0, 0, 0)
 }
@@ -427,7 +484,7 @@ fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize,
         Err(error) => restore_syscall(error as usize, 0, 0, 0, 0, 0),
     };
     let caller = local.module_context.root;
-    let flush = mmu::switch_flush(&window, caller, root);
+    let flush = window.switch_flush(caller, root);
     let local = unsafe { mmu::switch(local, root, flush) };
     unsafe {
         module::ModuleContext::init_zeroed(
@@ -498,9 +555,7 @@ fn scheduled_syscall(
             }
         }
         Ok(tau::Call::Notify) => {
-            if let Err(error) =
-                scheduler::notify(window, local.module, scheduler, message[1])
-            {
+            if let Err(error) = scheduler::notify(window, local.module, scheduler, message[1]) {
                 result[0] = error as usize;
             }
         }
@@ -520,14 +575,14 @@ fn scheduled_syscall(
 fn resume_scheduled(window: &vmem::WindowAccess, local: mmu::Local<'_>, selected: Dispatch) -> ! {
     let source = vmem::Window::current_root();
     let local = if source != selected.root {
-        let flush = mmu::switch_flush(window, source, selected.root);
+        let flush = window.switch_flush(source, selected.root);
         unsafe { mmu::switch(local, selected.root, flush) }
     } else {
         local
     };
     // The idle path and timer entry both return to U-mode with interrupts on.
-    cpu::csrrc!("sstatus", 1 << 8);
-    cpu::csrrs!("sstatus", 1 << 5);
+    csr::rc!("sstatus", 1 << 8);
+    csr::rs!("sstatus", 1 << 5);
     match selected.kind {
         ReturnKind::Interrupt => resume_after_interrupt(),
         ReturnKind::Entry(entry) => {

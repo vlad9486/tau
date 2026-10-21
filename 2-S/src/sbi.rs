@@ -4,8 +4,6 @@
 
 use core::{fmt, hint};
 
-use super::asm;
-
 #[derive(Clone, Copy)]
 pub enum SbiError {
     Unknown,
@@ -39,18 +37,18 @@ impl SbiError {
 
 #[inline(always)]
 pub fn print_byte(byte: u8) -> Result<usize, SbiError> {
-    SbiError::from_code(unsafe { asm::sbi(u32::from_be_bytes(*b"DBCN"), 2, [byte as usize]) })
+    SbiError::from_code(unsafe { sbi(u32::from_be_bytes(*b"DBCN"), 2, [byte as usize]) })
 }
 
 #[inline(always)]
 pub fn set_timer(time: usize) -> Result<usize, SbiError> {
-    SbiError::from_code(unsafe { asm::sbi(u32::from_be_bytes(*b"TIME"), 0, [time]) })
+    SbiError::from_code(unsafe { sbi(u32::from_be_bytes(*b"TIME"), 0, [time]) })
 }
 
 #[inline(always)]
 pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<usize, SbiError> {
     SbiError::from_code(unsafe {
-        asm::sbi(
+        sbi(
             u32::from_be_bytes(*b"\0HSM"),
             0,
             [hart_id, start_addr, opaque],
@@ -60,13 +58,13 @@ pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<us
 
 #[inline(always)]
 pub fn hart_stop() -> Result<usize, SbiError> {
-    SbiError::from_code(unsafe { asm::sbi(u32::from_be_bytes(*b"\0HSM"), 1, []) })
+    SbiError::from_code(unsafe { sbi(u32::from_be_bytes(*b"\0HSM"), 1, []) })
 }
 
 #[inline(always)]
 pub fn system_reset() -> ! {
     unsafe {
-        asm::sbi(u32::from_be_bytes(*b"SRST"), 0, [0, 0]);
+        sbi(u32::from_be_bytes(*b"SRST"), 0, [0, 0]);
     };
     // An SBI without SRST returns NOT_SUPPORTED. There is nowhere useful to
     // return to after Tau has requested shutdown, so remain stopped.
@@ -107,4 +105,64 @@ impl fmt::Write for Console {
 
         Ok(())
     }
+}
+
+/// # Safety
+/// it is a raw system call, must use type-safe wrapper instead
+#[inline(always)]
+unsafe fn sbi<const I: usize>(eid: u32, fid: u32, arg: [usize; I]) -> (isize, usize) {
+    use core::arch::asm;
+
+    let error: isize;
+    let value: usize;
+    match I {
+        0 => unsafe {
+            asm!(
+                "ecall",
+                in("a7") eid,
+                in("a6") fid,
+                out("a0") error,
+                out("a1") value,
+                options(nostack),
+            )
+        },
+        1 => unsafe {
+            asm!(
+                "ecall",
+                in("a7") eid,
+                in("a6") fid,
+                inout("a0") arg[0] => error,
+                out("a1") value,
+                options(nostack),
+            )
+        },
+        2 => unsafe {
+            asm!(
+                "ecall",
+                in("a7") eid,
+                in("a6") fid,
+                inout("a0") arg[0] => error,
+                inout("a1") arg[1] => value,
+                options(nostack),
+            )
+        },
+        3 => unsafe {
+            asm!(
+                "ecall",
+                in("a7") eid,
+                in("a6") fid,
+                inout("a0") arg[0] => error,
+                inout("a1") arg[1] => value,
+                in("a2") arg[2],
+                options(nostack),
+            )
+        },
+        4..=7 => {
+            error = 1;
+            value = 0;
+        }
+        _ => unsafe { core::hint::unreachable_unchecked() },
+    }
+
+    (error, value)
 }

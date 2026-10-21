@@ -13,9 +13,10 @@ use core::{
 use tau::Event;
 
 use super::{
+    sbi, csr,
     thread::{ActiveWait, Phase, Resume, ThreadState},
     waiting::WaitRecord,
-    Context, cpu, sbi,
+    Context,
     vmem::{self, Mapping, Root, Window, WindowAccess},
 };
 
@@ -73,7 +74,7 @@ impl Drop for Guard<'_> {
     fn drop(&mut self) {
         self.scheduler.lock.store(false, Ordering::Release);
         if self.interrupts & 2 != 0 {
-            cpu::csrrs!("sstatus", 2);
+            csr::rs!("sstatus", 2);
         }
     }
 }
@@ -99,7 +100,7 @@ impl Scheduler {
 }
 
 pub(super) fn now() -> usize {
-    cpu::csrr!("time")
+    csr::r!("time")
 }
 
 #[cold]
@@ -166,7 +167,7 @@ impl State {
     pub(super) fn enable(&mut self) {
         if !self.active {
             self.active = true;
-            cpu::csrrs!("sie", 1 << 5);
+            csr::rs!("sie", 1 << 5);
             self.quantum = now().saturating_add(QUANTUM);
         }
     }
@@ -273,7 +274,7 @@ impl Scheduler {
     /// # Safety
     /// Interrupts must be disabled, no other hart may be executing this runtime.
     /// No reference to the scheduler storage may exist before this initialization.
-    pub unsafe fn initialize(
+    pub unsafe fn init(
         this: *mut Self,
         window: &mut WindowAccess,
         context: &Context,
@@ -403,8 +404,8 @@ pub fn dispatch(window: &mut WindowAccess, scheduler: &mut Scheduler, hart_id: u
             scheduler.program();
         }
         unsafe { core::arch::asm!("wfi", options(nostack)) };
-        if cpu::csrr!("sip") & (1 << 9) != 0 {
-            cpu::csrrc!("sie", 1 << 9);
+        if csr::r!("sip") & (1 << 9) != 0 {
+            csr::rc!("sie", 1 << 9);
             notify_hardware_interrupt(window, scheduler, hart_id);
         }
     }

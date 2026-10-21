@@ -47,8 +47,8 @@ extern "C" fn start(hart: usize, boot_owner: usize) -> ! {
         jump(hart)
     }
     unsafe { asm!("csrw 0x7c1, zero") };
-    let mut p = &raw mut __bss_start as *mut u64;
-    let end = &raw mut __bss_end as *mut u64;
+    let mut p = &raw mut __bss_start;
+    let end = &raw mut __bss_end;
     while p < end {
         unsafe {
             p.write_volatile(0);

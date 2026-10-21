@@ -14,6 +14,7 @@ fn field(address: usize, mask: u32, shift: u32, value: u32) {
     update(address, mask, value << shift);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pll(
     pd: usize,
     dac: usize,

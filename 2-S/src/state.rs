@@ -5,10 +5,8 @@
 use core::{hint, num::NonZeroUsize, ptr};
 
 use super::{
-    llfree, loading,
-    module::{ModuleContext, ModuleTables},
-    sbi,
-    scheduler::{Scheduler, ThreadState},
+    llfree, loading, sbi,
+    module::{self, ModuleContext, ModuleTables},
     vmem::{self, Mapping, Window, WindowAccess},
     waiting::WaitTable,
 };
@@ -82,10 +80,8 @@ pub enum InitError {
 pub unsafe fn init(
     window: &mut WindowAccess,
     hart_id: usize,
-    thread: ThreadState,
     module: *mut ModuleContext,
     tables: *mut ModuleTables,
-    scheduler: *mut Scheduler,
     context: &Context,
 ) -> Result<(vmem::Root, usize), InitError> {
     let root = Window::current_root();
@@ -106,7 +102,7 @@ pub unsafe fn init(
     // Bootstrap constructs the initial module tables once. Future context
     // creation must reuse their backing pages, not allocate/reset these tables.
     let tables_backing = context
-        .block(hart_id, super::module::TABLE_ORDER)
+        .block(hart_id, module::TABLE_ORDER)
         .map_err(InitError::Allocator)?;
     let mapping = Mapping {
         addr_virtual: tables.addr(),
@@ -139,7 +135,7 @@ pub unsafe fn init(
     let root_index = Some(stem as u16);
     unsafe {
         ptr::addr_of_mut!((*tables).wait_table).write(wait_table);
-        ptr::addr_of_mut!((*tables).header).write(super::module::PreparedModule {
+        ptr::addr_of_mut!((*tables).header).write(module::PreparedModule {
             stem: stem_phys,
             root_index,
             entry: sepc,
@@ -147,7 +143,6 @@ pub unsafe fn init(
             tables: tables_backing,
         });
         ModuleContext::init_zeroed(module, satp, sepc, 0, root_index);
-        Scheduler::initialize(scheduler, window, context, thread).map_err(InitError::Alloc)?;
     }
     Ok((satp, sepc))
 }
@@ -283,22 +278,6 @@ fn valid_pages(address: usize, pages: usize) -> bool {
             .is_some_and(|bytes| vmem::user_range(address, bytes))
 }
 
-fn overlaps_stem(module: &ModuleContext, address: usize, pages: usize) -> bool {
-    let Some(index) = module.shared_index else {
-        return false;
-    };
-    let Some(last) = pages
-        .checked_mul(4096)
-        .and_then(|bytes| bytes.checked_sub(1))
-        .and_then(|n| address.checked_add(n))
-    else {
-        return false;
-    };
-    let first_index = ((address >> 30) & 511) as u16;
-    let last_index = ((last >> 30) & 511) as u16;
-    first_index <= index && index <= last_index
-}
-
 fn decode_flags(flags: usize) -> Option<[u8; 5]> {
     let r = flags & tau::PageFlags::READ.bits() != 0;
     let w = flags & tau::PageFlags::WRITE.bits() != 0;
@@ -330,7 +309,7 @@ fn map_pages(
     let flags = decode_flags(raw_flags).ok_or(tau::AllocError::AccessDenied)?;
     if (!tables.loader_authority
         && (physical_addr.is_some() || target != 0 || raw_flags & tau::PageFlags::EXEC.bits() != 0))
-        || (target == 0 && overlaps_stem(module, virtual_addr, number_of_pages))
+        || (target == 0 && module.overlaps_stem(virtual_addr, number_of_pages))
     {
         return Err(tau::AllocError::AccessDenied);
     }
@@ -416,7 +395,7 @@ fn unmap_pages(
         return Err(tau::FreeError::AlreadyFree);
     }
     if target == 0 {
-        if overlaps_stem(module, virtual_addr, number_of_pages) {
+        if module.overlaps_stem(virtual_addr, number_of_pages) {
             return Err(if tables.loader_authority {
                 tau::FreeError::AlreadyFree
             } else {

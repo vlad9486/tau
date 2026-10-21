@@ -15,7 +15,7 @@ use super::{
     },
     waiting::WaitTable,
     state::Context,
-    llfree, mmu,
+    llfree,
     vmem::{self, Mapping, Root, Window, WindowAccess, PAGE},
 };
 
@@ -100,35 +100,6 @@ pub fn descriptor_page(context: &Context, handle: usize) -> Result<usize, Module
     Ok(page)
 }
 
-fn parent_tables(
-    context: &Context,
-    parent: usize,
-) -> Result<Option<usize>, ModuleError> {
-    if parent == 0 {
-        return Ok(None);
-    }
-    let descriptor = descriptor_page(context, parent)?;
-    Ok(Some(descriptor))
-}
-
-fn insert_dependency(
-    window: &mut WindowAccess,
-    bootstrap: &ModuleTables,
-    parent_tables: Option<usize>,
-    descriptor: usize,
-) -> Option<u16> {
-    match parent_tables {
-        None => bootstrap.insert_dependency(descriptor),
-        Some(physical) => {
-            // Alias only at publication, after snapshot/construction aliases
-            // have expired. No window remapping may occur while borrowed.
-            window
-                .map_module_tables(physical)
-                .insert_dependency(descriptor)
-        }
-    }
-}
-
 pub fn bind(
     window: &mut WindowAccess,
     context: &Context,
@@ -143,11 +114,20 @@ pub fn bind(
     if parent == dependency {
         return Err(ModuleError::InvalidDependency);
     }
-    let descriptor = descriptor_page(context, dependency)?;
-    let parent_tables = parent_tables(context, parent)?;
     // Longer cycles are the loader's responsibility. Slots and descriptors
     // remain installed until shutdown; existing context caches stay valid.
-    insert_dependency(window, tables, parent_tables, descriptor).ok_or(ModuleError::NoSlots)
+    let module = if parent == 0 {
+        tables
+    } else {
+        // Alias only at publication, after snapshot/construction aliases
+        // have expired. No window remapping may occur while borrowed.
+        let physical = descriptor_page(context, parent)?;
+        &*window.map_module_tables(physical)
+    };
+    let descriptor = descriptor_page(context, dependency)?;
+    module
+        .insert_dependency(descriptor)
+        .ok_or(ModuleError::NoSlots)
 }
 
 #[inline(always)]
@@ -220,7 +200,7 @@ fn construct(
                 .map(root, mapping, || context.page(hart))
                 .map_err(memory)?;
         }
-        let tag = mmu::allocate_tag(window).ok_or(ModuleError::OutOfMemory)?;
+        let tag = window.allocate_tag().ok_or(ModuleError::OutOfMemory)?;
         let root = Root::sv39(root.page(), tag);
         Ok((root, dep.entry))
     })();
@@ -288,7 +268,7 @@ pub fn spawn(
                 .map(root, mapping, || context.page(hart))
                 .map_err(memory)?;
         }
-        let tag = mmu::allocate_tag(window).ok_or(SpawnError::OutOfMemory)?;
+        let tag = window.allocate_tag().ok_or(SpawnError::OutOfMemory)?;
         let root = Root::sv39(root.page(), tag);
         Ok(root)
     })();

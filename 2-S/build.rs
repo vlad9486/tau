@@ -26,11 +26,7 @@ impl Modules {
                 .expect("module range overflow");
             assert!(end <= 0x1e0, "modules and boot DTB must fit in 2 MiB");
             let mut name = module.name.clone();
-            name.extend(
-                iter::repeat(['\\', 'x', '0', '0'])
-                    .take(20 - module.name.len())
-                    .flatten(),
-            );
+            name.extend(iter::repeat_n(['\\', 'x', '0', '0'], 20 - module.name.len()).flatten());
             let user = !matches!(module.name.as_str(), "loader" | "supervisor");
             generated.push_str("    StaticModule {\n");
             generated.push_str(&format!("        name: *b\"{name}\",\n"));
