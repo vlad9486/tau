@@ -44,14 +44,6 @@ const _: () = {
     assert!(mem::offset_of!(WaitSlot, occupied) == 63);
 };
 
-#[repr(usize)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpawnError {
-    InvalidEntry = 1,
-    OutOfMemory = 2,
-    NoSlots = 3,
-}
-
 pub type Entry = extern "C" fn(usize, usize, usize, usize, usize, usize) -> !;
 
 #[repr(C)]
@@ -302,27 +294,4 @@ impl Call {
             }
         }
     }
-}
-
-#[repr(usize)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WaitError {
-    Unsupported = 1,
-    InvalidWaiter = 2,
-    AccessDenied = 3,
-    Busy = 4,
-    OutOfMemory = 5,
-}
-
-/// Construction/invocation status. Module authority is granted by bootstrap,
-/// never inferred from an ELF's name or inherited from the invoking thread.
-#[repr(usize)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ModuleError {
-    AccessDenied = 1,
-    InvalidImage = 2,
-    OutOfMemory = 3,
-    NoSlots = 4,
-    InvalidDependency = 5,
-    Poisoned = 0x8040,
 }

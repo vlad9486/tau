@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{hint, num::NonZeroUsize, ptr};
+use core::{num::NonZero, ptr};
 
 use super::{
-    llfree, loading, sbi,
+    llfree, loading,
     module::{self, ModuleContext, ModuleTables},
     vmem::{self, Mapping, Window, WindowAccess},
     waiting::WaitTable,
@@ -107,7 +107,7 @@ pub unsafe fn init(
     let mapping = Mapping {
         addr_virtual: tables.addr(),
         virtual_pages: size_of::<ModuleTables>().div_ceil(0x1000),
-        addr_physical: NonZeroUsize::new(tables_backing),
+        addr_physical: NonZero::new(tables_backing),
         physical_pages: size_of::<ModuleTables>().div_ceil(0x1000),
         flags: *b"rw---",
     };
@@ -147,130 +147,6 @@ pub unsafe fn init(
     Ok((satp, sepc))
 }
 
-#[inline]
-pub fn syscall(
-    window: &mut WindowAccess,
-    module: &mut ModuleContext,
-    tables: &ModuleTables,
-    context: &Context,
-    mut msg: [usize; 6],
-) -> [usize; 6] {
-    use core::fmt::Write;
-
-    let hart_id = window.hart().hart_id;
-
-    match tau::Call::decode(msg[0]) {
-        Ok(tau::Call::AllocPhysical { order, zone: _ }) => {
-            if !tables.loader_authority {
-                msg[0] = tau::AllocError::AccessDenied as usize;
-                msg[1] = 0;
-            } else {
-                match context.block(hart_id, order as usize) {
-                    Ok(phys) => {
-                        msg[0] = 0;
-                        msg[1] = phys;
-                    }
-                    Err(_) => {
-                        msg[0] = tau::AllocError::OutOfMemory as usize;
-                        msg[1] = 0;
-                    }
-                }
-            }
-        }
-        Ok(tau::Call::FreePhysical { order, zone: _ }) => {
-            if !tables.loader_authority {
-                msg[0] = tau::FreeError::AccessDenied as usize;
-            } else {
-                msg[0] = match context.free_block(hart_id, msg[1], order as usize) {
-                    Ok(()) => 0,
-                    Err(llfree::Error::Address) => tau::FreeError::InvalidAddress as usize,
-                    Err(_) => tau::FreeError::AlreadyFree as usize,
-                };
-            }
-        }
-        Ok(tau::Call::CreateModule) => {
-            match loading::create(
-                window, context, hart_id, tables, msg[1], msg[2], msg[3], msg[4],
-            ) {
-                Ok(handle) => {
-                    msg[0] = 0;
-                    msg[1] = handle;
-                }
-                Err(error) => {
-                    msg[0] = error as usize;
-                    msg[1] = 0;
-                }
-            }
-        }
-        Ok(tau::Call::BindDependency) => {
-            match loading::bind(window, context, tables, msg[1], msg[2]) {
-                Ok(slot) => {
-                    msg[0] = 0;
-                    msg[1] = slot as usize;
-                }
-                Err(error) => {
-                    msg[0] = error as usize;
-                    msg[1] = 0;
-                }
-            }
-        }
-        // These calls need dispatch after all current-context borrows end.
-        // The trap boundary handles them before entering here.
-        Ok(
-            tau::Call::Spawn { .. }
-            | tau::Call::Exit
-            | tau::Call::Wait
-            | tau::Call::Notify
-            | tau::Call::Invoke { .. }
-            | tau::Call::Respond { .. },
-        ) => {
-            msg = [tau::WaitError::Unsupported as usize, 0, 0, 0, 0, 0];
-        }
-        Ok(tau::Call::Map) => {
-            msg[0] = match map_pages(
-                window,
-                hart_id,
-                module,
-                tables,
-                context,
-                NonZeroUsize::new(msg[2]),
-                msg[3],
-                msg[4],
-                msg[5],
-                msg[1],
-            ) {
-                Ok(()) => 0,
-                Err(error) => error as usize,
-            };
-        }
-        Ok(tau::Call::Unmap) => {
-            msg[0] = match unmap_pages(
-                window, hart_id, module, tables, context, msg[2], msg[3], msg[1],
-            ) {
-                Ok(()) => 0,
-                Err(error) => error as usize,
-            };
-        }
-        Ok(tau::Call::Debug) => {
-            write!(
-                sbi::Console,
-                "SYS: checkpoint={} value=0x{:016x}\r\n",
-                msg[1],
-                msg[2]
-            )
-            .unwrap_or_default();
-        }
-        Err(a0) => {
-            write!(sbi::Console, "cannot decode {a0:016x}\r\n").unwrap_or_default();
-            loop {
-                hint::spin_loop();
-            }
-        }
-    }
-
-    msg
-}
-
 fn valid_pages(address: usize, pages: usize) -> bool {
     address & 0xfff == 0
         && pages
@@ -294,13 +170,13 @@ fn decode_flags(flags: usize) -> Option<[u8; 5]> {
     ])
 }
 
-fn map_pages(
+pub fn map_pages(
     window: &mut WindowAccess,
     hart_id: usize,
     module: &ModuleContext,
     tables: &ModuleTables,
     context: &Context,
-    physical_addr: Option<NonZeroUsize>,
+    physical_addr: Option<NonZero<usize>>,
     virtual_addr: usize,
     number_of_pages: usize,
     raw_flags: usize,
@@ -378,7 +254,7 @@ fn map_pages(
     Ok(())
 }
 
-fn unmap_pages(
+pub fn unmap_pages(
     window: &mut WindowAccess,
     hart_id: usize,
     module: &ModuleContext,
@@ -436,7 +312,7 @@ pub fn alloc_pages(
     window: &mut WindowAccess,
     hart_id: usize,
     context: &Context,
-    physical_addr: Option<NonZeroUsize>,
+    physical_addr: Option<NonZero<usize>>,
     virtual_addr: usize,
     number_of_pages: usize,
     flags: [u8; 5],

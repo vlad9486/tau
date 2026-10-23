@@ -300,7 +300,7 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             // The host temporarily exhausts ASIDs to check construction rollback.
             assert_eq!(
                 tau::Ubi::invoke::<0, 0>(slot, 3, []).unwrap_err().get(),
-                tau::ModuleError::OutOfMemory as usize
+                tau::ModuleError::OutOfMemory.encode()
             );
             tau_test_progress(case, slot as usize, 0);
             // Construct each destination once, then immediately reuse it.
@@ -402,14 +402,14 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             assert_eq!(tau::Ubi::invoke::<5, 5>(slot, 6, words).unwrap(), words);
             assert_eq!(
                 tau::Ubi::invoke::<0, 0>(0, 0, []).unwrap_err().get(),
-                tau::ModuleError::InvalidDependency as usize
+                tau::ModuleError::InvalidDependency.encode()
             );
             // The ABI encodes 12 slot bits, while the protected tables contain
             // 0x800 entries. A cache-first lookup must reject the upper half.
             for invalid in [0x7ff, 0x800, 0xfff] {
                 assert_eq!(
                     tau::Ubi::invoke::<0, 0>(invalid, 0, []).unwrap_err().get(),
-                    tau::ModuleError::InvalidDependency as usize
+                    tau::ModuleError::InvalidDependency.encode()
                 );
             }
             // Bootstrap loader authority is restored on return.
@@ -425,7 +425,7 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             // Sibling is not pure, so it is quarantined/poisoned; subsequent calls fail with 0x8040.
             assert_eq!(
                 tau::Ubi::invoke::<1, 0>(sibling, 3, [1]).unwrap_err().get(),
-                tau::ModuleError::Poisoned as usize
+                tau::ModuleError::Poisoned.encode()
             );
             // Other modules (slot) remain healthy and unpoisoned.
             assert_eq!(

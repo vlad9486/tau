@@ -17,7 +17,7 @@ use core::{arch, fmt, cell::UnsafeCell, fmt::Write as _, hint, mem, ptr, sync::a
 use supervisor::{
     csr, loading, module, sbi,
     scheduler::{self, Dispatch, ReturnKind, Scheduler, ThreadState},
-    state, vmem,
+    state, vmem, llfree,
 };
 
 #[cfg(all(not(debug_assertions), feature = "panic-never"))]
@@ -464,7 +464,7 @@ fn invoke_poisoned(caller: vmem::Root) -> ! {
     let local = unsafe { local_access() };
     let flush = window.switch_flush(local.module_context.root, caller);
     let _local = unsafe { mmu::switch(local, caller, flush) };
-    restore_syscall(tau::ModuleError::Poisoned as usize, 0, 0, 0, 0, 0)
+    restore_syscall(tau::ModuleError::Poisoned.encode(), 0, 0, 0, 0, 0)
 }
 
 #[cold]
@@ -481,7 +481,7 @@ fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize,
         slot,
     ) {
         Ok(target) => target,
-        Err(error) => restore_syscall(error as usize, 0, 0, 0, 0, 0),
+        Err(error) => restore_syscall(error.encode(), 0, 0, 0, 0, 0),
     };
     let caller = local.module_context.root;
     let flush = window.switch_flush(caller, root);
@@ -506,57 +506,53 @@ fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize,
 #[cold]
 #[inline(never)]
 extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
+    use core::num::NonZero;
+
     let mut window = unsafe { vmem::WindowAccess::new(&raw const __WINDOW) };
+    let window = &mut window;
     let hart_id = window.hart().hart_id;
     let local = unsafe { local_access() };
-    if matches!(
-        tau::Call::decode(a0),
-        Ok(tau::Call::Spawn { .. } | tau::Call::Exit | tau::Call::Wait | tau::Call::Notify)
-    ) {
-        scheduled_syscall(&mut window, hart_id, local, [a0, a1, a2, a3, a4, a5]);
-    }
-    let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
-    let [a0, a1, a2, a3, a4, a5] = state::syscall(
-        &mut window,
-        local.module_context,
-        local.module,
-        context,
-        [a0, a1, a2, a3, a4, a5],
-    );
-    restore_syscall(a0, a1, a2, a3, a4, a5)
-}
-
-#[cold]
-#[inline(never)]
-fn scheduled_syscall(
-    window: &mut vmem::WindowAccess,
-    hart_id: usize,
-    local: mmu::Local<'_>,
-    message: [usize; 6],
-) -> ! {
     let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
     let scheduler = unsafe { &mut *UnsafeCell::raw_get(&raw const __SCHEDULER) };
-    let mut result = [0; 6];
-    match tau::Call::decode(message[0]) {
-        Ok(tau::Call::Spawn { entry }) => {
-            match scheduler::spawn(window, local.module, context, scheduler, entry, message) {
-                Ok(id) => result[1] = id as usize,
-                Err(error) => result[0] = error as usize,
-            }
-        }
+
+    let mut msg = [a0, a1, a2, a3, a4, a5];
+    match tau::Call::decode(a0) {
+        Ok(tau::Call::Invoke { .. } | tau::Call::Respond { .. }) => unsafe {
+            hint::unreachable_unchecked()
+        },
         Ok(tau::Call::Wait) => {
-            match scheduler::wait(window, local.module, scheduler, message[1], message[2]) {
-                Ok(Some(event)) => result[1] = event.encode(),
+            match scheduler::wait(window, local.module, scheduler, msg[1], msg[2]) {
+                Ok(Some(event)) => {
+                    msg = [0; 6];
+                    msg[1] = event.encode();
+                }
                 Ok(None) => {
                     let selected = scheduler::dispatch(window, scheduler, hart_id);
                     resume_scheduled(window, local, selected)
                 }
-                Err(error) => result[0] = error as usize,
+                Err(error) => {
+                    msg = [0; 6];
+                    msg[0] = error as usize;
+                }
             }
         }
         Ok(tau::Call::Notify) => {
-            if let Err(error) = scheduler::notify(window, local.module, scheduler, message[1]) {
-                result[0] = error as usize;
+            let res = scheduler::notify(window, local.module, scheduler, msg[1]);
+            msg = [0; 6];
+            if let Err(error) = res {
+                msg[0] = error as usize;
+            }
+        }
+        Ok(tau::Call::Spawn { entry }) => {
+            match scheduler::spawn(window, local.module, context, scheduler, entry, msg) {
+                Ok(id) => {
+                    msg = [0; 6];
+                    msg[1] = id as usize;
+                }
+                Err(error) => {
+                    msg = [0; 6];
+                    msg[0] = error as usize;
+                }
             }
         }
         Ok(tau::Call::Exit) => {
@@ -564,11 +560,114 @@ fn scheduled_syscall(
             let selected = scheduler::dispatch(window, scheduler, hart_id);
             resume_scheduled(window, local, selected)
         }
-        _ => {
-            result[0] = tau::WaitError::Unsupported as usize;
+        Ok(tau::Call::AllocPhysical { order, zone: _ }) => {
+            if !local.module.loader_authority {
+                msg[0] = tau::AllocError::AccessDenied as usize;
+                msg[1] = 0;
+            } else {
+                match context.block(hart_id, order as usize) {
+                    Ok(phys) => {
+                        msg[0] = 0;
+                        msg[1] = phys;
+                    }
+                    Err(_) => {
+                        msg[0] = tau::AllocError::OutOfMemory as usize;
+                        msg[1] = 0;
+                    }
+                }
+            }
+        }
+        Ok(tau::Call::FreePhysical { order, zone: _ }) => {
+            if !local.module.loader_authority {
+                msg[0] = tau::FreeError::AccessDenied as usize;
+            } else {
+                msg[0] = match context.free_block(hart_id, msg[1], order as usize) {
+                    Ok(()) => 0,
+                    Err(llfree::Error::Address) => tau::FreeError::InvalidAddress as usize,
+                    Err(_) => tau::FreeError::AlreadyFree as usize,
+                };
+            }
+        }
+        Ok(tau::Call::Map) => {
+            msg[0] = match state::map_pages(
+                window,
+                hart_id,
+                local.module_context,
+                local.module,
+                context,
+                NonZero::new(msg[2]),
+                msg[3],
+                msg[4],
+                msg[5],
+                msg[1],
+            ) {
+                Ok(()) => 0,
+                Err(error) => error as usize,
+            };
+        }
+        Ok(tau::Call::Unmap) => {
+            msg[0] = match state::unmap_pages(
+                window,
+                hart_id,
+                local.module_context,
+                local.module,
+                context,
+                msg[2],
+                msg[3],
+                msg[1],
+            ) {
+                Ok(()) => 0,
+                Err(error) => error as usize,
+            };
+        }
+        Ok(tau::Call::CreateModule) => {
+            match loading::create(
+                window,
+                context,
+                hart_id,
+                local.module,
+                msg[1],
+                msg[2],
+                msg[3],
+                msg[4],
+            ) {
+                Ok(handle) => {
+                    msg[0] = 0;
+                    msg[1] = handle;
+                }
+                Err(error) => {
+                    msg[0] = error.encode();
+                    msg[1] = 0;
+                }
+            }
+        }
+        Ok(tau::Call::BindDependency) => {
+            match loading::bind(window, context, local.module, msg[1], msg[2]) {
+                Ok(slot) => {
+                    msg[0] = 0;
+                    msg[1] = slot as usize;
+                }
+                Err(error) => {
+                    msg[0] = error.encode();
+                    msg[1] = 0;
+                }
+            }
+        }
+        Ok(tau::Call::Debug) => {
+            write!(
+                sbi::Console,
+                "SYS: checkpoint={} value=0x{:016x}\r\n",
+                msg[1],
+                msg[2]
+            )
+            .unwrap_or_default();
+        }
+        Err(_err) => {
+            msg = [tau::error::ERR_UNSUPPORTED, 0, 0, 0, 0, 0];
         }
     }
-    let [a0, a1, a2, a3, a4, a5] = result;
+
+    let [a0, a1, a2, a3, a4, a5] = msg;
     restore_syscall(a0, a1, a2, a3, a4, a5)
 }
 

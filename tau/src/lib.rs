@@ -15,12 +15,15 @@ pub mod asm;
 
 mod common;
 pub use self::common::{
-    Call, Entry, Event, Manifest, MappedRegion, MemoryZone, ModuleError, ModuleHandle, ModuleId,
-    PageFlags, SpawnError, WaitError, WaitSlot,
+    Call, Entry, Event, Manifest, MappedRegion, MemoryZone, ModuleHandle, ModuleId, PageFlags,
+    WaitSlot,
 };
 
+pub mod error;
+pub use self::error::{SpawnError, ModuleError, WaitError, AllocError, FreeError};
+
 mod ubi;
-pub use self::ubi::{Ubi, FreeError, AllocError};
+pub use self::ubi::Ubi;
 
 mod dtb;
 pub use self::dtb::{Dtb, DtbProps, DtbHeaderError, DtbRsv};

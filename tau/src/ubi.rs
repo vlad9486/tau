@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{arch, hint, num::NonZeroUsize};
+use core::{arch, hint, num::NonZero};
 
 use super::{
     Call, Entry, Event, MemoryZone, ModuleError, ModuleHandle, PageFlags, SpawnError, WaitError,
-    WaitSlot,
+    WaitSlot, AllocError, FreeError,
 };
 
 #[inline(always)]
@@ -44,7 +44,7 @@ impl Ubi {
     /// Requires `loader_authority`.
     pub fn alloc_physical(order: u8, zone: MemoryZone) -> Result<usize, AllocError> {
         let (r0, [phys]) = ubi(Call::AllocPhysical { order, zone }, []);
-        if let Some(code) = NonZeroUsize::new(r0) {
+        if let Some(code) = NonZero::new(r0) {
             Err(unsafe { AllocError::decode(code) })
         } else {
             Ok(phys)
@@ -59,7 +59,7 @@ impl Ubi {
         zone: MemoryZone,
     ) -> Result<(), FreeError> {
         let (r0, []) = ubi(Call::FreePhysical { order, zone }, [physical_addr]);
-        if let Some(code) = NonZeroUsize::new(r0) {
+        if let Some(code) = NonZero::new(r0) {
             Err(unsafe { FreeError::decode(code) })
         } else {
             Ok(())
@@ -74,12 +74,15 @@ impl Ubi {
         wait_slots_addr: usize,
         wait_slots_count: usize,
     ) -> Result<ModuleHandle, ModuleError> {
-        let (status, [handle]) = ubi(
+        let (r0, [handle]) = ubi(
             Call::CreateModule,
             [entry, stack_pages, wait_slots_addr, wait_slots_count],
         );
-        module_status(status)?;
-        Ok(ModuleHandle::from_raw(handle))
+        if let Some(code) = NonZero::new(r0) {
+            Err(unsafe { ModuleError::decode(code) })
+        } else {
+            Ok(ModuleHandle::from_raw(handle))
+        }
     }
 
     /// Parse an ELF image in userspace, stage its segments via zero-copy page
@@ -99,21 +102,24 @@ impl Ubi {
         parent_module_id: ModuleHandle,
         dependency_module_id: ModuleHandle,
     ) -> Result<u16, ModuleError> {
-        let (status, [slot]) = ubi(
+        let (r0, [slot]) = ubi(
             Call::BindDependency,
             [parent_module_id.as_raw(), dependency_module_id.as_raw()],
         );
-        module_status(status)?;
-        Ok(slot as u16)
+        if let Some(code) = NonZero::new(r0) {
+            Err(unsafe { ModuleError::decode(code) })
+        } else {
+            Ok(slot as u16)
+        }
     }
 
     pub fn invoke<const I: usize, const O: usize>(
         slot: u16,
         arg: u16,
         msg: [usize; I],
-    ) -> Result<[usize; O], NonZeroUsize> {
+    ) -> Result<[usize; O], NonZero<usize>> {
         let (r0, msg) = ubi(Call::Invoke { slot, arg }, msg);
-        if let Some(error) = NonZeroUsize::new(r0) {
+        if let Some(error) = NonZero::new(r0) {
             Err(error)
         } else {
             Ok(msg)
@@ -127,12 +133,11 @@ impl Ubi {
 
     pub fn spawn<const I: usize>(entry: Entry, msg: [usize; I]) -> Result<u16, SpawnError> {
         let entry = entry as usize;
-        let (status, [id]) = ubi(Call::Spawn { entry }, msg);
-        match status {
-            0 => Ok(id as u16),
-            1 => Err(SpawnError::InvalidEntry),
-            3 => Err(SpawnError::NoSlots),
-            _ => Err(SpawnError::OutOfMemory),
+        let (r0, [id]) = ubi(Call::Spawn { entry }, msg);
+        if let Some(code) = NonZero::new(r0) {
+            Err(unsafe { SpawnError::decode(code) })
+        } else {
+            Ok(id as u16)
         }
     }
 
@@ -142,7 +147,7 @@ impl Ubi {
     }
 
     pub fn map(
-        physical_addr: Option<NonZeroUsize>,
+        physical_addr: Option<NonZero<usize>>,
         virtual_addr: usize,
         number_of_pages: usize,
     ) -> Result<(), AllocError> {
@@ -157,12 +162,12 @@ impl Ubi {
 
     pub fn map_module(
         target: ModuleHandle,
-        physical_addr: Option<NonZeroUsize>,
+        physical_addr: Option<NonZero<usize>>,
         virtual_addr: usize,
         number_of_pages: usize,
         flags: PageFlags,
     ) -> Result<(), AllocError> {
-        let physical_addr = physical_addr.map(NonZeroUsize::get).unwrap_or_default();
+        let physical_addr = physical_addr.map(NonZero::get).unwrap_or_default();
         let (r0, []) = ubi(
             Call::Map,
             [
@@ -173,7 +178,7 @@ impl Ubi {
                 usize::from(flags.as_raw()),
             ],
         );
-        if let Some(code) = NonZeroUsize::new(r0) {
+        if let Some(code) = NonZero::new(r0) {
             Err(unsafe { AllocError::decode(code) })
         } else {
             Ok(())
@@ -193,7 +198,7 @@ impl Ubi {
             Call::Unmap,
             [target.as_raw(), virtual_addr, number_of_pages],
         );
-        if let Some(code) = NonZeroUsize::new(r0) {
+        if let Some(code) = NonZero::new(r0) {
             Err(unsafe { FreeError::decode(code) })
         } else {
             Ok(())
@@ -202,94 +207,34 @@ impl Ubi {
 
     /// Consume readiness or suspend this thread, resuming here in this context.
     /// Shared-state publication/checking still needs module synchronization.
-    pub fn wait(slot: *const WaitSlot, deadline: Option<NonZeroUsize>) -> Result<Event, WaitError> {
-        let deadline = deadline.map(NonZeroUsize::get).unwrap_or_default();
-        let (status, [event]) = ubi(Call::Wait, [slot.addr(), deadline]);
-        wait_status(status)?;
-        Event::decode(event).map_err(|_| WaitError::Unsupported)
+    pub fn wait(
+        slot: *const WaitSlot,
+        deadline: Option<NonZero<usize>>,
+    ) -> Result<Event, WaitError> {
+        let deadline = deadline.map(NonZero::get).unwrap_or_default();
+        let (r0, [event]) = ubi(Call::Wait, [slot.addr(), deadline]);
+        if let Some(code) = NonZero::new(r0) {
+            Err(unsafe { WaitError::decode(code) })
+        } else {
+            Event::decode(event).map_err(|_| WaitError::Unsupported)
+        }
     }
 
     /// Record coalesced readiness for a waiter in this module. Does not transfer
     /// this thread or execute code in the receiver's context.
     pub fn notify(slot: *const WaitSlot) -> Result<(), WaitError> {
-        let (status, []) = ubi(Call::Notify, [slot.addr()]);
-        wait_status(status)
+        let (r0, []) = ubi(Call::Notify, [slot.addr()]);
+        if let Some(code) = NonZero::new(r0) {
+            Err(unsafe { WaitError::decode(code) })
+        } else {
+            Ok(())
+        }
     }
 
     /// Print a diagnostic checkpoint and one machine-word value through the
     /// supervisor's SBI debug console.
     pub fn debug(checkpoint: usize, value: usize) {
         let (_, []) = ubi(Call::Debug, [checkpoint, value]);
-    }
-}
-
-fn module_status(status: usize) -> Result<(), ModuleError> {
-    match status {
-        0 => Ok(()),
-        1 => Err(ModuleError::AccessDenied),
-        3 => Err(ModuleError::OutOfMemory),
-        4 => Err(ModuleError::NoSlots),
-        5 => Err(ModuleError::InvalidDependency),
-        0x8040 => Err(ModuleError::Poisoned),
-        _ => Err(ModuleError::InvalidImage),
-    }
-}
-
-#[repr(usize)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AllocError {
-    AlreadyAllocated = 1,
-    OutOfMemory = 2,
-    AccessDenied = 3,
-    InvalidAddress = 4,
-}
-
-impl AllocError {
-    /// # Safety
-    /// The code must be in range of `Self`
-    #[inline]
-    pub const unsafe fn decode(code: NonZeroUsize) -> Self {
-        match code.get() {
-            1 => Self::AlreadyAllocated,
-            2 => Self::OutOfMemory,
-            3 => Self::AccessDenied,
-            4 => Self::InvalidAddress,
-            _ => unsafe { hint::unreachable_unchecked() },
-        }
-    }
-}
-
-#[repr(usize)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FreeError {
-    AlreadyFree = 1,
-    AccessDenied = 2,
-    InvalidAddress = 3,
-}
-
-impl FreeError {
-    /// # Safety
-    /// The code must be in range of `Self`
-    #[inline]
-    pub const unsafe fn decode(code: NonZeroUsize) -> Self {
-        match code.get() {
-            1 => Self::AlreadyFree,
-            2 => Self::AccessDenied,
-            3 => Self::InvalidAddress,
-            _ => unsafe { hint::unreachable_unchecked() },
-        }
-    }
-}
-
-fn wait_status(status: usize) -> Result<(), WaitError> {
-    match status {
-        0 => Ok(()),
-        1 => Err(WaitError::Unsupported),
-        2 => Err(WaitError::InvalidWaiter),
-        3 => Err(WaitError::AccessDenied),
-        4 => Err(WaitError::Busy),
-        5 => Err(WaitError::OutOfMemory),
-        _ => Err(WaitError::Unsupported),
     }
 }
 
@@ -521,7 +466,7 @@ fn prepare_elf_module(
             if copy_start < copy_end {
                 if Ubi::map_module(
                     ModuleHandle::ROOT,
-                    NonZeroUsize::new(phys),
+                    NonZero::new(phys),
                     STAGE_VA,
                     1,
                     PageFlags::RW,
@@ -540,7 +485,7 @@ fn prepare_elf_module(
                 }
                 let _ = Ubi::unmap_module(ModuleHandle::ROOT, STAGE_VA, 1);
             }
-            if Ubi::map_module(handle, NonZeroUsize::new(phys), page_va, 1, flags).is_err() {
+            if Ubi::map_module(handle, NonZero::new(phys), page_va, 1, flags).is_err() {
                 let _ = Ubi::free_physical(phys, 0, MemoryZone::Normal);
                 return Err(ModuleError::OutOfMemory);
             }
