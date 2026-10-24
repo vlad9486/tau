@@ -7,6 +7,7 @@ instead provides a clean-slate architecture optimized for modern software develo
 ## Key Features
 
 ### RISC-V Exclusive
+
 Tau is designed exclusively for RISC-V and takes full advantage of its tagged TLBs 
 to enable efficient address-space switching.
 
