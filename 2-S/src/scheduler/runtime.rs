@@ -15,9 +15,9 @@ use tau::Event;
 use super::{
     sbi, csr,
     thread::{ActiveWait, Phase, Resume, ThreadState},
-    waiting::WaitRecord,
+    matter::{WaitRecord, WaitTable},
     Context,
-    vmem::{self, Mapping, Root, Window, WindowAccess},
+    space::{self, Mapping, Root, Window, WindowAccess},
 };
 
 const CAPACITY: usize = 128;
@@ -30,10 +30,9 @@ pub struct Scheduler {
     pub(super) state: UnsafeCell<State>,
 }
 
-#[derive(Clone, Copy)]
 pub struct InterruptTarget {
     pub thread_id: usize,
-    pub table: super::waiting::WaitTable,
+    pub table: WaitTable,
     pub slot: usize,
 }
 
@@ -112,11 +111,11 @@ pub(super) fn invariant_failed() -> ! {
 }
 
 impl State {
-    pub(super) fn get_thread(&self, id: usize) -> Option<&ThreadState> {
+    pub(super) fn take_thread(&mut self, id: usize) -> Option<ThreadState> {
         id.checked_sub(1)
             .filter(|&i| i < self.count)
-            .and_then(|i| self.threads.get(i))
-            .and_then(|t| t.as_ref())
+            .and_then(|i| self.threads.get_mut(i))
+            .and_then(Option::take)
     }
 
     pub(super) fn thread_state_mut(&mut self, id: usize) -> &mut ThreadState {
@@ -127,7 +126,7 @@ impl State {
             .unwrap_or_else(|| invariant_failed())
     }
 
-    fn set_thread(&mut self, id: usize, thread: ThreadState) {
+    pub fn set_thread(&mut self, id: usize, thread: ThreadState) {
         *id.checked_sub(1)
             .and_then(|i| self.threads.get_mut(i))
             .unwrap_or_else(|| invariant_failed()) = Some(thread);
@@ -218,15 +217,19 @@ impl State {
         event: Event,
         high_priority: bool,
     ) -> bool {
-        let Some(&thread) = self.get_thread(thread_id) else {
+        let Some(mut thread) = self.take_thread(thread_id) else {
             return false;
         };
-        let Some(wait) = thread.wait else {
+        let Some(wait) = &thread.wait else {
+            self.set_thread(thread_id, thread);
             return false;
         };
         let slot = unsafe { wait.table.read(window, wait.slot) };
         if slot.thread_id == thread_id && slot.sequence == wait.sequence {
+            let wait = unsafe { thread.wait.take().unwrap_unchecked() };
             self.complete(window, thread_id, thread, wait, slot, event, high_priority);
+        } else {
+            self.set_thread(thread_id, thread);
         }
         true
     }
@@ -284,8 +287,8 @@ impl Scheduler {
             .map(
                 Window::current_root(),
                 Mapping {
-                    addr_virtual: vmem::SCHEDULER,
-                    virtual_pages: size_of::<Scheduler>().div_ceil(vmem::PAGE),
+                    addr_virtual: space::SCHEDULER,
+                    virtual_pages: size_of::<Scheduler>().div_ceil(space::PAGE),
                     flags: *b"rw--g",
                     ..Mapping::default()
                 },
@@ -308,7 +311,8 @@ impl Scheduler {
             ptr::addr_of_mut!((*state).running).write(1);
             ptr::addr_of_mut!((*state).active).write(false);
             ptr::addr_of_mut!((*state).quantum).write(0);
-            ptr::addr_of_mut!((*state).interrupt_targets).write([None; 8]);
+            ptr::addr_of_mut!((*state).interrupt_targets)
+                .write([None, None, None, None, None, None, None, None]);
             ptr::addr_of_mut!((*state).deadlines).write([0; CAPACITY]);
         }
         Ok(())
@@ -331,11 +335,27 @@ pub fn notify_hardware_interrupt(
     hart_id: usize,
 ) {
     let mut scheduler = scheduler.lock();
-    let Some(target) = scheduler.interrupt_targets.get(hart_id).copied().flatten() else {
+    let Some(target) = scheduler
+        .interrupt_targets
+        .get(hart_id)
+        .map(Option::as_ref)
+        .flatten()
+    else {
         return;
     };
+    let thread_id = target.thread_id;
+
     let event = Event::Notified { arg: 0 };
-    if !scheduler.complete_wait(window, target.thread_id, event, true) {
+    if !scheduler.complete_wait(window, thread_id, event, true) {
+        let target = unsafe {
+            scheduler
+                .interrupt_targets
+                .get(hart_id)
+                .map(Option::as_ref)
+                .flatten()
+                .unwrap_unchecked()
+        };
+
         let mut slot = unsafe { target.table.read(window, target.slot) };
         slot.pending = true;
         unsafe { target.table.write(window, target.slot, slot) };

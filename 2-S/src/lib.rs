@@ -15,16 +15,12 @@ pub mod csr;
 
 pub mod sbi;
 
-pub mod llfree;
+pub mod space;
 
-pub mod vmem;
+pub mod llfree;
 
 pub mod scheduler;
 
-pub mod module;
-
-pub mod loading;
-
-pub mod waiting;
+pub mod matter;
 
 pub mod state;

@@ -10,12 +10,9 @@ use core::{
     num::NonZeroUsize,
 };
 
-use super::{
-    csr, llfree,
-    module::{ModuleTables, PreparedModule, TABLE_PAGES},
-};
+use super::{csr, llfree, Module, ModuleDescriptor, ModuleContext};
 
-pub const SV39: usize = 8;
+const SV39: usize = 8;
 pub const PAGE: usize = 4096;
 pub const SCHEDULER: usize = 0xffff_ffc0_0040_0000;
 pub const ALLOCATOR: usize = 0xffff_ffc0_006e_0000;
@@ -25,6 +22,9 @@ pub const SUPERVISOR_INDEX: usize = 256;
 // Sv39 RSW: this entry owns an allocator page (data or a child table).
 // Borrowed entries stop reclamation, including whole shared branches.
 pub const OWNED: usize = 1 << 8;
+
+// The complete context fits before __MODULE.
+const _: () = assert!(size_of::<ModuleContext>() <= MODULE - MODULE_CONTEXT);
 
 pub const fn flags_new(&[r, w, x, u, g]: &[u8; 5]) -> usize {
     0xc1 | if r != b'-' { 2 } else { 0 }
@@ -118,10 +118,10 @@ pub struct Window {
     pte: UnsafeCell<[usize; 512]>,                                // 1 page  (slot 1: page-table walk)
     page: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 2: zeroing / segment copy)
     _reserved3: UnsafeCell<MaybeUninit<Page>>,                    // 1 page  (slot 3: reserved)
-    descriptor: UnsafeCell<MaybeUninit<Padded<PreparedModule>>>,  // 1 page  (slot 4: foreign module tables page 0 / descriptor)
+    descriptor: UnsafeCell<MaybeUninit<Padded<ModuleDescriptor>>>,  // 1 page  (slot 4: foreign module tables page 0 / descriptor)
     wait: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 5: WaitRecord / wait slot)
     hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,                  // 1 page  (slot 6: permanent per-hart MMU)
-    module: UnsafeCell<MaybeUninit<ModuleTables>>,                // 5 pages (slots 7..12: foreign ModuleTables)
+    module: UnsafeCell<MaybeUninit<Module>>,                // 5 pages (slots 7..12: foreign Module)
     _reserved: UnsafeCell<MaybeUninit<[Page; 499]>>,              // unused window slots
     stack: UnsafeCell<MaybeUninit<Page>>,                         // 1 page  (slot 511: supervisor stack)
 }
@@ -285,7 +285,7 @@ impl WindowAccess {
     }
 
     /// Read the prepared module header from page 0 of foreign module tables.
-    pub fn read_descriptor(&mut self, physical: usize) -> PreparedModule {
+    pub fn read_module_descriptor(&mut self, physical: usize) -> ModuleDescriptor {
         self.alias(DESCRIPTOR_SLOT, physical);
         let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).descriptor) };
         unsafe { (*ptr).assume_init_ref().inner }
@@ -297,8 +297,8 @@ impl WindowAccess {
         unsafe { &mut (*ptr).assume_init_mut().0 }
     }
 
-    pub fn map_module_tables(&mut self, physical: usize) -> &mut ModuleTables {
-        for i in 0..TABLE_PAGES {
+    pub fn map_module(&mut self, physical: usize) -> &mut Module {
+        for i in 0..size_of::<Module>().div_ceil(PAGE) {
             self.alias(MODULE_SLOT + i, physical + i * PAGE);
         }
         let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).module) };
@@ -309,6 +309,7 @@ impl WindowAccess {
         let pte = self.read_pte(root.page(), index);
         (pte & 1 != 0 && pte & 14 == 0).then(|| pte_page(pte))
     }
+
     pub fn attach(&mut self, root: Root, index: usize, stem: usize) {
         debug_assert!(self.read_pte(root.page(), index) == 0);
         self.write_pte(root.page(), index, branch(stem));

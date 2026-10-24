@@ -5,10 +5,9 @@
 use core::{num::NonZero, ptr};
 
 use super::{
-    llfree, loading,
-    module::{self, ModuleContext, ModuleTables},
-    vmem::{self, Mapping, Window, WindowAccess},
-    waiting::WaitTable,
+    llfree,
+    matter::{ModuleDescriptor, ModuleContext, Module, WaitTable},
+    space::{Root, Mapping, Window, WindowAccess, PAGE},
 };
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -24,13 +23,13 @@ pub struct Context {
     pub allocator: llfree::Lower<'static>,
     pub base_addr: usize,
     /// Kept independently of the active satp for later loader/hart startup.
-    pub bootstrap_root: vmem::Root,
+    pub bootstrap_root: Root,
     pub boot: BootModule,
 }
 
 impl Context {
-    pub fn block(&self, hart_id: usize, order: usize) -> Result<usize, llfree::Error> {
-        let frame = self.allocator.alloc(hart_id, order)?.0;
+    pub fn block(&self, hart_id: usize, order: u32) -> Result<usize, llfree::Error> {
+        let frame = self.allocator.alloc(hart_id, order as _)?.0;
         Ok(self.base_addr + (frame << 12))
     }
 
@@ -38,13 +37,8 @@ impl Context {
         self.block(hart_id, 0)
     }
 
-    pub fn free_block(
-        &self,
-        hart_id: usize,
-        page: usize,
-        order: usize,
-    ) -> Result<(), llfree::Error> {
-        if order > llfree::MAX_ORDER || page & ((1usize << (12 + order)) - 1) != 0 {
+    pub fn free_block(&self, hart_id: usize, page: usize, order: u32) -> Result<(), llfree::Error> {
+        if order > llfree::MAX_ORDER as u32 || page & ((1usize << (12 + order)) - 1) != 0 {
             return Err(llfree::Error::Address);
         }
         let frame = page
@@ -58,7 +52,8 @@ impl Context {
         {
             return Err(llfree::Error::Address);
         }
-        self.allocator.put(hart_id, llfree::FrameId(frame), order)
+        self.allocator
+            .put(hart_id, llfree::FrameId(frame), order as _)
     }
 
     pub fn free(&self, hart_id: usize, page: usize) -> Result<(), llfree::Error> {
@@ -81,14 +76,14 @@ pub unsafe fn init(
     window: &mut WindowAccess,
     hart_id: usize,
     module: *mut ModuleContext,
-    tables: *mut ModuleTables,
+    tables: *mut Module,
     context: &Context,
-) -> Result<(vmem::Root, usize), InitError> {
+) -> Result<(Root, usize), InitError> {
     let root = Window::current_root();
 
     let mapping = Mapping {
         addr_virtual: module.addr(),
-        virtual_pages: size_of::<ModuleContext>().div_ceil(0x1000),
+        virtual_pages: size_of::<ModuleContext>().div_ceil(PAGE),
         addr_physical: None,
         physical_pages: 0,
         flags: *b"rw---",
@@ -101,21 +96,22 @@ pub unsafe fn init(
 
     // Bootstrap constructs the initial module tables once. Future context
     // creation must reuse their backing pages, not allocate/reset these tables.
-    let tables_backing = context
-        .block(hart_id, module::TABLE_ORDER)
+    let pages = size_of::<Module>().div_ceil(PAGE);
+    let module_physical = context
+        .block(hart_id, pages.next_power_of_two().ilog2())
         .map_err(InitError::Allocator)?;
     let mapping = Mapping {
         addr_virtual: tables.addr(),
-        virtual_pages: size_of::<ModuleTables>().div_ceil(0x1000),
-        addr_physical: NonZero::new(tables_backing),
-        physical_pages: size_of::<ModuleTables>().div_ceil(0x1000),
+        virtual_pages: pages,
+        addr_physical: NonZero::new(module_physical),
+        physical_pages: pages,
         flags: *b"rw---",
     };
     window
         .map(root, mapping, || context.page(hart_id))
         .map_err(|_| tau::AllocError::OutOfMemory)
         .map_err(InitError::Alloc)?;
-    unsafe { ModuleTables::init_at(tables, true, false) };
+    unsafe { Module::init_at(tables, true, false) };
 
     let sepc = context.boot.entry;
     let stack_pages = context.boot.stack_pages;
@@ -134,227 +130,15 @@ pub unsafe fn init(
     let stem_phys = window.root_branch(satp, stem).unwrap_or(0);
     let root_index = Some(stem as u16);
     unsafe {
-        ptr::addr_of_mut!((*tables).wait_table).write(wait_table);
-        ptr::addr_of_mut!((*tables).header).write(module::PreparedModule {
+        ptr::addr_of_mut!((*tables).header.wait_table).write(wait_table);
+        ptr::addr_of_mut!((*tables).header.descriptor).write(ModuleDescriptor {
             stem: stem_phys,
             root_index,
             entry: sepc,
             stack_pages,
-            tables: tables_backing,
+            physical: module_physical,
         });
-        ModuleContext::init_zeroed(module, satp, sepc, 0, root_index);
+        ModuleContext::init_zeroed(module, satp, sepc);
     }
     Ok((satp, sepc))
-}
-
-fn valid_pages(address: usize, pages: usize) -> bool {
-    address & 0xfff == 0
-        && pages
-            .checked_mul(4096)
-            .is_some_and(|bytes| vmem::user_range(address, bytes))
-}
-
-fn decode_flags(flags: usize) -> Option<[u8; 5]> {
-    let r = flags & tau::PageFlags::READ.bits() != 0;
-    let w = flags & tau::PageFlags::WRITE.bits() != 0;
-    let x = flags & tau::PageFlags::EXEC.bits() != 0;
-    if flags & !7 != 0 || !r || (w && x) {
-        return None;
-    }
-    Some([
-        b'r',
-        if w { b'w' } else { b'-' },
-        if x { b'x' } else { b'-' },
-        b'u',
-        b'-',
-    ])
-}
-
-pub fn map_pages(
-    window: &mut WindowAccess,
-    hart_id: usize,
-    module: &ModuleContext,
-    tables: &ModuleTables,
-    context: &Context,
-    physical_addr: Option<NonZero<usize>>,
-    virtual_addr: usize,
-    number_of_pages: usize,
-    raw_flags: usize,
-    target: usize,
-) -> Result<(), tau::AllocError> {
-    let flags = decode_flags(raw_flags).ok_or(tau::AllocError::AccessDenied)?;
-    if (!tables.loader_authority
-        && (physical_addr.is_some() || target != 0 || raw_flags & tau::PageFlags::EXEC.bits() != 0))
-        || (target == 0 && module.overlaps_stem(virtual_addr, number_of_pages))
-    {
-        return Err(tau::AllocError::AccessDenied);
-    }
-    if target == 0 {
-        return alloc_pages(
-            window,
-            hart_id,
-            context,
-            physical_addr,
-            virtual_addr,
-            number_of_pages,
-            flags,
-        );
-    }
-    if !valid_pages(virtual_addr, number_of_pages)
-        || physical_addr.is_some_and(|p| {
-            p.get() & 0xfff != 0
-                || number_of_pages
-                    .checked_mul(4096)
-                    .and_then(|n| p.get().checked_add(n))
-                    .is_none()
-        })
-    {
-        return Err(tau::AllocError::InvalidAddress);
-    }
-    let descriptor =
-        loading::descriptor_page(context, target).map_err(|_| tau::AllocError::InvalidAddress)?;
-    let dep = window.read_descriptor(descriptor);
-    let Some(root_index) = dep.root_index else {
-        return Err(tau::AllocError::InvalidAddress);
-    };
-    let root_index = root_index as usize;
-    let last = virtual_addr + number_of_pages * 4096 - 1;
-    if (virtual_addr >> 30) & 511 != root_index || (last >> 30) & 511 != root_index {
-        return Err(tau::AllocError::InvalidAddress);
-    }
-    let mapping = Mapping {
-        addr_virtual: virtual_addr,
-        virtual_pages: number_of_pages,
-        addr_physical: physical_addr,
-        physical_pages: usize::from(physical_addr.is_some()) * number_of_pages,
-        flags,
-    };
-    if let Err(error) = window.map_stem(dep.stem, mapping, || context.page(hart_id)) {
-        if !matches!(
-            error,
-            llfree::Error::Address | llfree::Error::InvalidArgument
-        ) {
-            for i in 0..number_of_pages {
-                let _ = window.unmap_stem(dep.stem, None, virtual_addr + i * 4096, |page| {
-                    context.free(hart_id, page)
-                });
-            }
-        }
-        return Err(match error {
-            llfree::Error::Address => tau::AllocError::InvalidAddress,
-            llfree::Error::InvalidArgument => tau::AllocError::AlreadyAllocated,
-            _ => tau::AllocError::OutOfMemory,
-        });
-    }
-    if raw_flags & tau::PageFlags::EXEC.bits() != 0 {
-        unsafe {
-            core::arch::asm!("fence.i", options(nostack));
-        }
-    }
-    Ok(())
-}
-
-pub fn unmap_pages(
-    window: &mut WindowAccess,
-    hart_id: usize,
-    module: &ModuleContext,
-    tables: &ModuleTables,
-    context: &Context,
-    virtual_addr: usize,
-    number_of_pages: usize,
-    target: usize,
-) -> Result<(), tau::FreeError> {
-    if target != 0 && !tables.loader_authority {
-        return Err(tau::FreeError::AccessDenied);
-    }
-    if !valid_pages(virtual_addr, number_of_pages) {
-        return Err(tau::FreeError::AlreadyFree);
-    }
-    if target == 0 {
-        if module.overlaps_stem(virtual_addr, number_of_pages) {
-            return Err(if tables.loader_authority {
-                tau::FreeError::AlreadyFree
-            } else {
-                tau::FreeError::AccessDenied
-            });
-        }
-        let root = Window::current_root();
-        if !tables.loader_authority && !window.range_owned(root, virtual_addr, number_of_pages) {
-            return Err(tau::FreeError::AccessDenied);
-        }
-        for i in 0..number_of_pages {
-            let _ = window.unmap(root, virtual_addr + i * 4096, |page| {
-                context.free(hart_id, page)
-            });
-        }
-        return Ok(());
-    }
-    let descriptor =
-        loading::descriptor_page(context, target).map_err(|_| tau::FreeError::InvalidAddress)?;
-    let dep = window.read_descriptor(descriptor);
-    let Some(root_index) = dep.root_index else {
-        return Err(tau::FreeError::InvalidAddress);
-    };
-    let root_index = root_index as usize;
-    let last = virtual_addr + number_of_pages * 4096 - 1;
-    if (virtual_addr >> 30) & 511 != root_index || (last >> 30) & 511 != root_index {
-        return Err(tau::FreeError::InvalidAddress);
-    }
-    for i in 0..number_of_pages {
-        let _ = window.unmap_stem(dep.stem, None, virtual_addr + i * 4096, |page| {
-            context.free(hart_id, page)
-        });
-    }
-    Ok(())
-}
-
-pub fn alloc_pages(
-    window: &mut WindowAccess,
-    hart_id: usize,
-    context: &Context,
-    physical_addr: Option<NonZero<usize>>,
-    virtual_addr: usize,
-    number_of_pages: usize,
-    flags: [u8; 5],
-) -> Result<(), tau::AllocError> {
-    if !valid_pages(virtual_addr, number_of_pages)
-        || physical_addr.is_some_and(|p| {
-            p.get() & 0xfff != 0
-                || number_of_pages
-                    .checked_mul(4096)
-                    .and_then(|n| p.get().checked_add(n))
-                    .is_none()
-        })
-    {
-        return Err(tau::AllocError::InvalidAddress);
-    }
-    let mapping = Mapping {
-        addr_virtual: virtual_addr,
-        virtual_pages: number_of_pages,
-        addr_physical: physical_addr,
-        physical_pages: usize::from(physical_addr.is_some()) * number_of_pages,
-        flags,
-    };
-
-    let root = Window::current_root();
-    if let Err(error) = window.map(root, mapping, || context.page(hart_id)) {
-        // Roll back pages allocated by this failed request; source physical
-        // mappings are borrowed and are never returned to the allocator.
-        if !matches!(
-            error,
-            llfree::Error::Address | llfree::Error::InvalidArgument
-        ) {
-            for i in 0..number_of_pages {
-                let _ = window.unmap(root, virtual_addr + i * 4096, |page| {
-                    context.free(hart_id, page)
-                });
-            }
-        }
-        return Err(match error {
-            llfree::Error::Address => tau::AllocError::InvalidAddress,
-            llfree::Error::InvalidArgument => tau::AllocError::AlreadyAllocated,
-            _ => tau::AllocError::OutOfMemory,
-        });
-    }
-    Ok(())
 }

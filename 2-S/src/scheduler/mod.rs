@@ -5,7 +5,7 @@
 //! Single-active-hart scheduling. Thread state stays in the global __SCHEDULER
 //! mapping; the FIFO holds thread IDs.
 
-use super::{csr, sbi, vmem, waiting, loading, module, state::Context};
+use super::{space, csr, sbi, matter, state::Context};
 
 mod thread;
 mod runtime;

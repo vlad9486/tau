@@ -22,7 +22,7 @@ use elf::{
 
 use supervisor::{
     llfree::{Allocator, Error, FrameId, Lower},
-    sbi, state, vmem,
+    sbi, state, space,
 };
 
 #[cfg(all(not(debug_assertions), feature = "panic-never"))]
@@ -250,10 +250,10 @@ fn init_memory(
     l1[(st.addr() >> 21) & 0o777] = (l2.as_mut_ptr().addr() >> 2) + 1;
     // assume doesn't cross 2MiB boundary
     for i in (st.addr() >> 12)..(ro.addr() >> 12) {
-        l2[i & 0o777] = (i << 10) + vmem::flags_new(b"r-x--");
+        l2[i & 0o777] = (i << 10) + space::flags_new(b"r-x--");
     }
     for i in (ro.addr() >> 12)..(hp.addr() >> 12) {
-        l2[i & 0o777] = (i << 10) + vmem::flags_new(b"r----");
+        l2[i & 0o777] = (i << 10) + space::flags_new(b"r----");
     }
 
     // memory map for SV39:
@@ -279,14 +279,14 @@ fn init_memory(
     // Identical per-hart window and stack in every runtime root.
     l1[0o000] = (l2.as_mut_ptr().addr() >> 2) + 1 + 32;
     // loop
-    l2[0o000] = (l2.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
+    l2[0o000] = (l2.as_mut_ptr().addr() >> 2) + space::flags_new(b"rw---");
 
     let hart_mmu = gfp();
-    l2[vmem::HART_SLOT] = (hart_mmu.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
+    l2[space::HART_SLOT] = (hart_mmu.as_mut_ptr().addr() >> 2) + space::flags_new(b"rw---");
 
     // STATUS: size of the kernel stack is 1 page, increase if needed
     let stack = gfp();
-    l2[vmem::STACK_SLOT] = (stack.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw---");
+    l2[space::STACK_SLOT] = (stack.as_mut_ptr().addr() >> 2) + space::flags_new(b"rw---");
 
     // The supervisor allocates and maps the module context and shared scheduler branches at startup.
 
@@ -294,12 +294,12 @@ fn init_memory(
     // the branch of the supervisor image
     l1[0o003] = (l2.as_mut_ptr().addr() >> 2) + 1;
     let context_page = gfp();
-    l2[0o000] = (context_page.as_mut_ptr().addr() >> 2) + vmem::flags_new(b"rw--g");
+    l2[0o000] = (context_page.as_mut_ptr().addr() >> 2) + space::flags_new(b"rw--g");
 
     for p in 0..SUPERVISOR_SIZE {
         let virtual_page = 0x601 + p;
         l2[virtual_page % 0o1000] =
-            ((st.addr() + ((SUPERVISOR_OFFSET + p) << 12)) >> 2) + vmem::flags_new(b"r-x-g");
+            ((st.addr() + ((SUPERVISOR_OFFSET + p) << 12)) >> 2) + space::flags_new(b"r-x-g");
     }
     for p in 0..pages {
         let virtual_page = 0x6e0 + p;
@@ -308,16 +308,16 @@ fn init_memory(
             l2 = gfp();
             *q = (l2.as_mut_ptr().addr() >> 2) + 1;
         }
-        l2[virtual_page % 0o1000] = ((ptr.addr() + (p << 12)) >> 2) + vmem::flags_new(b"rw--g");
+        l2[virtual_page % 0o1000] = ((ptr.addr() + (p << 12)) >> 2) + space::flags_new(b"rw--g");
     }
 
     let boot = load_system_elf(hart_id, &allocator, st, l0)?;
     let allocator = unsafe {
-        Allocator::new(frames, st.with_addr(vmem::ALLOCATOR).cast())
+        Allocator::new(frames, st.with_addr(space::ALLOCATOR).cast())
             .ok_or(Error::Memory)?
             .into_lower()
     };
-    let bootstrap_root = vmem::Root::sv39(root_table, 0);
+    let bootstrap_root = space::Root::sv39(root_table, 0);
     unsafe {
         context_page
             .as_mut_ptr()
@@ -370,13 +370,13 @@ fn load_system_elf(
         if l0[vpn2] == 0 {
             let FrameId(frame) = allocator.alloc(hart_id, 0)?;
             let page = unsafe { &mut *st.add(frame) }.write([0; 512]);
-            l0[vpn2] = (page.as_mut_ptr().addr() >> 2) | 1 | vmem::OWNED;
+            l0[vpn2] = (page.as_mut_ptr().addr() >> 2) | 1 | space::OWNED;
         }
         let l1 = unsafe { &mut *st.with_addr((l0[vpn2] >> 10) << 12).cast::<[usize; 512]>() };
         if l1[vpn1] == 0 {
             let FrameId(frame) = allocator.alloc(hart_id, 0)?;
             let page = unsafe { &mut *st.add(frame) }.write([0; 512]);
-            l1[vpn1] = (page.as_mut_ptr().addr() >> 2) | 1 | vmem::OWNED;
+            l1[vpn1] = (page.as_mut_ptr().addr() >> 2) | 1 | space::OWNED;
         }
         let l2 = unsafe { &mut *st.with_addr((l1[vpn1] >> 10) << 12).cast::<[usize; 512]>() };
         if l2[vpn0] != 0 {
@@ -384,7 +384,7 @@ fn load_system_elf(
         }
         let FrameId(frame) = allocator.alloc(hart_id, 0)?;
         let page = unsafe { &mut *st.add(frame) }.write([0; 512]);
-        l2[vpn0] = (page.as_mut_ptr().addr() >> 2) | vmem::flags_new(flags) | vmem::OWNED;
+        l2[vpn0] = (page.as_mut_ptr().addr() >> 2) | space::flags_new(flags) | space::OWNED;
         Ok(page)
     };
 
