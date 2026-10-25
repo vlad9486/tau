@@ -117,10 +117,7 @@ pub unsafe fn init(
     let stack_pages = context.boot.stack_pages;
     let satp = Window::current_root();
     let stem = (entry >> 30) & 511;
-    let wait_table = WaitTable::prepare(
-        window,
-        context,
-        hart_id,
+    let wait_table = WaitTable::validate(
         stem,
         context.boot.wait_slots_addr,
         context.boot.wait_slots_count,

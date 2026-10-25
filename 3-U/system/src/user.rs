@@ -59,9 +59,9 @@ fn measure_roundtrips(shared: &UnsafeCell<Shared>, slot: u16) {
     let hot = &mut samples[1..];
     let invoke_mean = hot.iter().map(|(x, _)| *x as f32).sum::<f32>() / (hot.len() as f32);
     let respond_mean = hot.iter().map(|(_, x)| *x as f32).sum::<f32>() / (hot.len() as f32);
-    hot.sort_by(|(lhs, _), (rhs, _)| lhs.cmp(rhs));
+    hot.sort_by_key(|(x, _)| *x);
     let invoke_median = hot[hot.len() / 2].0;
-    hot.sort_by(|(_, lhs), (_, rhs)| lhs.cmp(rhs));
+    hot.sort_by_key(|(_, x)| *x);
     let respond_median = hot[hot.len() / 2].1;
     unsafe { &mut *shared.get() }.write(format_args!(
         "roundtrip invoke mean: {invoke_mean}, median: {invoke_median}"

@@ -367,12 +367,12 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
     let mut window = unsafe { space::WindowAccess::new(&raw const __WINDOW) };
     let hart_id = window.hart().hart_id;
     if cause == INTERRUPT_BIT | SUPERVISOR_TIMER && scheduler.active() {
-        let selected = scheduler::preempt(&mut window, scheduler);
+        let selected = scheduler::preempt(&mut window, local.module, scheduler);
         resume_scheduled(&window, local, selected)
     } else if cause == INTERRUPT_BIT | SUPERVISOR_EXTERNAL && scheduler.active() {
         csr::rc!("sie", 1 << 9);
-        scheduler::notify_hardware_interrupt(&mut window, scheduler, hart_id);
-        let selected = scheduler::preempt(&mut window, scheduler);
+        scheduler::notify_hardware_interrupt(&mut window, local.module, scheduler, hart_id);
+        let selected = scheduler::preempt(&mut window, local.module, scheduler);
         resume_scheduled(&window, local, selected)
     } else if cause & INTERRUPT_BIT == 0 {
         if !local.module.header.pure {
@@ -431,8 +431,8 @@ fn respond_exit() -> ! {
     let hart_id = window.hart().hart_id;
     let local = unsafe { local_access() };
     let scheduler = unsafe { &mut *UnsafeCell::raw_get(&raw const __SCHEDULER) };
-    scheduler::exit(&mut window, scheduler, hart_id);
-    let selected = scheduler::dispatch(&mut window, scheduler, hart_id);
+    scheduler::exit(&mut window, local.module, scheduler, hart_id);
+    let selected = scheduler::dispatch(&mut window, local.module, scheduler, hart_id);
     resume_scheduled(&window, local, selected)
 }
 
@@ -524,7 +524,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                     msg[1] = event.encode();
                 }
                 Ok(None) => {
-                    let selected = scheduler::dispatch(window, scheduler, hart_id);
+                    let selected = scheduler::dispatch(window, local.module, scheduler, hart_id);
                     resume_scheduled(window, local, selected)
                 }
                 Err(error) => {
@@ -553,8 +553,8 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             }
         }
         Ok(tau::Call::Exit) => {
-            scheduler::exit(window, scheduler, hart_id);
-            let selected = scheduler::dispatch(window, scheduler, hart_id);
+            scheduler::exit(window, local.module, scheduler, hart_id);
+            let selected = scheduler::dispatch(window, local.module, scheduler, hart_id);
             resume_scheduled(window, local, selected)
         }
         Ok(tau::Call::AllocPhysical { order, zone: _ }) => {

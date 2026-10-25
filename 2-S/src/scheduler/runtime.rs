@@ -14,8 +14,8 @@ use tau::Event;
 
 use super::{
     sbi, csr,
-    thread::{ActiveWait, Phase, Resume, ThreadState},
-    matter::{WaitRecord, WaitTable},
+    thread::{Phase, Resume, ThreadState},
+    matter::{WaitRecord, Module},
     Context,
     space::{self, Mapping, Root, Window, WindowAccess},
 };
@@ -31,8 +31,8 @@ pub struct Scheduler {
 }
 
 pub struct InterruptTarget {
+    pub module: usize,
     pub thread_id: usize,
-    pub table: WaitTable,
     pub slot: usize,
 }
 
@@ -187,17 +187,17 @@ impl State {
 
     pub(super) fn complete(
         &mut self,
-        window: &mut WindowAccess,
+        module: &mut Module,
         thread_id: usize,
         mut thread: ThreadState,
-        wait: ActiveWait,
         mut slot: WaitRecord,
         event: Event,
         high_priority: bool,
     ) {
         slot.thread_id = 0;
         slot.sequence = 0;
-        unsafe { wait.table.write(window, wait.slot, slot) };
+        let wait = unsafe { thread.wait.take().unwrap_unchecked() };
+        unsafe { module.write_wait(wait.slot, slot) };
         let enqueue = thread.complete([0, event.encode(), 0, 0, 0, 0]);
         self.set_thread(thread_id, thread);
         unsafe { self.set_deadline(thread_id - 1, 0) };
@@ -213,33 +213,39 @@ impl State {
     fn complete_wait(
         &mut self,
         window: &mut WindowAccess,
+        module: &mut Module,
         thread_id: usize,
         event: Event,
         high_priority: bool,
     ) -> bool {
-        let Some(mut thread) = self.take_thread(thread_id) else {
+        let Some(thread) = self.take_thread(thread_id) else {
             return false;
         };
         let Some(wait) = &thread.wait else {
             self.set_thread(thread_id, thread);
             return false;
         };
-        let slot = unsafe { wait.table.read(window, wait.slot) };
+        let target_module = if wait.module == module.header.descriptor.physical {
+            module
+        } else {
+            window.map_module(wait.module)
+        };
+        let slot = unsafe { target_module.read_wait(wait.slot) };
         if slot.thread_id == thread_id && slot.sequence == wait.sequence {
-            let wait = unsafe { thread.wait.take().unwrap_unchecked() };
-            self.complete(window, thread_id, thread, wait, slot, event, high_priority);
+            self.complete(target_module, thread_id, thread, slot, event, high_priority);
         } else {
             self.set_thread(thread_id, thread);
         }
+
         true
     }
 
-    fn expire(&mut self, window: &mut WindowAccess) {
+    fn expire(&mut self, window: &mut WindowAccess, module: &mut Module) {
         let time = now();
         for index in 0..self.count {
             let deadline = unsafe { self.deadline(index) };
             if deadline != 0 && deadline <= time {
-                self.complete_wait(window, index + 1, Event::Timeout, false);
+                self.complete_wait(window, module, index + 1, Event::Timeout, false);
             }
         }
     }
@@ -331,6 +337,7 @@ pub struct Dispatch {
 
 pub fn notify_hardware_interrupt(
     window: &mut WindowAccess,
+    module: &mut Module,
     scheduler: &mut Scheduler,
     hart_id: usize,
 ) {
@@ -338,36 +345,37 @@ pub fn notify_hardware_interrupt(
     let Some(target) = scheduler
         .interrupt_targets
         .get(hart_id)
-        .map(Option::as_ref)
-        .flatten()
+        .and_then(Option::as_ref)
     else {
         return;
     };
+    let target_module_addr = target.module;
+    let target_slot = target.slot;
     let thread_id = target.thread_id;
 
     let event = Event::Notified { arg: 0 };
-    if !scheduler.complete_wait(window, thread_id, event, true) {
-        let target = unsafe {
-            scheduler
-                .interrupt_targets
-                .get(hart_id)
-                .map(Option::as_ref)
-                .flatten()
-                .unwrap_unchecked()
+    if !scheduler.complete_wait(window, module, thread_id, event, true) {
+        let target_module = if target_module_addr == module.header.descriptor.physical {
+            module
+        } else {
+            window.map_module(target_module_addr)
         };
-
-        let mut slot = unsafe { target.table.read(window, target.slot) };
+        let mut slot = unsafe { target_module.read_wait(target_slot) };
         slot.pending = true;
-        unsafe { target.table.write(window, target.slot, slot) };
+        unsafe { target_module.write_wait(target_slot, slot) };
     }
     if scheduler.active {
         scheduler.program();
     }
 }
 
-pub fn preempt(window: &mut WindowAccess, scheduler: &mut Scheduler) -> Dispatch {
+pub fn preempt(
+    window: &mut WindowAccess,
+    module: &mut Module,
+    scheduler: &mut Scheduler,
+) -> Dispatch {
     let mut scheduler = scheduler.lock();
-    scheduler.expire(window);
+    scheduler.expire(window, module);
     let length = scheduler.length;
     let id = scheduler.running;
     let thread = scheduler.thread_state_mut(id);
@@ -395,11 +403,16 @@ pub fn preempt(window: &mut WindowAccess, scheduler: &mut Scheduler) -> Dispatch
 /// Interrupts remain disabled between committing departure and installing the
 /// selected root. An idle hart waits with SIE clear and STIE enabled: WFI may
 /// wake for a pending timer without entering the user trap entry from S-mode.
-pub fn dispatch(window: &mut WindowAccess, scheduler: &mut Scheduler, hart_id: usize) -> Dispatch {
+pub fn dispatch(
+    window: &mut WindowAccess,
+    module: &mut Module,
+    scheduler: &mut Scheduler,
+    hart_id: usize,
+) -> Dispatch {
     loop {
         {
             let mut scheduler = scheduler.lock();
-            scheduler.expire(window);
+            scheduler.expire(window, module);
             if scheduler.running != 0 {
                 let id = scheduler.running;
                 let thread = scheduler.thread_state_mut(id);
@@ -426,7 +439,7 @@ pub fn dispatch(window: &mut WindowAccess, scheduler: &mut Scheduler, hart_id: u
         unsafe { core::arch::asm!("wfi", options(nostack)) };
         if csr::r!("sip") & (1 << 9) != 0 {
             csr::rc!("sie", 1 << 9);
-            notify_hardware_interrupt(window, scheduler, hart_id);
+            notify_hardware_interrupt(window, module, scheduler, hart_id);
         }
     }
 }

@@ -114,16 +114,16 @@ impl fmt::Display for Hart {
 #[repr(C)]
 #[rustfmt::skip]
 pub struct Window {
-    table: UnsafeCell<[usize; 512]>,                              // 1 page  (slot 0: recursive L2)
-    pte: UnsafeCell<[usize; 512]>,                                // 1 page  (slot 1: page-table walk)
-    page: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 2: zeroing / segment copy)
-    _reserved3: UnsafeCell<MaybeUninit<Page>>,                    // 1 page  (slot 3: reserved)
+    table: UnsafeCell<[usize; 512]>,                                // 1 page  (slot 0: recursive L2)
+    pte: UnsafeCell<[usize; 512]>,                                  // 1 page  (slot 1: page-table walk)
+    page: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 2: zeroing / segment copy)
+    _reserved3: UnsafeCell<MaybeUninit<Page>>,                      // 1 page  (slot 3: reserved)
     descriptor: UnsafeCell<MaybeUninit<Padded<ModuleDescriptor>>>,  // 1 page  (slot 4: foreign module tables page 0 / descriptor)
-    wait: UnsafeCell<MaybeUninit<Page>>,                          // 1 page  (slot 5: WaitRecord / wait slot)
-    hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,                  // 1 page  (slot 6: permanent per-hart MMU)
-    module: UnsafeCell<MaybeUninit<Module>>,                // 5 pages (slots 7..12: foreign Module)
-    _reserved: UnsafeCell<MaybeUninit<[Page; 499]>>,              // unused window slots
-    stack: UnsafeCell<MaybeUninit<Page>>,                         // 1 page  (slot 511: supervisor stack)
+    wait: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 5: WaitRecord / wait slot)
+    hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,                    // 1 page  (slot 6: permanent per-hart MMU)
+    module: UnsafeCell<MaybeUninit<Module>>,                        // 6 pages (slots 7..13: foreign Module)
+    _reserved: UnsafeCell<MaybeUninit<[Page; 498]>>,                // unused window slots
+    stack: UnsafeCell<MaybeUninit<Page>>,                           // 1 page  (slot 511: supervisor stack)
 }
 
 const PTE_SLOT: usize = mem::offset_of!(Window, pte) / PAGE;

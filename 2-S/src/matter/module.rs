@@ -109,28 +109,20 @@ pub struct ModuleDescriptor {
     pub physical: usize,
 }
 
+/// Range in userspace module's virtual memory
 #[repr(C)]
 pub struct WaitTable {
     pub base: usize,
     pub count: usize,
-    records: usize,
-    order: u32,
 }
 
 impl WaitTable {
-    pub const EMPTY: Self = Self {
-        base: 0,
-        count: 0,
-        records: 0,
-        order: 0,
-    };
+    pub const EMPTY: Self = Self { base: 0, count: 0 };
 
     pub fn unsafe_clone(&self) -> Self {
         WaitTable {
             base: self.base,
             count: self.count,
-            records: self.records,
-            order: self.order,
         }
     }
 }
@@ -162,12 +154,17 @@ pub struct Module {
     pub header: ModuleHeader,
     // Slot zero is the free-list head. Free entries contain the next slot;
     // occupied entries contain a tagged physical descriptor address.
-    dependencies: [AtomicUsize; 0x800],
+    dependencies: [AtomicUsize; Self::END],
+    wait_table: [WaitRecord; Self::WAIT_SIZE],
+    // TODO:
+    // wait_slots: [[u64; 8]; Self::WAIT_SIZE],
 }
 
 impl Module {
     const END: usize = 0x800;
     const OCCUPIED: usize = 1 << (usize::BITS - 1);
+
+    pub const WAIT_SIZE: usize = 0x80;
 
     /// Initialize the module's shared tables once, before exposing its contexts.
     /// Write in place to avoid a large temporary on the supervisor stack.
@@ -188,6 +185,10 @@ impl Module {
         let dependencies = unsafe { ptr::addr_of_mut!((*this).dependencies).cast::<AtomicUsize>() };
         for index in 0..Self::END {
             unsafe { dependencies.add(index).write(AtomicUsize::new(index + 1)) };
+        }
+        let wait_table = unsafe { ptr::addr_of_mut!((*this).wait_table).cast::<WaitRecord>() };
+        for index in 0..Self::WAIT_SIZE {
+            unsafe { wait_table.add(index).write(WaitRecord::default()) };
         }
     }
 
@@ -246,6 +247,26 @@ impl Module {
         let last_index = ((last >> 30) & 511) as u16;
         first_index <= index && index <= last_index
     }
+
+    /// Read one record through a temporary physical alias.
+    ///
+    /// # Safety
+    /// `index < count` must hold. The scheduler lock must
+    /// protect record access.
+    pub unsafe fn read_wait(&self, index: usize) -> WaitRecord {
+        debug_assert!(index < self.header.wait_table.count);
+        unsafe { *self.wait_table.get_unchecked(index) }
+    }
+
+    /// Write one record through a temporary physical alias.
+    ///
+    /// # Safety
+    /// The table must be retained and `index < count`. The scheduler lock must
+    /// protect record access; no alias reference may survive this operation.
+    pub unsafe fn write_wait(&mut self, index: usize, record: WaitRecord) {
+        debug_assert!(index < self.header.wait_table.count);
+        unsafe { *self.wait_table.get_unchecked_mut(index) = record };
+    }
 }
 
 struct DependencyGuard<'a>(&'a AtomicBool);
@@ -267,21 +288,19 @@ pub struct WaitRecord {
 }
 
 impl WaitTable {
-    pub fn prepare(
-        window: &mut WindowAccess,
-        context: &Context,
-        hart_id: usize,
-        stem: usize,
-        base: usize,
-        count: usize,
-    ) -> Result<Self, tau::ModuleError> {
+    pub fn validate(stem: usize, base: usize, count: usize) -> Result<Self, tau::ModuleError> {
         if count == 0 {
             return Ok(Self::EMPTY);
         }
         let bytes = count
             .checked_mul(64)
             .ok_or(tau::ModuleError::InvalidImage)?;
-        if base == 0 || count == 0 || base & 63 != 0 || !space::user_range(base, bytes) {
+        if base == 0
+            || count == 0
+            || count > Module::WAIT_SIZE
+            || base & 63 != 0
+            || !space::user_range(base, bytes)
+        {
             return Err(tau::ModuleError::InvalidImage);
         }
         let end = base
@@ -290,33 +309,7 @@ impl WaitTable {
         if (base >> 30) & 511 != stem || ((end - 1) >> 30) & 511 != stem {
             return Err(tau::ModuleError::InvalidImage);
         }
-        let storage = count
-            .checked_mul(size_of::<WaitRecord>())
-            .ok_or(tau::ModuleError::InvalidImage)?;
-        let pages = storage
-            .div_ceil(space::PAGE)
-            .checked_next_power_of_two()
-            .ok_or(tau::ModuleError::OutOfMemory)?;
-        let order = pages.ilog2();
-        let records = context
-            .block(hart_id, order)
-            .map_err(|_| tau::ModuleError::OutOfMemory)?;
-        for page in 0..pages {
-            window.page_mut(records + page * space::PAGE).fill(0);
-        }
-        Ok(Self {
-            base,
-            count,
-            records,
-            order,
-        })
-    }
-
-    /// Used only when unpublished module construction rolls back.
-    pub fn release(self, context: &Context, hart: usize) {
-        if self.records != 0 {
-            let _ = context.free_block(hart, self.records, self.order);
-        }
+        Ok(Self { base, count })
     }
 
     pub fn index(&self, pointer: usize) -> Result<usize, tau::WaitError> {
@@ -356,32 +349,6 @@ impl WaitTable {
             _ => Err(tau::WaitError::InvalidWaiter),
         }
     }
-
-    /// Read one record through a temporary physical alias.
-    ///
-    /// # Safety
-    /// The table must be retained and `index < count`. The scheduler lock must
-    /// protect record access. Records fit wholly within individual backing pages.
-    pub unsafe fn read(&self, window: &mut WindowAccess, index: usize) -> WaitRecord {
-        debug_assert!(index < self.count);
-        let address = self.records + index * size_of::<WaitRecord>();
-        let page = window.wait_mut(address & !(space::PAGE - 1));
-        let offset = address & (space::PAGE - 1);
-        unsafe { ptr::read(page[offset..].as_ptr().cast::<WaitRecord>()) }
-    }
-
-    /// Write one record through a temporary physical alias.
-    ///
-    /// # Safety
-    /// The table must be retained and `index < count`. The scheduler lock must
-    /// protect record access; no alias reference may survive this operation.
-    pub unsafe fn write(&self, window: &mut WindowAccess, index: usize, record: WaitRecord) {
-        debug_assert!(index < self.count);
-        let address = self.records + index * size_of::<WaitRecord>();
-        let page = window.wait_mut(address & !(space::PAGE - 1));
-        let offset = address & (space::PAGE - 1);
-        unsafe { ptr::write(page[offset..].as_mut_ptr().cast::<WaitRecord>(), record) };
-    }
 }
 
 pub fn create_module(
@@ -402,27 +369,15 @@ pub fn create_module(
     {
         return Err(tau::ModuleError::InvalidImage);
     }
-    let wait_table = WaitTable::prepare(
-        window,
-        context,
-        hart_id,
-        root_index,
-        wait_slots_addr,
-        wait_slots_count,
-    )?;
-    let stem = match window.new_page(|| context.page(hart_id)) {
-        Ok(page) => page,
-        Err(_e) => {
-            wait_table.release(context, hart_id);
-            return Err(tau::ModuleError::OutOfMemory);
-        }
-    };
+    let wait_table = WaitTable::validate(root_index, wait_slots_addr, wait_slots_count)?;
+    let stem = window
+        .new_page(|| context.page(hart_id))
+        .map_err(|_| tau::ModuleError::OutOfMemory)?;
     let tables_pages = size_of::<Module>().div_ceil(space::PAGE);
     let physical = match context.block(hart_id, tables_pages.next_power_of_two().ilog2()) {
         Ok(block) => block,
         Err(_e) => {
             let _ = context.free(hart_id, stem);
-            wait_table.release(context, hart_id);
             return Err(tau::ModuleError::OutOfMemory);
         }
     };

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use super::{space::Root, matter::WaitTable};
+use super::space::Root;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Phase {
@@ -22,7 +22,6 @@ pub enum Resume {
 
 pub(super) struct ActiveWait {
     pub module: usize,
-    pub table: WaitTable,
     pub slot: usize,
     pub sequence: usize,
 }
