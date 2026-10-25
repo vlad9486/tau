@@ -55,6 +55,17 @@ impl SpawnError {
         }
     }
 }
+
+impl From<SpawnError> for ModuleError {
+    #[inline]
+    fn from(error: SpawnError) -> Self {
+        match error {
+            SpawnError::OutOfMemory => Self::OutOfMemory,
+            SpawnError::InvalidEntry => Self::InvalidImage,
+            SpawnError::NoSlots => Self::NoSlots,
+        }
+    }
+}
 /// Construction/invocation status. Module authority is granted by bootstrap,
 /// never inferred from an ELF's name or inherited from the invoking thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

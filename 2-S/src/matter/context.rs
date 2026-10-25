@@ -78,7 +78,6 @@ impl ModuleContext {
     }
 }
 
-#[inline(always)]
 pub fn invoke(
     window: &mut WindowAccess,
     context: &Context,
@@ -89,42 +88,41 @@ pub fn invoke(
     let descriptor = module
         .get_dependency(slot)
         .ok_or(tau::ModuleError::InvalidDependency)?;
-    let (root, entry) = construct(window, context, module_context.header.root, descriptor)?;
+    let desc = window.read_module_descriptor(descriptor);
+    let root = spawn(window, context, desc)?;
     module_context.retain_dependency(slot, root);
-    Ok((root, entry))
+    Ok((root, desc.entry))
 }
 
-// Keep the hart-ID read and allocation code off the warm invocation path.
-// Inlining lets LLVM hoist the thread load ahead of the cached-root check.
-#[cold]
-#[inline(never)]
-fn construct(
+/// Construct a fresh module context without publishing it. Successful storage is
+/// retained until reboot; all failed constructions reclaim their private pages.
+pub fn spawn(
     window: &mut WindowAccess,
     context: &Context,
-    caller: space::Root,
-    descriptor: usize,
-) -> Result<(space::Root, usize), tau::ModuleError> {
+    desc: ModuleDescriptor,
+) -> Result<space::Root, tau::SpawnError> {
+    let caller = Window::current_root();
     let hart = window.hart().hart_id;
-    let desc = window.read_module_descriptor(descriptor);
-    let Some(root_index) = desc.root_index else {
-        return Err(tau::ModuleError::InvalidImage);
+    let Some(index) = desc.root_index else {
+        return Err(tau::SpawnError::InvalidEntry);
     };
-    let root_index = root_index as usize;
-    if (desc.entry >> 30) & 511 != root_index
+    let index = index as usize;
+    if desc.entry & 1 != 0
+        || (desc.entry >> 30) & 511 != index
         || !window
             .resolve_stem(desc.stem, desc.entry)
             .is_some_and(|(_, flags)| flags & 26 == 26)
     {
-        return Err(tau::ModuleError::InvalidImage);
+        return Err(tau::SpawnError::InvalidEntry);
     }
     let root = window
         .create(0, || context.page(hart))
-        .map_err(|_| tau::ModuleError::OutOfMemory)?;
+        .map_err(|_| tau::SpawnError::OutOfMemory)?;
     let result = (|| {
-        window.attach(root, root_index, desc.stem);
+        window.attach(root, index, desc.stem);
         window
             .supervisor_mappings(caller, root, || context.page(hart))
-            .map_err(|_| tau::ModuleError::OutOfMemory)?;
+            .map_err(|_| tau::SpawnError::OutOfMemory)?;
         for mapping in [
             Mapping {
                 addr_virtual: (desc.stack_pages * space::PAGE).wrapping_neg(),
@@ -148,76 +146,9 @@ fn construct(
         ] {
             window
                 .map(root, mapping, || context.page(hart))
-                .map_err(|_| tau::ModuleError::OutOfMemory)?;
+                .map_err(|_| tau::SpawnError::OutOfMemory)?;
         }
-        let tag = window.allocate_tag().ok_or(tau::ModuleError::OutOfMemory)?;
-        let root = space::Root::sv39(root.page(), tag);
-        Ok((root, desc.entry))
-    })();
-    if result.is_err() {
-        let _ = window.destroy(root, |page| context.free(hart, page));
-    }
-    result
-}
-
-/// Construct a same-module thread without publishing it. Successful storage is
-/// retained until reboot; all failed constructions reclaim their private pages.
-pub fn spawn(
-    window: &mut WindowAccess,
-    context: &Context,
-    desc: ModuleDescriptor,
-) -> Result<space::Root, tau::SpawnError> {
-    use tau::SpawnError;
-    let caller = Window::current_root();
-    let hart = window.hart().hart_id;
-    let Some(index) = desc.root_index else {
-        return Err(SpawnError::InvalidEntry);
-    };
-    let index = index as usize;
-    if desc.entry & 1 != 0 || (desc.entry >> 30) & 511 != index {
-        return Err(SpawnError::InvalidEntry);
-    }
-    if !window
-        .resolve_stem(desc.stem, desc.entry)
-        .is_some_and(|(_, flags)| flags & 26 == 26)
-    {
-        return Err(SpawnError::InvalidEntry);
-    }
-    let root = window
-        .create(0, || context.page(hart))
-        .map_err(|_| SpawnError::OutOfMemory)?;
-    let result = (|| {
-        window.attach(root, index, desc.stem);
-        window
-            .supervisor_mappings(caller, root, || context.page(hart))
-            .map_err(|_| SpawnError::OutOfMemory)?;
-        let module_physical = desc.physical;
-        for mapping in [
-            Mapping {
-                addr_virtual: (desc.stack_pages * space::PAGE).wrapping_neg(),
-                virtual_pages: desc.stack_pages,
-                flags: *b"rw-u-",
-                ..Mapping::default()
-            },
-            Mapping {
-                addr_virtual: space::MODULE_CONTEXT,
-                virtual_pages: size_of::<ModuleContext>().div_ceil(space::PAGE),
-                flags: *b"rw---",
-                ..Mapping::default()
-            },
-            Mapping {
-                addr_virtual: space::MODULE,
-                virtual_pages: size_of::<Module>().div_ceil(space::PAGE),
-                addr_physical: NonZero::new(module_physical),
-                physical_pages: size_of::<Module>().div_ceil(space::PAGE),
-                flags: *b"rw---",
-            },
-        ] {
-            window
-                .map(root, mapping, || context.page(hart))
-                .map_err(|_| SpawnError::OutOfMemory)?;
-        }
-        let tag = window.allocate_tag().ok_or(SpawnError::OutOfMemory)?;
+        let tag = window.allocate_tag().ok_or(tau::SpawnError::OutOfMemory)?;
         let root = space::Root::sv39(root.page(), tag);
         Ok(root)
     })();
