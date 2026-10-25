@@ -27,7 +27,9 @@ pub fn spawn(
         return Err(SpawnError::NoSlots);
     }
     let id = scheduler.count + 1;
-    let root = matter::spawn(window, module, context, entry)?;
+    let mut desc = module.header.descriptor;
+    desc.entry = entry;
+    let root = matter::spawn(window, context, desc)?;
     let mut message = message;
     message[0] = 0;
     let thread = ThreadState::runnable(root, message, Resume::Entry(entry));

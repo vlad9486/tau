@@ -3,84 +3,14 @@
 // See LICENSE for the full license text.
 
 use core::{
-    hint, mem,
-    num::NonZero,
-    ptr,
+    hint, ptr,
     sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 
 use super::{
-    space::{self, Window, WindowAccess, Mapping},
+    space::{self, WindowAccess},
     Context,
 };
-
-/// Supervisor-only state private to one single-threaded module context.
-/// The saved registers and PC resume this context after a dependency returns.
-/// The caller's satp implicitly links invocations; no invocation list is needed.
-/// Each dependency slot retains its own destination satp after first use.
-#[repr(C, align(4096))]
-pub struct ModuleContextHeader {
-    /// saved execution context
-    pub registers: [usize; 32],
-    /// saved pc where userspace code is executing
-    pub sepc: usize,
-    /// address space root
-    pub root: space::Root,
-    /// address space root of the caller, is `None` for the `system` module
-    caller: Option<space::Root>,
-    /// cached entry point of the module
-    pub entry: usize,
-}
-
-/// Module context is similar to a thread, but has its own address space
-#[repr(C, align(4096))]
-pub struct ModuleContext {
-    pub header: ModuleContextHeader,
-    /// cached address space roots of dependencies
-    dependencies: [Option<space::Root>; 0x800],
-}
-
-// The complete context fits before __MODULE.
-const _: () = assert!(size_of::<ModuleContext>() <= space::MODULE - space::MODULE_CONTEXT);
-
-impl ModuleContext {
-    /// Initialize a context whose backing pages have already been zeroed.
-    ///
-    /// # Safety
-    /// The first page at `this` must be writable, aligned, and zeroed, and all
-    /// remaining pages of `Self` must already be zeroed.
-    pub unsafe fn init_zeroed(this: *mut Self, root: space::Root, entry: usize) {
-        const {
-            assert!(mem::offset_of!(Self, dependencies) <= space::PAGE);
-            assert!(mem::size_of::<Option<space::Root>>() == mem::size_of::<usize>());
-        }
-        unsafe {
-            ptr::addr_of_mut!((*this).header.sepc).write(entry);
-            ptr::addr_of_mut!((*this).header.entry).write(entry);
-            ptr::addr_of_mut!((*this).header.root).write(root);
-        }
-    }
-
-    /// Set linkage and PC for a fresh invocation, retaining dependency roots.
-    /// Saved registers remain stale until the next user trap; fresh entry must
-    /// clear the hardware registers rather than restore this saved state.
-    pub fn enter(&mut self, caller: space::Root) {
-        self.header.sepc = self.header.entry;
-        self.header.caller = Some(caller);
-    }
-
-    pub fn take_caller(&mut self) -> Option<space::Root> {
-        self.header.caller.take()
-    }
-
-    pub fn dependency(&self, slot: u16) -> Option<space::Root> {
-        self.dependencies.get(slot as usize).copied().flatten()
-    }
-
-    pub fn retain_dependency(&mut self, slot: u16, root: space::Root) {
-        self.dependencies[slot as usize] = Some(root);
-    }
-}
 
 /// Immutable prepared module descriptor, held in an owned physical page.
 /// Shared module dependency slots contain its physical address.
@@ -262,7 +192,7 @@ pub struct WaitTable {
 }
 
 impl WaitTable {
-    pub const EMPTY: Self = Self { base: 0, count: 0 };
+    pub const EMPTY: Self = WaitTable { base: 0, count: 0 };
 
     pub fn validate(stem: usize, base: usize, count: usize) -> Result<Self, tau::ModuleError> {
         if count == 0 {
@@ -285,7 +215,7 @@ impl WaitTable {
         if (base >> 30) & 511 != stem || ((end - 1) >> 30) & 511 != stem {
             return Err(tau::ModuleError::InvalidImage);
         }
-        Ok(Self { base, count })
+        Ok(WaitTable { base, count })
     }
 
     pub fn index(&self, pointer: usize) -> Result<usize, tau::WaitError> {
@@ -396,154 +326,4 @@ pub fn bind_dependency(
     module
         .insert_dependency(physical)
         .ok_or(tau::ModuleError::NoSlots)
-}
-
-#[inline(always)]
-pub fn invoke(
-    window: &mut WindowAccess,
-    context: &Context,
-    module_context: &mut ModuleContext,
-    module: &Module,
-    slot: u16,
-) -> Result<(space::Root, usize), tau::ModuleError> {
-    let descriptor = module
-        .get_dependency(slot)
-        .ok_or(tau::ModuleError::InvalidDependency)?;
-    let (root, entry) = construct(window, context, module_context.header.root, descriptor)?;
-    module_context.retain_dependency(slot, root);
-    Ok((root, entry))
-}
-
-// Keep the hart-ID read and allocation code off the warm invocation path.
-// Inlining lets LLVM hoist the thread load ahead of the cached-root check.
-#[cold]
-#[inline(never)]
-fn construct(
-    window: &mut WindowAccess,
-    context: &Context,
-    caller: space::Root,
-    descriptor: usize,
-) -> Result<(space::Root, usize), tau::ModuleError> {
-    let hart = window.hart().hart_id;
-    let dep = window.read_module_descriptor(descriptor);
-    let Some(root_index) = dep.root_index else {
-        return Err(tau::ModuleError::InvalidImage);
-    };
-    let root_index = root_index as usize;
-    if (dep.entry >> 30) & 511 != root_index
-        || !window
-            .resolve_stem(dep.stem, dep.entry)
-            .is_some_and(|(_, flags)| flags & 26 == 26)
-    {
-        return Err(tau::ModuleError::InvalidImage);
-    }
-    let root = window
-        .create(0, || context.page(hart))
-        .map_err(|_| tau::ModuleError::OutOfMemory)?;
-    let result = (|| {
-        window.attach(root, root_index, dep.stem);
-        window
-            .supervisor_mappings(caller, root, || context.page(hart))
-            .map_err(|_| tau::ModuleError::OutOfMemory)?;
-        for mapping in [
-            Mapping {
-                addr_virtual: (dep.stack_pages * space::PAGE).wrapping_neg(),
-                virtual_pages: dep.stack_pages,
-                flags: *b"rw-u-",
-                ..Mapping::default()
-            },
-            Mapping {
-                addr_virtual: space::MODULE_CONTEXT,
-                virtual_pages: size_of::<ModuleContext>().div_ceil(space::PAGE),
-                flags: *b"rw---",
-                ..Mapping::default()
-            },
-            Mapping {
-                addr_virtual: space::MODULE,
-                virtual_pages: size_of::<Module>().div_ceil(space::PAGE),
-                addr_physical: NonZero::new(dep.physical),
-                physical_pages: size_of::<Module>().div_ceil(space::PAGE),
-                flags: *b"rw---",
-            },
-        ] {
-            window
-                .map(root, mapping, || context.page(hart))
-                .map_err(|_| tau::ModuleError::OutOfMemory)?;
-        }
-        let tag = window.allocate_tag().ok_or(tau::ModuleError::OutOfMemory)?;
-        let root = space::Root::sv39(root.page(), tag);
-        Ok((root, dep.entry))
-    })();
-    if result.is_err() {
-        let _ = window.destroy(root, |page| context.free(hart, page));
-    }
-    result
-}
-
-/// Construct a same-module thread without publishing it. Successful storage is
-/// retained until reboot; all failed constructions reclaim their private pages.
-pub fn spawn(
-    window: &mut WindowAccess,
-    module: &Module,
-    context: &Context,
-    entry: usize,
-) -> Result<space::Root, tau::SpawnError> {
-    use tau::SpawnError;
-    let caller = Window::current_root();
-    let hart = window.hart().hart_id;
-    let Some(index) = module.header.descriptor.root_index else {
-        return Err(SpawnError::InvalidEntry);
-    };
-    let index = index as usize;
-    if entry & 1 != 0 || (entry >> 30) & 511 != index {
-        return Err(SpawnError::InvalidEntry);
-    }
-    let stem = module.header.descriptor.stem;
-    if !window
-        .resolve_stem(stem, entry)
-        .is_some_and(|(_, flags)| flags & 26 == 26)
-    {
-        return Err(SpawnError::InvalidEntry);
-    }
-    let memory = |_| SpawnError::OutOfMemory;
-    let root = window.create(0, || context.page(hart)).map_err(memory)?;
-    let result = (|| {
-        window.attach(root, index, stem);
-        window
-            .supervisor_mappings(caller, root, || context.page(hart))
-            .map_err(memory)?;
-        let module_physical = module.header.descriptor.physical;
-        for mapping in [
-            Mapping {
-                addr_virtual: (module.header.descriptor.stack_pages * space::PAGE).wrapping_neg(),
-                virtual_pages: module.header.descriptor.stack_pages,
-                flags: *b"rw-u-",
-                ..Mapping::default()
-            },
-            Mapping {
-                addr_virtual: space::MODULE_CONTEXT,
-                virtual_pages: size_of::<ModuleContext>().div_ceil(space::PAGE),
-                flags: *b"rw---",
-                ..Mapping::default()
-            },
-            Mapping {
-                addr_virtual: space::MODULE,
-                virtual_pages: size_of::<Module>().div_ceil(space::PAGE),
-                addr_physical: NonZero::new(module_physical),
-                physical_pages: size_of::<Module>().div_ceil(space::PAGE),
-                flags: *b"rw---",
-            },
-        ] {
-            window
-                .map(root, mapping, || context.page(hart))
-                .map_err(memory)?;
-        }
-        let tag = window.allocate_tag().ok_or(SpawnError::OutOfMemory)?;
-        let root = space::Root::sv39(root.page(), tag);
-        Ok(root)
-    })();
-    if result.is_err() {
-        let _ = window.destroy(root, |page| context.free(hart, page));
-    }
-    result
 }

@@ -5,4 +5,9 @@
 use super::{space, state::Context};
 
 mod module;
-pub use self::module::*;
+pub use self::module::{
+    Module, ModuleDescriptor, WaitTable, WaitRecord, create_module, bind_dependency,
+};
+
+mod context;
+pub use self::context::{ModuleContext, spawn, invoke};
