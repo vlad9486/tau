@@ -260,7 +260,6 @@ fn init_memory(
     // 0x0000_0040_0000_0000 .. 0xffff_ffc0_0000_0000 (unavailable)
     // 0xffff_ffc0_0000_0000 .. 0xffff_ffc0_0020_0000 (2 MiB, per cpu, window, stack)
     // 0xffff_ffc0_0020_0000 .. 0xffff_ffc0_0040_0000 (2 MiB, thread and module metadata)
-    // __THREAD holds local thread metadata, shared across its module contexts.
     // __MODULE_CONTEXT holds private saved registers, PC, and the caller's satp.
     // __MODULE holds shared dependency stems and wait-table metadata, mapped
     // during supervisor bootstrap. Future contexts reuse those module pages.
