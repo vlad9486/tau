@@ -18,7 +18,7 @@ pub const SCHEDULER: usize = 0xffff_ffc0_0040_0000;
 pub const ALLOCATOR: usize = 0xffff_ffc0_006e_0000;
 pub const MODULE_CONTEXT: usize = 0xffff_ffc0_0021_0000;
 pub const MODULE: usize = 0xffff_ffc0_0022_0000;
-pub const SUPERVISOR_INDEX: usize = 256;
+const SUPERVISOR_INDEX: usize = 256;
 // Sv39 RSW: this entry owns an allocator page (data or a child table).
 // Borrowed entries stop reclamation, including whole shared branches.
 pub const OWNED: usize = 1 << 8;

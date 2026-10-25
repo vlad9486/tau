@@ -626,7 +626,15 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 if !local.module.header.loader_authority {
                     return Err(tau::ModuleError::AccessDenied);
                 }
-                matter::create_module(window, context, hart_id, msg[1], msg[2], msg[3], msg[4])
+                let spec = matter::ModuleSpec {
+                    entry: msg[1],
+                    stack_pages: msg[2],
+                    wait_table: matter::WaitTable {
+                        base: msg[3],
+                        count: msg[4],
+                    },
+                };
+                matter::create_module(window, context, hart_id, spec)
             })();
             match res {
                 Ok(handle) => {

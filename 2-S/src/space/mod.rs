@@ -18,8 +18,7 @@ pub use self::alloc::{
 
 mod vmem;
 pub use self::vmem::{
-    Root, Mapping, Window, WindowAccess, PAGE, MODULE, MODULE_CONTEXT, user_range,
-    SUPERVISOR_INDEX, SCHEDULER,
+    Root, Mapping, Window, WindowAccess, PAGE, MODULE, MODULE_CONTEXT, user_range, SCHEDULER,
 };
 
 // TODO: this is needed only for `loader`;

@@ -22,7 +22,7 @@ use elf::{
 
 use supervisor::{
     llfree::{Allocator, Error, FrameId, Lower},
-    sbi, state, space,
+    matter, sbi, state, space,
 };
 
 #[cfg(all(not(debug_assertions), feature = "panic-never"))]
@@ -341,7 +341,7 @@ fn load_system_elf(
     allocator: &Lower<'_>,
     st: *mut MaybeUninit<[usize; 512]>,
     l0: &mut [usize; 512],
-) -> Result<state::BootModule, Error> {
+) -> Result<matter::ModuleSpec, Error> {
     let elf_data =
         unsafe { slice::from_raw_parts(st.add(SYSTEM_OFFSET).cast::<u8>(), SYSTEM_SIZE << 12) };
     let elf = ElfBytes::<LittleEndian>::minimal_parse(elf_data).map_err(|_| Error::Address)?;
@@ -463,18 +463,14 @@ fn load_system_elf(
         map_page(stack_start + (page_idx << 12), b"rw-u-")?;
     }
 
-    let wait_slots_count = manifest.wait_slots.len();
-    let wait_slots_addr = if wait_slots_count == 0 {
-        0
-    } else {
-        manifest.wait_slots.as_ptr().addr()
-    };
     unsafe { arch::asm!("fence.i") };
-    Ok(state::BootModule {
+    Ok(matter::ModuleSpec {
         entry: manifest.entry as usize,
         stack_pages: region.pages,
-        wait_slots_addr,
-        wait_slots_count,
+        wait_table: matter::WaitTable {
+            base: manifest.wait_slots.as_ptr().addr(),
+            count: manifest.wait_slots.len(),
+        },
     })
 }
 

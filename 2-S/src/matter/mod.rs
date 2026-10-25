@@ -6,7 +6,7 @@ use super::{space, state::Context};
 
 mod module;
 pub use self::module::{
-    Module, ModuleDescriptor, WaitTable, WaitRecord, create_module, bind_dependency,
+    Module, ModuleDescriptor, ModuleSpec, WaitTable, WaitRecord, create_module, bind_dependency,
 };
 
 mod context;

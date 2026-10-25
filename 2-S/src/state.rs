@@ -2,29 +2,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{num::NonZero, ptr};
+use core::num::NonZero;
 
 use super::{
     llfree,
-    matter::{ModuleDescriptor, ModuleContext, Module, WaitTable},
+    matter::{ModuleDescriptor, ModuleContext, Module, ModuleSpec},
     space::{Root, Mapping, Window, WindowAccess, PAGE},
 };
-
-#[derive(Clone, Copy, Default, Debug)]
-#[repr(C)]
-pub struct BootModule {
-    pub entry: usize,
-    pub stack_pages: usize,
-    pub wait_slots_addr: usize,
-    pub wait_slots_count: usize,
-}
 
 pub struct Context {
     pub allocator: llfree::Lower<'static>,
     pub base_addr: usize,
     /// Kept independently of the active satp for later loader/hart startup.
     pub bootstrap_root: Root,
-    pub boot: BootModule,
+    pub boot: ModuleSpec,
 }
 
 impl Context {
@@ -79,6 +70,7 @@ pub unsafe fn init(
     module: *mut Module,
     context: &Context,
 ) -> Result<(Root, usize), InitError> {
+    let (boot, stem) = context.boot.validate().map_err(|_| InitError::Manifest)?;
     let root = Window::current_root();
 
     let mapping = Mapping {
@@ -111,31 +103,19 @@ pub unsafe fn init(
         .map(root, mapping, || context.page(hart_id))
         .map_err(|_| tau::AllocError::OutOfMemory)
         .map_err(InitError::Alloc)?;
-    unsafe { Module::init_at(module, true, false) };
 
-    let entry = context.boot.entry;
-    let stack_pages = context.boot.stack_pages;
-    let satp = Window::current_root();
-    let stem = (entry >> 30) & 511;
-    let wait_table = WaitTable::validate(
-        stem,
-        context.boot.wait_slots_addr,
-        context.boot.wait_slots_count,
-    )
-    .map_err(|_| InitError::Manifest)?;
     // The boot ELF uses the same protected shared-stem rule as prepared ELFs.
-    let stem_phys = window.root_branch(satp, stem).unwrap_or(0);
-    let root_index = Some(stem as u16);
+    let stem_phys = window.root_branch(root, stem).unwrap_or(0);
+    let descriptor = ModuleDescriptor {
+        stem: stem_phys,
+        root_index: Some(stem as u16),
+        entry: boot.entry,
+        stack_pages: boot.stack_pages,
+        physical: module_physical,
+    };
     unsafe {
-        ptr::addr_of_mut!((*module).header.wait_table).write(wait_table);
-        ptr::addr_of_mut!((*module).header.descriptor).write(ModuleDescriptor {
-            stem: stem_phys,
-            root_index,
-            entry,
-            stack_pages,
-            physical: module_physical,
-        });
-        ModuleContext::init_zeroed(module_context, satp, entry);
+        Module::init_at(module, descriptor, boot.wait_table, true, false);
+        ModuleContext::init_zeroed(module_context, root, boot.entry);
     }
-    Ok((satp, entry))
+    Ok((root, boot.entry))
 }

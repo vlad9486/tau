@@ -24,16 +24,6 @@ pub struct ModuleDescriptor {
     pub physical: usize,
 }
 
-impl ModuleDescriptor {
-    pub const EMPTY: Self = Self {
-        stem: 0,
-        root_index: None,
-        entry: 0,
-        stack_pages: 0,
-        physical: 0,
-    };
-}
-
 #[repr(C, align(4096))]
 pub struct ModuleHeader {
     pub descriptor: ModuleDescriptor,
@@ -78,10 +68,16 @@ impl Module {
     /// `this` must point to writable, aligned storage with exclusive access
     /// until initialization completes. Existing shared tables must not be reset
     /// when preparing another context of the same module.
-    pub unsafe fn init_at(this: *mut Self, loader_authority: bool, pure: bool) {
+    pub unsafe fn init_at(
+        this: *mut Self,
+        descriptor: ModuleDescriptor,
+        wait_table: WaitTable,
+        loader_authority: bool,
+        pure: bool,
+    ) {
         unsafe {
-            ptr::addr_of_mut!((*this).header.descriptor).write(ModuleDescriptor::EMPTY);
-            ptr::addr_of_mut!((*this).header.wait_table).write(WaitTable::EMPTY);
+            ptr::addr_of_mut!((*this).header.descriptor).write(descriptor);
+            ptr::addr_of_mut!((*this).header.wait_table).write(wait_table);
         }
         unsafe { ptr::addr_of_mut!((*this).header.loader_authority).write(loader_authority) };
         unsafe { ptr::addr_of_mut!((*this).header.pure).write(pure) };
@@ -185,6 +181,7 @@ impl Drop for DependencyGuard<'_> {
 // ---
 
 /// Range in userspace module's virtual memory
+#[derive(Clone, Copy, Default, Debug)]
 #[repr(C)]
 pub struct WaitTable {
     pub base: usize,
@@ -194,28 +191,29 @@ pub struct WaitTable {
 impl WaitTable {
     pub const EMPTY: Self = WaitTable { base: 0, count: 0 };
 
-    pub fn validate(stem: usize, base: usize, count: usize) -> Result<Self, tau::ModuleError> {
-        if count == 0 {
+    pub fn validate(self, stem: usize) -> Result<Self, tau::ModuleError> {
+        if self.count == 0 {
             return Ok(Self::EMPTY);
         }
-        let bytes = count
+        let bytes = self
+            .count
             .checked_mul(64)
             .ok_or(tau::ModuleError::InvalidImage)?;
-        if base == 0
-            || count == 0
-            || count > Module::WAIT_SIZE
-            || base & 63 != 0
-            || !space::user_range(base, bytes)
+        if self.base == 0
+            || self.count > Module::WAIT_SIZE
+            || self.base & 63 != 0
+            || !space::user_range(self.base, bytes)
         {
             return Err(tau::ModuleError::InvalidImage);
         }
-        let end = base
+        let end = self
+            .base
             .checked_add(bytes)
             .ok_or(tau::ModuleError::InvalidImage)?;
-        if (base >> 30) & 511 != stem || ((end - 1) >> 30) & 511 != stem {
+        if (self.base >> 30) & 511 != stem || ((end - 1) >> 30) & 511 != stem {
             return Err(tau::ModuleError::InvalidImage);
         }
-        Ok(WaitTable { base, count })
+        Ok(self)
     }
 
     pub fn index(&self, pointer: usize) -> Result<usize, tau::WaitError> {
@@ -257,25 +255,36 @@ impl WaitTable {
     }
 }
 
+#[derive(Clone, Copy, Default, Debug)]
+#[repr(C)]
+pub struct ModuleSpec {
+    pub entry: usize,
+    pub stack_pages: usize,
+    pub wait_table: WaitTable,
+}
+
+impl ModuleSpec {
+    pub fn validate(mut self) -> Result<(Self, usize), tau::ModuleError> {
+        let root_index = (self.entry >> 30) & 511;
+        if self.entry & 1 != 0
+            || !space::user_range(self.entry, 2)
+            || root_index == 511
+            || !(1..=256).contains(&self.stack_pages)
+        {
+            return Err(tau::ModuleError::InvalidImage);
+        }
+        self.wait_table = self.wait_table.validate(root_index)?;
+        Ok((self, root_index))
+    }
+}
+
 pub fn create_module(
     window: &mut WindowAccess,
     context: &Context,
     hart_id: usize,
-    entry: usize,
-    stack_pages: usize,
-    wait_slots_addr: usize,
-    wait_slots_count: usize,
+    spec: ModuleSpec,
 ) -> Result<usize, tau::ModuleError> {
-    let root_index = (entry >> 30) & 511;
-    if entry & 1 != 0
-        || !space::user_range(entry, 2)
-        || root_index == 511
-        || root_index == space::SUPERVISOR_INDEX
-        || !(1..=256).contains(&stack_pages)
-    {
-        return Err(tau::ModuleError::InvalidImage);
-    }
-    let wait_table = WaitTable::validate(root_index, wait_slots_addr, wait_slots_count)?;
+    let (spec, root_index) = spec.validate()?;
     let stem = window
         .new_page(|| context.page(hart_id))
         .map_err(|_| tau::ModuleError::OutOfMemory)?;
@@ -288,16 +297,21 @@ pub fn create_module(
         }
     };
     let module = window.map_module(physical);
+    let descriptor = ModuleDescriptor {
+        stem,
+        root_index: Some(root_index as u16),
+        entry: spec.entry,
+        stack_pages: spec.stack_pages,
+        physical,
+    };
     unsafe {
-        Module::init_at(ptr::from_mut(module), false, false);
-        ptr::addr_of_mut!(module.header.wait_table).write(wait_table);
-        ptr::addr_of_mut!(module.header.descriptor).write(ModuleDescriptor {
-            stem,
-            root_index: Some(root_index as u16),
-            entry,
-            stack_pages,
-            physical,
-        });
+        Module::init_at(
+            ptr::from_mut(module),
+            descriptor,
+            spec.wait_table,
+            false,
+            false,
+        );
     }
     Ok(physical / space::PAGE)
 }
