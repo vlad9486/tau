@@ -105,25 +105,28 @@ impl fmt::Display for Hart {
 }
 
 /// Linker-provided layout of the 2 MiB hart-local window. The first page maps
-/// itself, slot 6 holds MMU state, and slot 511 is the supervisor stack.
+/// itself, slot 7 holds MMU state, and slot 511 is the supervisor stack.
 /// Reserved bytes may be unmapped or temporarily aliased; never borrow or copy
 /// the whole structure. Access only mapped fields or use `WindowAccess`.
 #[repr(C)]
 #[rustfmt::skip]
 pub struct Window {
     table: UnsafeCell<[usize; 512]>,                                // 1 page  (slot 0: recursive L2)
-    pte: UnsafeCell<[usize; 512]>,                                  // 1 page  (slot 1: page-table walk)
-    page: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 2: zeroing / segment copy)
-    _reserved3: UnsafeCell<MaybeUninit<Page>>,                      // 1 page  (slot 3: reserved)
-    descriptor: UnsafeCell<MaybeUninit<Padded<ModuleDescriptor>>>,  // 1 page  (slot 4: foreign module tables page 0 / descriptor)
-    wait: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 5: wait slots)
-    hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,                    // 1 page  (slot 6: permanent per-hart MMU)
-    module: UnsafeCell<MaybeUninit<Module>>,                        // 6 pages (slots 7..13: foreign Module)
-    _reserved: UnsafeCell<MaybeUninit<[Page; 498]>>,                // unused window slots
+    pte_l0: UnsafeCell<[usize; 512]>,                               // 1 page  (slot 1: L0 root page-table walk)
+    pte_l1: UnsafeCell<[usize; 512]>,                               // 1 page  (slot 2: L1 stem page-table walk)
+    pte_l2: UnsafeCell<[usize; 512]>,                               // 1 page  (slot 3: L2 leaf page-table walk)
+    page: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 4: zeroing / segment copy)
+    descriptor: UnsafeCell<MaybeUninit<Padded<ModuleDescriptor>>>,  // 1 page  (slot 5: foreign module tables page 0 / descriptor)
+    wait: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 6: wait slots)
+    hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,                    // 1 page  (slot 7: permanent per-hart MMU)
+    module: UnsafeCell<MaybeUninit<Module>>,                        // 6 pages (slots 8..14: foreign Module)
+    _reserved: UnsafeCell<MaybeUninit<[Page; 497]>>,                // unused window slots
     stack: UnsafeCell<MaybeUninit<Page>>,                           // 1 page  (slot 511: supervisor stack)
 }
 
-const PTE_SLOT: usize = mem::offset_of!(Window, pte) / PAGE;
+const PTE_L0_SLOT: usize = mem::offset_of!(Window, pte_l0) / PAGE;
+const PTE_L1_SLOT: usize = mem::offset_of!(Window, pte_l1) / PAGE;
+const PTE_L2_SLOT: usize = mem::offset_of!(Window, pte_l2) / PAGE;
 const PAGE_SLOT: usize = mem::offset_of!(Window, page) / PAGE;
 const DESCRIPTOR_SLOT: usize = mem::offset_of!(Window, descriptor) / PAGE;
 const WAIT_SLOT: usize = mem::offset_of!(Window, wait) / PAGE;
@@ -132,12 +135,14 @@ const MODULE_SLOT: usize = mem::offset_of!(Window, module) / PAGE;
 pub const STACK_SLOT: usize = mem::offset_of!(Window, stack) / PAGE;
 
 const _: () = {
-    assert!(PTE_SLOT == 1);
-    assert!(PAGE_SLOT == 2);
-    assert!(DESCRIPTOR_SLOT == 4);
-    assert!(WAIT_SLOT == 5);
-    assert!(HART_SLOT == 6);
-    assert!(MODULE_SLOT == 7);
+    assert!(PTE_L0_SLOT == 1);
+    assert!(PTE_L1_SLOT == 2);
+    assert!(PTE_L2_SLOT == 3);
+    assert!(PAGE_SLOT == 4);
+    assert!(DESCRIPTOR_SLOT == 5);
+    assert!(WAIT_SLOT == 6);
+    assert!(HART_SLOT == 7);
+    assert!(MODULE_SLOT == 8);
     assert!(STACK_SLOT == 511);
     assert!(size_of::<Window>() == 512 * PAGE);
 };
@@ -242,20 +247,23 @@ impl WindowAccess {
         }
     }
 
-    fn read_pte(&mut self, table: usize, index: usize) -> usize {
-        debug_assert!(index < 512);
-        self.alias(PTE_SLOT, table);
-        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte) };
-        let cell = unsafe { ptr.cast::<usize>().add(index) };
-        unsafe { cell.read_volatile() }
+    fn pte_cell(&mut self, slot: usize, table: usize, index: usize) -> *mut usize {
+        debug_assert!(matches!(slot, PTE_L0_SLOT | PTE_L1_SLOT | PTE_L2_SLOT) && index < 512);
+        self.alias(slot, table);
+        let ptr = match slot {
+            PTE_L0_SLOT => unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte_l0) },
+            PTE_L1_SLOT => unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte_l1) },
+            _ => unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte_l2) },
+        };
+        unsafe { ptr.cast::<usize>().add(index) }
     }
 
-    fn write_pte(&mut self, table: usize, index: usize, pte: usize) {
-        debug_assert!(index < 512);
-        self.alias(PTE_SLOT, table);
-        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte) };
-        let cell = unsafe { ptr.cast::<usize>().add(index) };
-        unsafe { cell.write_volatile(pte) };
+    fn read_pte(&mut self, slot: usize, table: usize, index: usize) -> usize {
+        unsafe { self.pte_cell(slot, table, index).read_volatile() }
+    }
+
+    fn write_pte(&mut self, slot: usize, table: usize, index: usize, pte: usize) {
+        unsafe { self.pte_cell(slot, table, index).write_volatile(pte) };
     }
 
     pub fn new_page(
@@ -303,13 +311,13 @@ impl WindowAccess {
     }
 
     pub fn root_branch(&mut self, root: Root, index: usize) -> Option<usize> {
-        let pte = self.read_pte(root.page(), index);
+        let pte = self.read_pte(PTE_L0_SLOT, root.page(), index);
         (pte & 1 != 0 && pte & 14 == 0).then(|| pte_page(pte))
     }
 
     pub fn attach(&mut self, root: Root, index: usize, stem: usize) {
-        debug_assert!(self.read_pte(root.page(), index) == 0);
-        self.write_pte(root.page(), index, branch(stem));
+        debug_assert!(self.read_pte(PTE_L0_SLOT, root.page(), index) == 0);
+        self.write_pte(PTE_L0_SLOT, root.page(), index, branch(stem));
     }
 
     fn leaf_stem(
@@ -319,10 +327,10 @@ impl WindowAccess {
         page: impl Fn() -> Result<usize, llfree::Error>,
     ) -> Result<(usize, usize), llfree::Error> {
         let index = (address >> 21) & 511;
-        let pte = self.read_pte(stem, index);
+        let pte = self.read_pte(PTE_L1_SLOT, stem, index);
         let table = if pte == 0 {
             let next = self.new_page(&page)?;
-            self.write_pte(stem, index, branch(next) | OWNED);
+            self.write_pte(PTE_L1_SLOT, stem, index, branch(next) | OWNED);
             next
         } else if pte & 1 != 0 && pte & 14 == 0 {
             pte_page(pte)
@@ -339,10 +347,10 @@ impl WindowAccess {
         page: impl Fn() -> Result<usize, llfree::Error>,
     ) -> Result<(usize, usize), llfree::Error> {
         let ri = (address >> 30) & 511;
-        let pte = self.read_pte(root.page(), ri);
+        let pte = self.read_pte(PTE_L0_SLOT, root.page(), ri);
         let stem = if pte == 0 {
             let next = self.new_page(&page)?;
-            self.write_pte(root.page(), ri, branch(next) | OWNED);
+            self.write_pte(PTE_L0_SLOT, root.page(), ri, branch(next) | OWNED);
             next
         } else if pte & 1 != 0 && pte & 14 == 0 {
             pte_page(pte)
@@ -354,8 +362,8 @@ impl WindowAccess {
 
     pub fn resolve_stem(&mut self, stem: usize, address: usize) -> Option<(usize, usize)> {
         let mut table = stem;
-        for shift in [21, 12] {
-            let pte = self.read_pte(table, (address >> shift) & 511);
+        for (slot, shift) in [(PTE_L1_SLOT, 21), (PTE_L2_SLOT, 12)] {
+            let pte = self.read_pte(slot, table, (address >> shift) & 511);
             if pte & 1 == 0 {
                 return None;
             }
@@ -374,8 +382,8 @@ impl WindowAccess {
 
     pub fn resolve(&mut self, root: Root, address: usize) -> Option<(usize, usize)> {
         let mut table = root.page();
-        for shift in [30, 21, 12] {
-            let pte = self.read_pte(table, (address >> shift) & 511);
+        for (slot, shift) in [(PTE_L0_SLOT, 30), (PTE_L1_SLOT, 21), (PTE_L2_SLOT, 12)] {
+            let pte = self.read_pte(slot, table, (address >> shift) & 511);
             if pte & 1 == 0 {
                 return None;
             }
@@ -402,14 +410,14 @@ impl WindowAccess {
             let si = (address >> 21) & 511;
             let index = (address >> 12) & 511;
             let chunk = pages.min(512 - index);
-            let pte = self.read_pte(stem, si);
+            let pte = self.read_pte(PTE_L1_SLOT, stem, si);
             if pte != 0 {
                 if pte & 1 == 0 || pte & 14 != 0 {
                     return Err(llfree::Error::Address);
                 }
                 let leaf = pte_page(pte);
                 for offset in 0..chunk {
-                    if self.read_pte(leaf, index + offset) != 0 {
+                    if self.read_pte(PTE_L2_SLOT, leaf, index + offset) != 0 {
                         return Err(llfree::Error::InvalidArgument);
                     }
                 }
@@ -430,7 +438,7 @@ impl WindowAccess {
             let ri = (address >> 30) & 511;
             let stem_offset = (address >> 12) & ((1 << 18) - 1);
             let chunk = pages.min((1 << 18) - stem_offset);
-            let pte = self.read_pte(root.page(), ri);
+            let pte = self.read_pte(PTE_L0_SLOT, root.page(), ri);
             if pte != 0 {
                 if pte & 1 == 0 || pte & 14 != 0 {
                     return Err(llfree::Error::Address);
@@ -455,11 +463,11 @@ impl WindowAccess {
                     let si = (addr >> 21) & 511;
                     let index = (addr >> 12) & 511;
                     let chunk = rem.min(512 - index);
-                    let pte = self.read_pte(stem, si);
+                    let pte = self.read_pte(PTE_L1_SLOT, stem, si);
                     if pte & 1 != 0 && pte & 14 == 0 {
                         let leaf = pte_page(pte);
                         for offset in 0..chunk {
-                            let entry = self.read_pte(leaf, index + offset);
+                            let entry = self.read_pte(PTE_L2_SLOT, leaf, index + offset);
                             if entry & 1 != 0 && entry & 14 != 0 && entry & OWNED == 0 {
                                 return false;
                             }
@@ -508,6 +516,7 @@ impl WindowAccess {
                 _ => (self.new_page(&page)?, OWNED),
             };
             self.write_pte(
+                PTE_L2_SLOT,
                 table,
                 index,
                 (physical >> 2) | flags_new(&mapping.flags) | owned,
@@ -549,6 +558,7 @@ impl WindowAccess {
                 _ => (self.new_page(&page)?, OWNED),
             };
             self.write_pte(
+                PTE_L2_SLOT,
                 table,
                 index,
                 (physical >> 2) | flags_new(&mapping.flags) | owned,
@@ -566,8 +576,13 @@ impl WindowAccess {
         level: usize,
         free: &impl Fn(usize) -> Result<(), llfree::Error>,
     ) -> Result<(), llfree::Error> {
+        let slot = match level {
+            2 => PTE_L0_SLOT,
+            1 => PTE_L1_SLOT,
+            _ => PTE_L2_SLOT,
+        };
         for i in 0..512 {
-            let pte = self.read_pte(physical, i);
+            let pte = self.read_pte(slot, physical, i);
             if pte & OWNED == 0 {
                 continue;
             }
@@ -602,10 +617,15 @@ impl WindowAccess {
             .root_branch(caller, SUPERVISOR_INDEX)
             .ok_or(llfree::Error::Address)?;
         let new = page()?;
-        self.write_pte(root.page(), SUPERVISOR_INDEX, branch(new) | OWNED);
-        self.alias(PTE_SLOT, old);
+        self.write_pte(
+            PTE_L0_SLOT,
+            root.page(),
+            SUPERVISOR_INDEX,
+            branch(new) | OWNED,
+        );
+        self.alias(PTE_L1_SLOT, old);
         self.alias(PAGE_SLOT, new);
-        let src = unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte).cast::<usize>() };
+        let src = unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte_l1).cast::<usize>() };
         let dst = unsafe { UnsafeCell::raw_get(&raw const (*self.base).page).cast::<usize>() };
         for i in 0..512 {
             let pte = if i == 1 {
@@ -618,8 +638,8 @@ impl WindowAccess {
         Ok(())
     }
 
-    fn empty_table(&mut self, physical: usize) -> bool {
-        (0..512).all(|i| self.read_pte(physical, i) == 0)
+    fn empty_table(&mut self, slot: usize, physical: usize) -> bool {
+        (0..512).all(|i| self.read_pte(slot, physical, i) == 0)
     }
 
     fn unmap_stem_leaf(
@@ -630,13 +650,13 @@ impl WindowAccess {
         free: &impl Fn(usize) -> Result<(), llfree::Error>,
     ) -> Result<bool, llfree::Error> {
         let si = (address >> 21) & 511;
-        let pte = self.read_pte(stem, si);
+        let pte = self.read_pte(PTE_L1_SLOT, stem, si);
         if pte & 1 != 0 && pte & 14 == 0 {
             let leaf = pte_page(pte);
             let index = (address >> 12) & 511;
-            let entry = self.read_pte(leaf, index);
+            let entry = self.read_pte(PTE_L2_SLOT, leaf, index);
             if entry != 0 {
-                self.write_pte(leaf, index, 0);
+                self.write_pte(PTE_L2_SLOT, leaf, index, 0);
                 if let Some(asid) = asid {
                     sfence_vma(Some(address), Some(asid));
                 }
@@ -644,8 +664,8 @@ impl WindowAccess {
                     free(pte_page(entry))?;
                 }
             }
-            if self.empty_table(leaf) {
-                self.write_pte(stem, si, 0);
+            if self.empty_table(PTE_L2_SLOT, leaf) {
+                self.write_pte(PTE_L1_SLOT, stem, si, 0);
                 if let Some(asid) = asid {
                     sfence_vma(None, Some(asid));
                 }
@@ -679,9 +699,10 @@ impl WindowAccess {
             return Ok(());
         };
         // Also reclaim empty intermediate tables left by a failed allocation.
-        if self.unmap_stem_leaf(stem, Some(root.asid()), address, &free)? && self.empty_table(stem)
+        if self.unmap_stem_leaf(stem, Some(root.asid()), address, &free)?
+            && self.empty_table(PTE_L1_SLOT, stem)
         {
-            self.write_pte(root.page(), ri, 0);
+            self.write_pte(PTE_L0_SLOT, root.page(), ri, 0);
             sfence_vma(None, Some(root.asid()));
             free(stem)?;
         }
