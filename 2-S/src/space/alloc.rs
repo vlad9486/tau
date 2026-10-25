@@ -35,7 +35,7 @@ fn decode_flags(flags: usize) -> Option<[u8; 5]> {
 /// Handles are supplied by the trusted loader, not arbitrary module code.
 /// Bounds checks prevent overflow and aliases outside managed physical memory;
 /// they do not establish that the page contains a prepared descriptor.
-pub fn descriptor_page(context: &Context, handle: usize) -> Result<usize, tau::ModuleError> {
+pub fn validate_module_handle(context: &Context, handle: usize) -> Result<usize, tau::ModuleError> {
     let page = handle
         .checked_mul(vmem::PAGE)
         .ok_or(tau::ModuleError::InvalidDependency)?;
@@ -57,8 +57,8 @@ fn validate_target(
     virtual_pages: usize,
     target: NonZero<usize>,
 ) -> Result<usize, ()> {
-    let descriptor = descriptor_page(context, target.get()).map_err(|_| ())?;
-    let dep = window.read_module_descriptor(descriptor);
+    let physical = validate_module_handle(context, target.get()).map_err(|_| ())?;
+    let dep = window.read_module_descriptor(physical);
     let Some(root_index) = dep.root_index else {
         return Err(());
     };

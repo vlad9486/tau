@@ -75,14 +75,14 @@ pub enum InitError {
 pub unsafe fn init(
     window: &mut WindowAccess,
     hart_id: usize,
-    module: *mut ModuleContext,
-    tables: *mut Module,
+    module_context: *mut ModuleContext,
+    module: *mut Module,
     context: &Context,
 ) -> Result<(Root, usize), InitError> {
     let root = Window::current_root();
 
     let mapping = Mapping {
-        addr_virtual: module.addr(),
+        addr_virtual: module_context.addr(),
         virtual_pages: size_of::<ModuleContext>().div_ceil(PAGE),
         addr_physical: None,
         physical_pages: 0,
@@ -101,7 +101,7 @@ pub unsafe fn init(
         .block(hart_id, pages.next_power_of_two().ilog2())
         .map_err(InitError::Allocator)?;
     let mapping = Mapping {
-        addr_virtual: tables.addr(),
+        addr_virtual: module.addr(),
         virtual_pages: pages,
         addr_physical: NonZero::new(module_physical),
         physical_pages: pages,
@@ -111,7 +111,7 @@ pub unsafe fn init(
         .map(root, mapping, || context.page(hart_id))
         .map_err(|_| tau::AllocError::OutOfMemory)
         .map_err(InitError::Alloc)?;
-    unsafe { Module::init_at(tables, true, false) };
+    unsafe { Module::init_at(module, true, false) };
 
     let entry = context.boot.entry;
     let stack_pages = context.boot.stack_pages;
@@ -127,15 +127,15 @@ pub unsafe fn init(
     let stem_phys = window.root_branch(satp, stem).unwrap_or(0);
     let root_index = Some(stem as u16);
     unsafe {
-        ptr::addr_of_mut!((*tables).header.wait_table).write(wait_table);
-        ptr::addr_of_mut!((*tables).header.descriptor).write(ModuleDescriptor {
+        ptr::addr_of_mut!((*module).header.wait_table).write(wait_table);
+        ptr::addr_of_mut!((*module).header.descriptor).write(ModuleDescriptor {
             stem: stem_phys,
             root_index,
             entry,
             stack_pages,
             physical: module_physical,
         });
-        ModuleContext::init_zeroed(module, satp, entry);
+        ModuleContext::init_zeroed(module_context, satp, entry);
     }
     Ok((satp, entry))
 }

@@ -645,7 +645,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 if !local.module.header.loader_authority {
                     return Err(tau::ModuleError::AccessDenied);
                 }
-                matter::bind(window, context, local.module, msg[1], msg[2])
+                matter::bind_dependency(window, context, local.module, msg[1], msg[2])
             })();
             match res {
                 Ok(slot) => {

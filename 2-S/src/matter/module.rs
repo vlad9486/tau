@@ -40,25 +40,10 @@ pub struct ModuleContext {
     dependencies: [Option<space::Root>; 0x800],
 }
 
-impl ModuleContext {
-    /// # Safety
-    /// `this` must point to writable, aligned storage with exclusive access
-    /// until initialization completes.
-    pub unsafe fn init_at(this: *mut Self, root: space::Root) {
-        unsafe {
-            ptr::addr_of_mut!((*this).header.registers).write([0; 32]);
-            ptr::addr_of_mut!((*this).header.sepc).write(0);
-            ptr::addr_of_mut!((*this).header.caller).write(None);
-            ptr::addr_of_mut!((*this).header.root).write(root);
-            ptr::addr_of_mut!((*this).header.entry).write(0);
-        }
-        let dependencies =
-            unsafe { ptr::addr_of_mut!((*this).dependencies).cast::<Option<space::Root>>() };
-        for slot in 0..0x800 {
-            unsafe { dependencies.add(slot).write(None) };
-        }
-    }
+// The complete context fits before __MODULE.
+const _: () = assert!(size_of::<ModuleContext>() <= space::MODULE - space::MODULE_CONTEXT);
 
+impl ModuleContext {
     /// Initialize a context whose backing pages have already been zeroed.
     ///
     /// # Safety
@@ -109,24 +94,6 @@ pub struct ModuleDescriptor {
     pub physical: usize,
 }
 
-/// Range in userspace module's virtual memory
-#[repr(C)]
-pub struct WaitTable {
-    pub base: usize,
-    pub count: usize,
-}
-
-impl WaitTable {
-    pub const EMPTY: Self = Self { base: 0, count: 0 };
-
-    pub fn unsafe_clone(&self) -> Self {
-        WaitTable {
-            base: self.base,
-            count: self.count,
-        }
-    }
-}
-
 impl ModuleDescriptor {
     pub const EMPTY: Self = Self {
         stem: 0,
@@ -147,6 +114,14 @@ pub struct ModuleHeader {
     pub wait_table: WaitTable,
 }
 
+#[derive(Clone, Copy, Default)]
+#[repr(C, align(32))]
+pub struct WaitRecord {
+    pub pending: bool,
+    pub thread_id: usize,
+    pub sequence: usize,
+}
+
 /// Supervisor-only metadata shared by all contexts of one module.
 /// Dependency templates identify reusable shared branches of address spaces.
 #[repr(C, align(4096))]
@@ -155,7 +130,7 @@ pub struct Module {
     // Slot zero is the free-list head. Free entries contain the next slot;
     // occupied entries contain a tagged physical descriptor address.
     dependencies: [AtomicUsize; Self::END],
-    wait_table: [WaitRecord; Self::WAIT_SIZE],
+    wait_records: [WaitRecord; Self::WAIT_SIZE],
     // TODO:
     // wait_slots: [[u64; 8]; Self::WAIT_SIZE],
 }
@@ -186,7 +161,7 @@ impl Module {
         for index in 0..Self::END {
             unsafe { dependencies.add(index).write(AtomicUsize::new(index + 1)) };
         }
-        let wait_table = unsafe { ptr::addr_of_mut!((*this).wait_table).cast::<WaitRecord>() };
+        let wait_table = unsafe { ptr::addr_of_mut!((*this).wait_records).cast::<WaitRecord>() };
         for index in 0..Self::WAIT_SIZE {
             unsafe { wait_table.add(index).write(WaitRecord::default()) };
         }
@@ -255,7 +230,7 @@ impl Module {
     /// protect record access.
     pub unsafe fn read_wait(&self, index: usize) -> WaitRecord {
         debug_assert!(index < self.header.wait_table.count);
-        unsafe { *self.wait_table.get_unchecked(index) }
+        unsafe { *self.wait_records.get_unchecked(index) }
     }
 
     /// Write one record through a temporary physical alias.
@@ -265,7 +240,7 @@ impl Module {
     /// protect record access; no alias reference may survive this operation.
     pub unsafe fn write_wait(&mut self, index: usize, record: WaitRecord) {
         debug_assert!(index < self.header.wait_table.count);
-        unsafe { *self.wait_table.get_unchecked_mut(index) = record };
+        unsafe { *self.wait_records.get_unchecked_mut(index) = record };
     }
 }
 
@@ -279,15 +254,16 @@ impl Drop for DependencyGuard<'_> {
 
 // ---
 
-#[derive(Clone, Copy, Default)]
-#[repr(C, align(32))]
-pub struct WaitRecord {
-    pub pending: bool,
-    pub thread_id: usize,
-    pub sequence: usize,
+/// Range in userspace module's virtual memory
+#[repr(C)]
+pub struct WaitTable {
+    pub base: usize,
+    pub count: usize,
 }
 
 impl WaitTable {
+    pub const EMPTY: Self = Self { base: 0, count: 0 };
+
     pub fn validate(stem: usize, base: usize, count: usize) -> Result<Self, tau::ModuleError> {
         if count == 0 {
             return Ok(Self::EMPTY);
@@ -381,11 +357,11 @@ pub fn create_module(
             return Err(tau::ModuleError::OutOfMemory);
         }
     };
-    let new_tables = window.map_module(physical);
+    let module = window.map_module(physical);
     unsafe {
-        Module::init_at(ptr::from_mut(new_tables), false, false);
-        ptr::addr_of_mut!(new_tables.header.wait_table).write(wait_table);
-        ptr::addr_of_mut!(new_tables.header.descriptor).write(ModuleDescriptor {
+        Module::init_at(ptr::from_mut(module), false, false);
+        ptr::addr_of_mut!(module.header.wait_table).write(wait_table);
+        ptr::addr_of_mut!(module.header.descriptor).write(ModuleDescriptor {
             stem,
             root_index: Some(root_index as u16),
             entry,
@@ -396,7 +372,7 @@ pub fn create_module(
     Ok(physical / space::PAGE)
 }
 
-pub fn bind(
+pub fn bind_dependency(
     window: &mut WindowAccess,
     context: &Context,
     module: &Module,
@@ -413,12 +389,12 @@ pub fn bind(
     } else {
         // Alias only at publication, after snapshot/construction aliases
         // have expired. No window remapping may occur while borrowed.
-        let physical = space::descriptor_page(context, parent)?;
+        let physical = space::validate_module_handle(context, parent)?;
         &*window.map_module(physical)
     };
-    let descriptor = space::descriptor_page(context, dependency)?;
+    let physical = space::validate_module_handle(context, dependency)?;
     module
-        .insert_dependency(descriptor)
+        .insert_dependency(physical)
         .ok_or(tau::ModuleError::NoSlots)
 }
 

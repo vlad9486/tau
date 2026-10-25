@@ -6,14 +6,14 @@
 
 use super::{
     llfree, csr,
-    matter::{ModuleContext, Module, ModuleDescriptor},
+    matter::{Module, ModuleDescriptor},
     state::Context,
 };
 
 mod alloc;
 pub use self::alloc::{
     map_pages, unmap_pages, validate_map, validate_map_unprivileged, validate_unmap,
-    descriptor_page,
+    validate_module_handle,
 };
 
 mod vmem;

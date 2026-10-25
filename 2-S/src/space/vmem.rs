@@ -10,7 +10,7 @@ use core::{
     num::NonZeroUsize,
 };
 
-use super::{csr, llfree, Module, ModuleDescriptor, ModuleContext};
+use super::{csr, llfree, Module, ModuleDescriptor};
 
 const SV39: usize = 8;
 pub const PAGE: usize = 4096;
@@ -22,9 +22,6 @@ pub const SUPERVISOR_INDEX: usize = 256;
 // Sv39 RSW: this entry owns an allocator page (data or a child table).
 // Borrowed entries stop reclamation, including whole shared branches.
 pub const OWNED: usize = 1 << 8;
-
-// The complete context fits before __MODULE.
-const _: () = assert!(size_of::<ModuleContext>() <= MODULE - MODULE_CONTEXT);
 
 pub const fn flags_new(&[r, w, x, u, g]: &[u8; 5]) -> usize {
     0xc1 | if r != b'-' { 2 } else { 0 }
@@ -119,7 +116,7 @@ pub struct Window {
     page: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 2: zeroing / segment copy)
     _reserved3: UnsafeCell<MaybeUninit<Page>>,                      // 1 page  (slot 3: reserved)
     descriptor: UnsafeCell<MaybeUninit<Padded<ModuleDescriptor>>>,  // 1 page  (slot 4: foreign module tables page 0 / descriptor)
-    wait: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 5: WaitRecord / wait slot)
+    wait: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 5: wait slots)
     hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,                    // 1 page  (slot 6: permanent per-hart MMU)
     module: UnsafeCell<MaybeUninit<Module>>,                        // 6 pages (slots 7..13: foreign Module)
     _reserved: UnsafeCell<MaybeUninit<[Page; 498]>>,                // unused window slots
