@@ -28,6 +28,8 @@ pub struct ModuleContextHeader {
     pub root: space::Root,
     /// address space root of the caller, is `None` for the `system` module
     caller: Option<space::Root>,
+    /// cached entry point of the module
+    pub entry: usize,
 }
 
 /// Module context is similar to a thread, but has its own address space
@@ -48,6 +50,7 @@ impl ModuleContext {
             ptr::addr_of_mut!((*this).header.sepc).write(0);
             ptr::addr_of_mut!((*this).header.caller).write(None);
             ptr::addr_of_mut!((*this).header.root).write(root);
+            ptr::addr_of_mut!((*this).header.entry).write(0);
         }
         let dependencies =
             unsafe { ptr::addr_of_mut!((*this).dependencies).cast::<Option<space::Root>>() };
@@ -61,13 +64,14 @@ impl ModuleContext {
     /// # Safety
     /// The first page at `this` must be writable, aligned, and zeroed, and all
     /// remaining pages of `Self` must already be zeroed.
-    pub unsafe fn init_zeroed(this: *mut Self, root: space::Root, sepc: usize) {
+    pub unsafe fn init_zeroed(this: *mut Self, root: space::Root, entry: usize) {
         const {
             assert!(mem::offset_of!(Self, dependencies) <= space::PAGE);
             assert!(mem::size_of::<Option<space::Root>>() == mem::size_of::<usize>());
         }
         unsafe {
-            ptr::addr_of_mut!((*this).header.sepc).write(sepc);
+            ptr::addr_of_mut!((*this).header.sepc).write(entry);
+            ptr::addr_of_mut!((*this).header.entry).write(entry);
             ptr::addr_of_mut!((*this).header.root).write(root);
         }
     }
@@ -75,8 +79,8 @@ impl ModuleContext {
     /// Set linkage and PC for a fresh invocation, retaining dependency roots.
     /// Saved registers remain stale until the next user trap; fresh entry must
     /// clear the hardware registers rather than restore this saved state.
-    pub fn enter(&mut self, caller: space::Root, entry: usize) {
-        self.header.sepc = entry;
+    pub fn enter(&mut self, caller: space::Root) {
+        self.header.sepc = self.header.entry;
         self.header.caller = Some(caller);
     }
 

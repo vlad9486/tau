@@ -12,6 +12,8 @@ SECTIONS
 	.text :
 	{
 		KEEP(*(.text.init))
+		KEEP(*(.text.hot .text.hot.*))
+		. = ALIGN(0x1000);
 		*(.text .text.*)
 		. = ALIGN(0x1000);
 	}

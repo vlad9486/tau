@@ -41,22 +41,33 @@ impl<'a> State<'a> {
 }
 
 fn measure_roundtrips(shared: &UnsafeCell<Shared>, slot: u16) {
-    let mut samples = [0; 22];
+    let mut samples = [(0, 0); 1001];
     for (index, cycles) in samples.iter_mut().enumerate() {
         let value = index + 1;
-        let start = tau::asm::read_cycle();
-        let response = tau::Ubi::invoke::<1, 2>(slot, 0, [value]);
-        *cycles = tau::asm::read_cycle().wrapping_sub(start);
-        let [reply, count] = response.expect("invoke dummy-test");
+        let invoke_start = tau::asm::read_cycle();
+        let response = tau::Ubi::invoke(slot, 0, [value]);
+        let respond_end = tau::asm::read_cycle();
+        let [reply, count, invoke_end, respond_start] = response.expect("invoke dummy-test");
+        let invoke_cycles = invoke_end.wrapping_sub(invoke_start);
+        let respond_cycles = respond_end.wrapping_sub(respond_start);
+        *cycles = (invoke_cycles, respond_cycles);
         assert_eq!(reply, value.rotate_left(7) ^ 0x5344_494f);
         assert_eq!(count, value);
     }
 
-    let mean = samples[2..].iter().map(|x| *x as f32).sum::<f32>() / 20.0;
-    samples.sort();
-    let median = samples[10];
+    // first sample is warmup
+    let hot = &mut samples[1..];
+    let invoke_mean = hot.iter().map(|(x, _)| *x as f32).sum::<f32>() / (hot.len() as f32);
+    let respond_mean = hot.iter().map(|(_, x)| *x as f32).sum::<f32>() / (hot.len() as f32);
+    hot.sort_by(|(lhs, _), (rhs, _)| lhs.cmp(rhs));
+    let invoke_median = hot[hot.len() / 2].0;
+    hot.sort_by(|(_, lhs), (_, rhs)| lhs.cmp(rhs));
+    let respond_median = hot[hot.len() / 2].1;
     unsafe { &mut *shared.get() }.write(format_args!(
-        "dummy-test roundtrip mean: {mean}, median: {median}"
+        "roundtrip invoke mean: {invoke_mean}, median: {invoke_median}"
+    ));
+    unsafe { &mut *shared.get() }.write(format_args!(
+        "roundtrip respond mean: {respond_mean}, median: {respond_median}"
     ));
 }
 

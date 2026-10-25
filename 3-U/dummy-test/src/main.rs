@@ -75,8 +75,11 @@ extern "C" fn dummy_main(
     let arg = event as u16;
     match arg {
         0 => {
+            let invoke_end = tau::asm::read_cycle();
             let count = count_call();
-            tau::Ubi::respond(0, [value.rotate_left(7) ^ 0x5344_494f, count])
+            let value = value.rotate_left(7) ^ 0x5344_494f;
+            let respond_start = tau::asm::read_cycle();
+            tau::Ubi::respond(0, [value, count, invoke_end, respond_start])
         }
         1 => {
             // Authority belongs to this module, not to the invoking thread.

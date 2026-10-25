@@ -113,10 +113,10 @@ pub unsafe fn init(
         .map_err(InitError::Alloc)?;
     unsafe { Module::init_at(tables, true, false) };
 
-    let sepc = context.boot.entry;
+    let entry = context.boot.entry;
     let stack_pages = context.boot.stack_pages;
     let satp = Window::current_root();
-    let stem = (sepc >> 30) & 511;
+    let stem = (entry >> 30) & 511;
     let wait_table = WaitTable::prepare(
         window,
         context,
@@ -134,11 +134,11 @@ pub unsafe fn init(
         ptr::addr_of_mut!((*tables).header.descriptor).write(ModuleDescriptor {
             stem: stem_phys,
             root_index,
-            entry: sepc,
+            entry,
             stack_pages,
             physical: module_physical,
         });
-        ModuleContext::init_zeroed(module, satp, sepc);
+        ModuleContext::init_zeroed(module, satp, entry);
     }
-    Ok((satp, sepc))
+    Ok((satp, entry))
 }

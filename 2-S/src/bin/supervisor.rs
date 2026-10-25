@@ -172,11 +172,11 @@ extern "C" fn init(hart_id: usize, info: usize, info_pages: usize) -> ! {
     let root = window.init(hart_id);
     writeln!(sbi::Console, "SU: {}\r", window.hart()).unwrap_or_default();
 
-    let thread = ThreadState::runnable(root, [0; 6], ReturnKind::Syscall);
-    unsafe { su_try(Scheduler::init(scheduler, &mut window, context, thread)) };
-
     let (satp, sepc) =
         su_try(unsafe { state::init(&mut window, hart_id, module, tables, context) });
+
+    let thread = ThreadState::runnable(root, [0; 6], ReturnKind::Syscall);
+    unsafe { su_try(Scheduler::init(scheduler, &mut window, context, thread)) };
     unsafe {
         arch::asm! {
             "li t0, 0x100",
@@ -201,6 +201,7 @@ extern "C" fn init(hart_id: usize, info: usize, info_pages: usize) -> ! {
     }
 }
 
+#[unsafe(link_section = ".text.hot")]
 #[unsafe(naked)]
 extern "C" fn trap_entry() -> ! {
     arch::naked_asm! {
@@ -289,6 +290,7 @@ extern "C" fn trap_entry() -> ! {
     }
 }
 
+#[unsafe(link_section = ".text.hot")]
 #[unsafe(naked)]
 extern "C" fn handle_syscall() -> ! {
     arch::naked_asm! {
@@ -323,6 +325,10 @@ extern "C" fn handle_syscall() -> ! {
         "sd s11, {s11}(tp)",
 
         "li sp, {stack}",
+        "slli t0, a0, 60",
+        "srli t0, t0, 60",
+        "addi t0, t0, -1",
+        "beqz t0, {invoke}",
         "j {syscall}",
 
         pc  = const { mem::offset_of!(matter::ModuleContext, header.sepc) },
@@ -346,7 +352,8 @@ extern "C" fn handle_syscall() -> ! {
 
         stack = const { WINDOW_END },
         respond = sym respond,
-        syscall = sym syscall,
+        invoke = sym invoke,
+        syscall = sym syscall_slow,
     }
 }
 
@@ -393,6 +400,7 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
     }
 }
 
+#[unsafe(link_section = ".text.hot")]
 extern "C" fn respond(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
     let Ok(tau::Call::Respond { code }) = tau::Call::decode(a0) else {
         unsafe { hint::unreachable_unchecked() };
@@ -428,16 +436,11 @@ fn respond_exit() -> ! {
     resume_scheduled(&window, local, selected)
 }
 
-extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
-    if let Ok(tau::Call::Invoke { slot, arg }) = tau::Call::decode(a0) {
-        return invoke(slot, arg, a1, a2, a3, a4, a5);
-    }
-    hint::cold_path();
-    syscall_slow(a0, a1, a2, a3, a4, a5)
-}
-
-#[inline(always)]
-fn invoke(slot: u16, arg: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
+#[unsafe(link_section = ".text.hot")]
+extern "C" fn invoke(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
+    let Ok(tau::Call::Invoke { slot, arg }) = tau::Call::decode(a0) else {
+        unsafe { hint::unreachable_unchecked() };
+    };
     let window = unsafe { space::WindowAccess::new(&raw const __WINDOW) };
     let local = unsafe { local_access() };
     let Some(root) = local.module_context.dependency(slot) else {
@@ -453,9 +456,7 @@ fn invoke(slot: u16, arg: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: u
         hint::cold_path();
         invoke_poisoned(caller);
     }
-    local
-        .module_context
-        .enter(caller, local.module.header.descriptor.entry);
+    local.module_context.enter(caller);
     enter_invocation_hot(arg as usize, a1, a2, a3, a4, a5)
 }
 
@@ -495,9 +496,7 @@ fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize,
         hint::cold_path();
         invoke_poisoned(caller);
     }
-    local
-        .module_context
-        .enter(caller, local.module.header.descriptor.entry);
+    local.module_context.enter(caller);
     enter_invocation(arg as usize, a1, a2, a3, a4, a5)
 }
 
