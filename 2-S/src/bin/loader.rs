@@ -148,7 +148,7 @@ extern "C" fn inner(
             in("a1") info,
             in("a2") info_pages,
             satp = in(reg) satp,
-            sepc = const { 0x_ffff_ffc0_0060_1000_usize },
+            sepc = const { space::SUPERVISOR_TEXT },
         }
     }
 }
@@ -164,6 +164,7 @@ fn init_memory(
 ) -> Result<usize, Error> {
     let mut cores = 0;
     let mut memory_size = 0;
+    let mut dma_area = None;
     for (props, path) in dtb.iter() {
         if path.len() == 3 && path[1] == "cpus" && path[2].starts_with("cpu@") {
             let status = props.find_str(|name| name == "status");
@@ -173,6 +174,13 @@ fn init_memory(
             && path[1].starts_with("memory@")
         {
             memory_size = area.len;
+        } else if path.len() == 3
+            && path[1] == "reserved-memory"
+            && props.find_str(|name| name == "compatible") == Some("shared-dma-pool")
+            && props.find_int(|name| name == "no-map").is_none()
+            && let Some(area) = props.find_alloc_ranges().or_else(|| props.find_reg())
+        {
+            dma_area = Some(area);
         }
     }
     if cores < 2 || memory_size < 0x1000000 * cores {
@@ -181,71 +189,131 @@ fn init_memory(
     let Some(frames) = NonZero::new(memory_size >> 12) else {
         return Err(Error::Memory);
     };
+    if frames.get() > space::MAX_RAM_FRAMES {
+        return Err(Error::Memory);
+    }
 
     let ptr = unsafe { st.add(HEAP_END) };
-    let Some(pages) = Allocator::expected_size(frames).map(|x| x.div_ceil(0x1000)) else {
+    let Some(pages) = Allocator::expected_size(frames).map(|x| x.div_ceil(space::PAGE)) else {
         return Err(Error::Memory);
     };
     let mut allocator = unsafe { Allocator::new(frames, ptr.cast()) }.ok_or(Error::Memory)?;
     allocator.reserve_all();
     let allocator = allocator.as_lower();
 
+    let dma_ptr = unsafe { ptr.add(pages) };
+    let (dma_base_addr, dma_frames, dma_pages, dma_alloc) = match dma_area {
+        Some(area) if area.base & 0xfff == 0 => {
+            let frames = NonZero::new(area.len >> 12).ok_or(Error::Memory)?;
+            if frames.get() > space::MAX_DMA_FRAMES {
+                return Err(Error::Memory);
+            }
+            let meta_pages = Allocator::expected_size(frames)
+                .ok_or(Error::Memory)?
+                .div_ceil(space::PAGE);
+            let mut alloc =
+                unsafe { Allocator::new(frames, dma_ptr.cast()) }.ok_or(Error::Memory)?;
+            alloc.reserve_all();
+            (area.base, Some(frames), meta_pages, Some(alloc))
+        }
+        Some(_) => return Err(Error::Memory),
+        None => (0, None, 0, None),
+    };
+
     // Keep firmware reservations (including the VF2 scanout buffer) out of
-    // the allocator. Test overlaps, since a reservation need not start on a
+    // the allocators. Test overlaps, since a reservation need not start on a
     // page or huge-page boundary. Area bases are physical; FrameId is relative.
     let memory_base = st.addr();
-    let available = |frame: usize, pages: usize| {
-        let base = memory_base + (frame << 12);
-        let end = base + (pages << 12);
+    // beginning of free memory (`0x200` is opensbi size)
+    let mut frame = 0x200 + HEAP_END + pages + dma_pages;
+    let boot_end = memory_base + (frame << 12);
+    let range_available = |base: usize, count: usize, is_dma: bool| {
+        let end = base + (count << 12);
         let overlaps =
             |start: usize, len: usize| len != 0 && base < start.saturating_add(len) && start < end;
-        !(base < dtb_range.end && dtb_range.start < end)
+        (!is_dma || end <= memory_base || base >= boot_end)
+            && !(base < dtb_range.end && dtb_range.start < end)
             && !reservations
                 .into_iter()
                 .any(|(start, len)| overlaps(start, len))
             && !dtb.iter().any(|(props, path)| {
                 path.len() == 3
                     && path[1] == "reserved-memory"
+                    && (!is_dma
+                        || props.find_str(|name| name == "compatible") != Some("shared-dma-pool")
+                        || props.find_int(|name| name == "no-map").is_some())
                     && props
                         .find_reg()
+                        .or_else(|| props.find_alloc_ranges())
                         .is_some_and(|area| overlaps(area.base, area.len))
             })
     };
 
-    // beginning of free memory
-    // `0x200` is opensbi size
-    let mut frame = 0x200 + HEAP_END + pages;
     while frame & 0o777 != 0 {
         let core = ((frame >> 10) + hart_id) % cores;
-        if available(frame, 1) {
+        if range_available(memory_base + (frame << 12), 1, false) {
             allocator.put(core, FrameId(frame), 0)?;
         }
         frame += 1;
     }
     for big_frame in (frame / 0o1000)..(frames.get() / 0o1000) {
         let frame = big_frame << 9;
-        if !available(frame, 512) {
+        if !range_available(memory_base + (frame << 12), 512, false) {
             continue;
         }
         let core = ((frame >> 10) + hart_id) % cores;
         allocator.put(core, FrameId(frame), 9)?;
     }
 
+    if let Some(dma_alloc) = dma_alloc.as_ref() {
+        let dma_lower = dma_alloc.as_lower();
+        let total = dma_lower.frames();
+        let mut dma_frame = 0;
+        while dma_frame < total && dma_frame & 0o777 != 0 {
+            let core = ((dma_frame >> 10) + hart_id) % cores;
+            if range_available(dma_base_addr + (dma_frame << 12), 1, true) {
+                dma_lower.put(core, FrameId(dma_frame), 0)?;
+            }
+            dma_frame += 1;
+        }
+        for big_frame in (dma_frame / 0o1000)..(total / 0o1000) {
+            let frame = big_frame << 9;
+            let core = ((frame >> 10) + hart_id) % cores;
+            if range_available(dma_base_addr + (frame << 12), 512, true) {
+                dma_lower.put(core, FrameId(frame), 9)?;
+            } else {
+                for sub in frame..frame + 512 {
+                    if range_available(dma_base_addr + (sub << 12), 1, true) {
+                        dma_lower.put(core, FrameId(sub), 0)?;
+                    }
+                }
+            }
+        }
+        for tail_frame in (total & !0o777).max(dma_frame)..total {
+            let core = ((tail_frame >> 10) + hart_id) % cores;
+            if range_available(dma_base_addr + (tail_frame << 12), 1, true) {
+                dma_lower.put(core, FrameId(tail_frame), 0)?;
+            }
+        }
+    }
+
     let mut gfp = {
         let mut offset = HEAP_START;
-        assert!(offset < HEAP_END);
-        move || {
+        move || -> Result<&mut [usize; 0o1000], Error> {
+            if offset >= HEAP_END {
+                return Err(Error::Memory);
+            }
             offset += 1;
-            unsafe { &mut *st.add(offset - 1) }.write([0; 0o1000])
+            Ok(unsafe { &mut *st.add(offset - 1) }.write([0; 0o1000]))
         }
     };
 
-    let l0 = gfp();
+    let l0 = gfp()?;
     let root_table = l0.as_mut_ptr().addr();
 
     // map self
-    let l1 = gfp();
-    let l2 = gfp();
+    let l1 = gfp()?;
+    let l2 = gfp()?;
     l0[(st.addr() >> 30) & 0o777] = (l1.as_mut_ptr().addr() >> 2) + 1;
     l1[(st.addr() >> 21) & 0o777] = (l2.as_mut_ptr().addr() >> 2) + 1;
     // assume doesn't cross 2MiB boundary
@@ -265,49 +333,69 @@ fn init_memory(
     // during supervisor bootstrap. Future contexts reuse those module pages.
     // 0xffff_ffc0_0040_0000 .. 0xffff_ffc0_0060_0000 (2 MiB, global, scheduler)
     // 0xffff_ffc0_0060_0000 .. 0xffff_ffc0_006e_0000 (896 kiB, global, context and supervisor image)
-    // 0xffff_ffc0_006e_0000 .. 0xffff_ffc0_0100_0000 (9 MiB 128 kiB, global, llfree allocator)
+    // 0xffff_ffc0_006e_0000 .. 0xffff_ffc0_00fe_0000 (9 MiB, global, normal llfree allocator, max 2^38 B RAM)
+    // 0xffff_ffc0_00fe_0000 .. 0xffff_ffc0_0100_0000 (128 kiB, global, DMA llfree allocator, max 2^31 B DMA)
     // 0xffff_ffc0_0100_0000 .. 0xffff_ffc0_4000_0000 (1008 MiB, unused)
     // 0xffff_ffc0_4000_0000 .. 0x0000_0040_0000_0000 (511 GiB, user)
 
-    let l1 = gfp();
+    let l1 = gfp()?;
     // the global branch, always `0o400`
     l0[0o400] = (l1.as_mut_ptr().addr() >> 2) + 1;
 
-    let l2 = gfp();
+    let l2 = gfp()?;
     // the branch of the cpu context
     // Identical per-hart window and stack in every runtime root.
     l1[0o000] = (l2.as_mut_ptr().addr() >> 2) + 1 + 32;
     // loop
     l2[0o000] = (l2.as_mut_ptr().addr() >> 2) + space::flags_new(b"rw---");
 
-    let hart_mmu = gfp();
+    let hart_mmu = gfp()?;
     l2[space::HART_SLOT] = (hart_mmu.as_mut_ptr().addr() >> 2) + space::flags_new(b"rw---");
 
     // STATUS: size of the kernel stack is 1 page, increase if needed
-    let stack = gfp();
+    let stack = gfp()?;
     l2[space::STACK_SLOT] = (stack.as_mut_ptr().addr() >> 2) + space::flags_new(b"rw---");
 
     // The supervisor allocates and maps the module context and shared scheduler branches at startup.
+    let context_page = gfp()?;
+    let context_phys = context_page.as_mut_ptr().addr();
 
-    let mut l2 = gfp();
-    // the branch of the supervisor image
-    l1[0o003] = (l2.as_mut_ptr().addr() >> 2) + 1;
-    let context_page = gfp();
-    l2[0o000] = (context_page.as_mut_ptr().addr() >> 2) + space::flags_new(b"rw--g");
+    let mut map_global = |vaddr: usize, paddr: usize, flags: &[u8; 5]| -> Result<(), Error> {
+        let vpn1 = (vaddr >> 21) & 0o777;
+        let vpn0 = (vaddr >> 12) & 0o777;
+        if l1[vpn1] == 0 {
+            let page = gfp()?;
+            l1[vpn1] = (page.as_mut_ptr().addr() >> 2) | 1;
+        }
+        let l2 = unsafe { &mut *st.with_addr((l1[vpn1] >> 10) << 12).cast::<[usize; 512]>() };
+        if l2[vpn0] != 0 {
+            return Err(Error::Address);
+        }
+        l2[vpn0] = (paddr >> 2) | space::flags_new(flags);
+        Ok(())
+    };
 
+    map_global(space::CONTEXT, context_phys, b"rw--g")?;
     for p in 0..SUPERVISOR_SIZE {
-        let virtual_page = 0x601 + p;
-        l2[virtual_page % 0o1000] =
-            ((st.addr() + ((SUPERVISOR_OFFSET + p) << 12)) >> 2) + space::flags_new(b"r-x-g");
+        map_global(
+            space::SUPERVISOR_TEXT + (p << 12),
+            st.addr() + ((SUPERVISOR_OFFSET + p) << 12),
+            b"r-x-g",
+        )?;
     }
     for p in 0..pages {
-        let virtual_page = 0x6e0 + p;
-        let q = unsafe { l1.get_unchecked_mut(virtual_page / 0o1000) };
-        if *q == 0 {
-            l2 = gfp();
-            *q = (l2.as_mut_ptr().addr() >> 2) + 1;
-        }
-        l2[virtual_page % 0o1000] = ((ptr.addr() + (p << 12)) >> 2) + space::flags_new(b"rw--g");
+        map_global(
+            space::ALLOCATOR + (p << 12),
+            ptr.addr() + (p << 12),
+            b"rw--g",
+        )?;
+    }
+    for p in 0..dma_pages {
+        map_global(
+            space::DMA_ALLOCATOR + (p << 12),
+            dma_ptr.addr() + (p << 12),
+            b"rw--g",
+        )?;
     }
 
     let boot = load_system_elf(hart_id, &allocator, st, l0)?;
@@ -316,6 +404,14 @@ fn init_memory(
             .ok_or(Error::Memory)?
             .into_lower()
     };
+    let dma_allocator = match dma_frames {
+        Some(dma_frames) => Some(unsafe {
+            Allocator::new(dma_frames, st.with_addr(space::DMA_ALLOCATOR).cast())
+                .ok_or(Error::Memory)?
+                .into_lower()
+        }),
+        None => None,
+    };
     let bootstrap_root = space::Root::sv39(root_table, 0);
     unsafe {
         context_page
@@ -323,7 +419,9 @@ fn init_memory(
             .cast::<state::Context>()
             .write(state::Context {
                 allocator,
+                dma_allocator,
                 base_addr: st.addr(),
+                dma_base_addr,
                 bootstrap_root,
                 boot,
             });

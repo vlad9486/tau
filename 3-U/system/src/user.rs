@@ -83,9 +83,8 @@ async fn run(
         unsafe { &mut *shared.get() }.display_task = Some(display::Task::TestPattern);
     }
     if has_sdio {
-        // TODO: allocator for DMA
-        let phys = 0x7000_1000_u32;
-        let base = tau::to_size(phys);
+        let base = tau::Ubi::alloc_physical(0, tau::MemoryZone::Dma).expect("alloc sdio dma");
+        let phys = u32::try_from(base).expect("sdio dma 32-bit");
         let page = tau::Area::new(base, 0x1000).r::<MaybeUninit<[[u8; 0x10]; 0x100]>>();
 
         read_sdio(shared, phys, 0x600).await;
@@ -103,20 +102,27 @@ async fn run(
         }
     }
 
-    // TODO: DMA allocator. Descriptor pages are 0x70002000 / 0x70004000.
-    let tx_phys = [0x7000_3000u32, 0x7000_5000];
-    let tx_buffers =
-        tx_phys.map(|phys| tau::Area::new(phys as usize, 0x1000).r::<[Register<u8, u8>; 0x1000]>());
-    let mut tx_usable = [true, false];
+    let mut tx_phys = [0u32; 2];
+    let mut tx_buffers: [Option<&'static [Register<u8, u8>; 0x1000]>; 2] = [None; 2];
+    let mut tx_usable = [has_ethernet, false];
     let mut tx_pending = [None; 2];
 
     // User-owned RX pages, separate from both descriptor rings and TX buffers.
-    let rx_phys = [0x7000_6000u32, 0x7000_7000];
-    let rx_buffers =
-        rx_phys.map(|phys| tau::Area::new(phys as usize, 0x1000).r::<[Register<u8, u8>; 0x1000]>());
+    let mut rx_phys = [0u32; 2];
+    let mut rx_buffers: [Option<&'static [Register<u8, u8>; 0x1000]>; 2] = [None; 2];
     if has_ethernet {
-        for (port, phys) in rx_phys.into_iter().enumerate() {
-            post_receive(shared, port, phys);
+        for port in 0..2 {
+            let tx_base =
+                tau::Ubi::alloc_physical(0, tau::MemoryZone::Dma).expect("alloc eth tx dma");
+            tx_phys[port] = u32::try_from(tx_base).expect("eth tx dma 32-bit");
+            tx_buffers[port] = Some(tau::Area::new(tx_base, 0x1000).r());
+
+            let rx_base =
+                tau::Ubi::alloc_physical(0, tau::MemoryZone::Dma).expect("alloc eth rx dma");
+            rx_phys[port] = u32::try_from(rx_base).expect("eth rx dma 32-bit");
+            rx_buffers[port] = Some(tau::Area::new(rx_base, 0x1000).r());
+
+            post_receive(shared, port, rx_phys[port]);
         }
     }
     let mut sequence = 0u32;
@@ -146,9 +152,11 @@ async fn run(
                     if let Some(result) = done {
                         match result {
                             Ok(len) => {
+                                let Some(rx_buf) = rx_buffers[port] else {
+                                    continue;
+                                };
                                 tau::asm::fence();
-                                let header: [u8; 14] =
-                                    core::array::from_fn(|i| rx_buffers[port][i].read());
+                                let header: [u8; 14] = core::array::from_fn(|i| rx_buf[i].read());
                                 let ether_type = u16::from_be_bytes([header[12], header[13]]);
                                 unsafe { &mut *shared.get() }.write(format_args!(
                                     "eth{port}: RX len={len} dst={:02x?} src={:02x?} type={ether_type:04x}",
@@ -204,11 +212,14 @@ async fn run(
                     }
                     b't' => {
                         for port in 0..2 {
+                            let Some(tx_buf) = tx_buffers[port] else {
+                                continue;
+                            };
                             if !tx_usable[port] || tx_pending[port].is_some() {
                                 continue;
                             }
                             let packet = frame::build(port as u8, sequence);
-                            for (dst, byte) in tx_buffers[port].iter().zip(packet) {
+                            for (dst, byte) in tx_buf.iter().zip(packet) {
                                 dst.write(byte);
                             }
                             tau::asm::fence();

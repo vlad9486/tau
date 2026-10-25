@@ -347,6 +347,14 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
                 tau::Ubi::free_physical(usize::MAX, 0, tau::MemoryZone::Normal),
                 Err(tau::FreeError::InvalidAddress)
             );
+            assert_eq!(
+                tau::Ubi::alloc_physical(0, tau::MemoryZone::Dma),
+                Err(tau::AllocError::OutOfMemory)
+            );
+            assert_eq!(
+                tau::Ubi::free_physical(phys, 0, tau::MemoryZone::Dma),
+                Err(tau::FreeError::InvalidAddress)
+            );
             tau::Ubi::free_physical(phys, 0, tau::MemoryZone::Normal).unwrap();
             for (entry, stack_pages) in [
                 (0x1001, 1),                // unaligned entry

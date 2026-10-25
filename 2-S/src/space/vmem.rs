@@ -15,13 +15,41 @@ use super::{csr, llfree, Module, ModuleDescriptor};
 const SV39: usize = 8;
 pub const PAGE: usize = 4096;
 pub const SCHEDULER: usize = 0xffff_ffc0_0040_0000;
+pub const CONTEXT: usize = 0xffff_ffc0_0060_0000;
+pub const SUPERVISOR_TEXT: usize = 0xffff_ffc0_0060_1000;
 pub const ALLOCATOR: usize = 0xffff_ffc0_006e_0000;
+pub const ALLOCATOR_PAGES: usize = 0x900;
+pub const DMA_ALLOCATOR: usize = ALLOCATOR + ALLOCATOR_PAGES * PAGE;
+pub const DMA_ALLOCATOR_PAGES: usize = 0x20;
+pub const ALLOCATOR_END: usize = DMA_ALLOCATOR + DMA_ALLOCATOR_PAGES * PAGE;
+pub const MAX_RAM_FRAMES: usize = 1 << 26;
+pub const MAX_DMA_FRAMES: usize = 1 << 19;
 pub const MODULE_CONTEXT: usize = 0xffff_ffc0_0021_0000;
 pub const MODULE: usize = 0xffff_ffc0_0022_0000;
 const SUPERVISOR_INDEX: usize = 256;
 // Sv39 RSW: this entry owns an allocator page (data or a child table).
 // Borrowed entries stop reclamation, including whole shared branches.
 pub const OWNED: usize = 1 << 8;
+
+const _: () = {
+    let Some(ram_frames) = NonZeroUsize::new(MAX_RAM_FRAMES) else {
+        panic!();
+    };
+    let Some(ram_meta_bytes) = llfree::Allocator::expected_size(ram_frames) else {
+        panic!();
+    };
+    assert!(ram_meta_bytes == ALLOCATOR_PAGES * PAGE);
+
+    let Some(dma_frames) = NonZeroUsize::new(MAX_DMA_FRAMES) else {
+        panic!();
+    };
+    let Some(dma_meta_bytes) = llfree::Allocator::expected_size(dma_frames) else {
+        panic!();
+    };
+    assert!(dma_meta_bytes.div_ceil(PAGE) <= DMA_ALLOCATOR_PAGES);
+    assert!(DMA_ALLOCATOR == 0xffff_ffc0_00fe_0000);
+    assert!(ALLOCATOR_END == 0xffff_ffc0_0100_0000);
+};
 
 pub const fn flags_new(&[r, w, x, u, g]: &[u8; 5]) -> usize {
     0xc1 | if r != b'-' { 2 } else { 0 }

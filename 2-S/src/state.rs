@@ -12,39 +12,73 @@ use super::{
 
 pub struct Context {
     pub allocator: llfree::Lower<'static>,
+    pub dma_allocator: Option<llfree::Lower<'static>>,
     pub base_addr: usize,
+    pub dma_base_addr: usize,
     /// Kept independently of the active satp for later loader/hart startup.
     pub bootstrap_root: Root,
     pub boot: ModuleSpec,
 }
 
 impl Context {
+    pub fn block_zone(
+        &self,
+        hart_id: usize,
+        order: u32,
+        zone: tau::MemoryZone,
+    ) -> Result<usize, llfree::Error> {
+        let (allocator, base_addr) = match zone {
+            tau::MemoryZone::Normal => (&self.allocator, self.base_addr),
+            tau::MemoryZone::Dma => (
+                self.dma_allocator.as_ref().ok_or(llfree::Error::Memory)?,
+                self.dma_base_addr,
+            ),
+        };
+        let frame = allocator.alloc(hart_id, order as _)?.0;
+        Ok(base_addr + (frame << 12))
+    }
+
     pub fn block(&self, hart_id: usize, order: u32) -> Result<usize, llfree::Error> {
-        let frame = self.allocator.alloc(hart_id, order as _)?.0;
-        Ok(self.base_addr + (frame << 12))
+        self.block_zone(hart_id, order, tau::MemoryZone::Normal)
     }
 
     pub fn page(&self, hart_id: usize) -> Result<usize, llfree::Error> {
         self.block(hart_id, 0)
     }
 
-    pub fn free_block(&self, hart_id: usize, page: usize, order: u32) -> Result<(), llfree::Error> {
+    pub fn free_block_zone(
+        &self,
+        hart_id: usize,
+        page: usize,
+        order: u32,
+        zone: tau::MemoryZone,
+    ) -> Result<(), llfree::Error> {
+        let (allocator, base_addr) = match zone {
+            tau::MemoryZone::Normal => (&self.allocator, self.base_addr),
+            tau::MemoryZone::Dma => (
+                self.dma_allocator.as_ref().ok_or(llfree::Error::Address)?,
+                self.dma_base_addr,
+            ),
+        };
         if order > llfree::MAX_ORDER as u32 || page & ((1usize << (12 + order)) - 1) != 0 {
             return Err(llfree::Error::Address);
         }
         let frame = page
-            .checked_sub(self.base_addr)
+            .checked_sub(base_addr)
             .ok_or(llfree::Error::Address)?
             >> 12;
         let count = 1usize << order;
         if frame
             .checked_add(count)
-            .is_none_or(|end| end > self.allocator.frames())
+            .is_none_or(|end| end > allocator.frames())
         {
             return Err(llfree::Error::Address);
         }
-        self.allocator
-            .put(hart_id, llfree::FrameId(frame), order as _)
+        allocator.put(hart_id, llfree::FrameId(frame), order as _)
+    }
+
+    pub fn free_block(&self, hart_id: usize, page: usize, order: u32) -> Result<(), llfree::Error> {
+        self.free_block_zone(hart_id, page, order, tau::MemoryZone::Normal)
     }
 
     pub fn free(&self, hart_id: usize, page: usize) -> Result<(), llfree::Error> {

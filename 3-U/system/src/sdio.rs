@@ -110,8 +110,9 @@ impl State {
         let area = config.find_reg()?;
         let reg = area.r();
 
-        // TODO: allocator for DMA
-        let dma_desc = tau::Area::new(0x7000_0000, 0x1000).r();
+        let dma_base = tau::Ubi::alloc_physical(0, tau::MemoryZone::Dma).ok()?;
+        let dma_phys = u32::try_from(dma_base).ok()?;
+        let dma_desc = tau::Area::new(dma_base, 0x1000).r();
 
         Some(State {
             reg,
@@ -119,7 +120,7 @@ impl State {
             fifo_depth,
             rca: 0,
             dma_desc,
-            dma_phys: 0x7000_0000_u32,
+            dma_phys,
             error: None,
         })
     }

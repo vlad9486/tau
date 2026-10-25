@@ -68,10 +68,9 @@ impl State {
             0x1604_0000 => 1,
             _ => return None,
         };
-        // SDIO descriptors: 0x70000000; user.rs data: 0x70001000.
-        // Two pages per MAC: descriptors, then a page reserved for user.rs.
-        let dma_phys = 0x7000_2000 + u32::from(port) * 0x2000;
-        let rings = tau::Area::new(dma_phys as usize, 0x1000).r::<[Descriptor; 32]>();
+        let dma_base = tau::Ubi::alloc_physical(0, tau::MemoryZone::Dma).ok()?;
+        let dma_phys = u32::try_from(dma_base).ok()?;
+        let rings = tau::Area::new(dma_base, 0x1000).r::<[Descriptor; 32]>();
         Some(Self {
             reg: area.r(),
             port,

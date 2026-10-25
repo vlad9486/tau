@@ -557,12 +557,12 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             let selected = scheduler::dispatch(window, local.module, scheduler, hart_id);
             resume_scheduled(window, local, selected)
         }
-        Ok(tau::Call::AllocPhysical { order, zone: _ }) => {
+        Ok(tau::Call::AllocPhysical { order, zone }) => {
             if !local.module.header.loader_authority {
                 msg[0] = tau::AllocError::AccessDenied as usize;
                 msg[1] = 0;
             } else {
-                match context.block(hart_id, order as u32) {
+                match context.block_zone(hart_id, order as u32, zone) {
                     Ok(phys) => {
                         msg[0] = 0;
                         msg[1] = phys;
@@ -574,11 +574,11 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 }
             }
         }
-        Ok(tau::Call::FreePhysical { order, zone: _ }) => {
+        Ok(tau::Call::FreePhysical { order, zone }) => {
             if !local.module.header.loader_authority {
                 msg[0] = tau::FreeError::AccessDenied as usize;
             } else {
-                msg[0] = match context.free_block(hart_id, msg[1], order as u32) {
+                msg[0] = match context.free_block_zone(hart_id, msg[1], order as u32, zone) {
                     Ok(()) => 0,
                     Err(llfree::Error::Address) => tau::FreeError::InvalidAddress as usize,
                     Err(_) => tau::FreeError::AlreadyFree as usize,

@@ -23,4 +23,7 @@ pub use self::vmem::{
 
 // TODO: this is needed only for `loader`;
 // encapsulate this in the `vmem` module, expose higher level functions.
-pub use self::vmem::{flags_new, OWNED, HART_SLOT, STACK_SLOT, ALLOCATOR};
+pub use self::vmem::{
+    flags_new, OWNED, HART_SLOT, STACK_SLOT, CONTEXT, SUPERVISOR_TEXT, ALLOCATOR, DMA_ALLOCATOR,
+    MAX_RAM_FRAMES, MAX_DMA_FRAMES,
+};

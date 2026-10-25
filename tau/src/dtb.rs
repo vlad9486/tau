@@ -313,6 +313,17 @@ impl<'a> DtbProps<'a> {
         Some(Area::new(addr, size))
     }
 
+    pub fn find_alloc_ranges(&self) -> Option<Area> {
+        let Some([addr_hi, addr_lo, size_hi, size_lo]) =
+            self.find_int(|name| name == "alloc-ranges")
+        else {
+            return None;
+        };
+        let addr = (to_size(addr_hi.to_be()) << 32) + to_size(addr_lo.to_be());
+        let size = (to_size(size_hi.to_be()) << 32) + to_size(size_lo.to_be());
+        Some(Area::new(addr, size))
+    }
+
     fn find<P>(&self, predicate: P) -> Option<&'a [u8]>
     where
         P: Fn(&str) -> bool,
