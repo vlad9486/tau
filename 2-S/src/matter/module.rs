@@ -3,6 +3,7 @@
 // See LICENSE for the full license text.
 
 use core::{
+    cell::UnsafeCell,
     hint, ptr,
     sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
@@ -50,7 +51,7 @@ pub struct Module {
     // Slot zero is the free-list head. Free entries contain the next slot;
     // occupied entries contain a tagged physical descriptor address.
     dependencies: [AtomicUsize; Self::END],
-    wait_records: [WaitRecord; Self::WAIT_SIZE],
+    wait_records: [UnsafeCell<WaitRecord>; Self::WAIT_SIZE],
     // TODO:
     // wait_slots: [[u64; 8]; Self::WAIT_SIZE],
 }
@@ -156,7 +157,7 @@ impl Module {
     /// protect record access.
     pub unsafe fn read_wait(&self, index: usize) -> WaitRecord {
         debug_assert!(index < self.header.wait_table.count);
-        unsafe { *self.wait_records.get_unchecked(index) }
+        unsafe { *self.wait_records.get_unchecked(index).get() }
     }
 
     /// Write one record through a temporary physical alias.
@@ -164,9 +165,9 @@ impl Module {
     /// # Safety
     /// The table must be retained and `index < count`. The scheduler lock must
     /// protect record access; no alias reference may survive this operation.
-    pub unsafe fn write_wait(&mut self, index: usize, record: WaitRecord) {
+    pub unsafe fn write_wait(&self, index: usize, record: WaitRecord) {
         debug_assert!(index < self.header.wait_table.count);
-        unsafe { *self.wait_records.get_unchecked_mut(index) = record };
+        unsafe { *self.wait_records.get_unchecked(index).get() = record };
     }
 }
 

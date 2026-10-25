@@ -47,7 +47,7 @@ pub fn spawn(
 
 pub fn wait(
     window: &mut WindowAccess,
-    module: &mut Module,
+    module: &Module,
     scheduler: &mut Scheduler,
     pointer: usize,
     deadline: usize,
@@ -105,7 +105,7 @@ pub fn wait(
 
 pub fn notify(
     window: &mut WindowAccess,
-    module: &mut Module,
+    module: &Module,
     scheduler: &mut Scheduler,
     pointer: usize,
 ) -> Result<(), WaitError> {
@@ -144,7 +144,7 @@ pub fn notify(
 
 pub fn exit(
     window: &mut WindowAccess,
-    module: &mut Module,
+    module: &Module,
     scheduler: &mut Scheduler,
     hart_id: usize,
 ) {
@@ -162,7 +162,7 @@ pub fn exit(
         let target_module = if wait.module == module.header.descriptor.physical {
             module
         } else {
-            window.map_module(wait.module)
+            &*window.map_module(wait.module)
         };
         let mut slot = unsafe { target_module.read_wait(wait.slot) };
         if slot.thread_id == running && slot.sequence == wait.sequence {

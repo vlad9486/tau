@@ -187,7 +187,7 @@ impl State {
 
     pub(super) fn complete(
         &mut self,
-        module: &mut Module,
+        module: &Module,
         thread_id: usize,
         mut thread: ThreadState,
         mut slot: WaitRecord,
@@ -213,7 +213,7 @@ impl State {
     fn complete_wait(
         &mut self,
         window: &mut WindowAccess,
-        module: &mut Module,
+        module: &Module,
         thread_id: usize,
         event: Event,
         high_priority: bool,
@@ -228,7 +228,7 @@ impl State {
         let target_module = if wait.module == module.header.descriptor.physical {
             module
         } else {
-            window.map_module(wait.module)
+            &*window.map_module(wait.module)
         };
         let slot = unsafe { target_module.read_wait(wait.slot) };
         if slot.thread_id == thread_id && slot.sequence == wait.sequence {
@@ -240,7 +240,7 @@ impl State {
         true
     }
 
-    fn expire(&mut self, window: &mut WindowAccess, module: &mut Module) {
+    fn expire(&mut self, window: &mut WindowAccess, module: &Module) {
         let time = now();
         for index in 0..self.count {
             let deadline = unsafe { self.deadline(index) };
@@ -337,7 +337,7 @@ pub struct Dispatch {
 
 pub fn notify_hardware_interrupt(
     window: &mut WindowAccess,
-    module: &mut Module,
+    module: &Module,
     scheduler: &mut Scheduler,
     hart_id: usize,
 ) {
@@ -358,7 +358,7 @@ pub fn notify_hardware_interrupt(
         let target_module = if target_module_addr == module.header.descriptor.physical {
             module
         } else {
-            window.map_module(target_module_addr)
+            &*window.map_module(target_module_addr)
         };
         let mut slot = unsafe { target_module.read_wait(target_slot) };
         slot.pending = true;
@@ -369,11 +369,7 @@ pub fn notify_hardware_interrupt(
     }
 }
 
-pub fn preempt(
-    window: &mut WindowAccess,
-    module: &mut Module,
-    scheduler: &mut Scheduler,
-) -> Dispatch {
+pub fn preempt(window: &mut WindowAccess, module: &Module, scheduler: &mut Scheduler) -> Dispatch {
     let mut scheduler = scheduler.lock();
     scheduler.expire(window, module);
     let length = scheduler.length;
@@ -405,7 +401,7 @@ pub fn preempt(
 /// wake for a pending timer without entering the user trap entry from S-mode.
 pub fn dispatch(
     window: &mut WindowAccess,
-    module: &mut Module,
+    module: &Module,
     scheduler: &mut Scheduler,
     hart_id: usize,
 ) -> Dispatch {

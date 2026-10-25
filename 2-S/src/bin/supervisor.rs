@@ -86,12 +86,12 @@ mod mmu {
         space::Root,
     };
 
-    /// Exclusive references to the active root's context and module pages.
+    /// Exclusive reference to the active root's context and shared reference to its module pages.
     /// Moving this token into [`switch`] statically ends all borrows derived from
     /// these root-dependent mappings before `satp` changes.
     pub struct Local<'a> {
         pub module_context: &'a mut ModuleContext,
-        pub module: &'a mut Module,
+        pub module: &'a Module,
     }
 
     /// # Safety
@@ -102,7 +102,7 @@ mod mmu {
     #[inline(always)]
     pub unsafe fn switch<'a>(local: Local<'a>, root: Root, flush: bool) -> Local<'a> {
         let module_context = ptr::from_mut(local.module_context);
-        let module = ptr::from_mut(local.module);
+        let module = ptr::from_ref(local.module);
         if flush {
             hint::cold_path();
             // Keep the write and fence together: no compiler-generated access to
@@ -126,7 +126,7 @@ mod mmu {
         unsafe {
             Local {
                 module_context: &mut *module_context,
-                module: &mut *module,
+                module: &*module,
             }
         }
     }
@@ -134,13 +134,13 @@ mod mmu {
 
 /// # Safety
 /// The current root's module-context, and module pages must be mapped
-/// and initialized, and no other references to them may exist on this hart.
+/// and initialized, and no other references to the module-context may exist on this hart.
 #[inline(always)]
 unsafe fn local_access<'a>() -> mmu::Local<'a> {
     unsafe {
         mmu::Local {
             module_context: &mut *UnsafeCell::raw_get(&raw const __MODULE_CONTEXT),
-            module: &mut *UnsafeCell::raw_get(&raw const __MODULE),
+            module: &*UnsafeCell::raw_get(&raw const __MODULE),
         }
     }
 }
