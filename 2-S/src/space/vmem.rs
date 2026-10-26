@@ -550,6 +550,7 @@ impl WindowAccess {
                 (physical >> 2) | flags_new(&mapping.flags) | owned,
             );
         }
+        sfence_vma(None, None);
         Ok(())
     }
 
@@ -685,18 +686,14 @@ impl WindowAccess {
             let entry = self.read_pte(PTE_L2_SLOT, leaf, index);
             if entry != 0 {
                 self.write_pte(PTE_L2_SLOT, leaf, index, 0);
-                if let Some(asid) = asid {
-                    sfence_vma(Some(address), Some(asid));
-                }
+                sfence_vma(Some(address), asid);
                 if entry & OWNED != 0 {
                     free(pte_page(entry))?;
                 }
             }
             if self.empty_table(PTE_L2_SLOT, leaf) {
                 self.write_pte(PTE_L1_SLOT, stem, si, 0);
-                if let Some(asid) = asid {
-                    sfence_vma(None, Some(asid));
-                }
+                sfence_vma(None, asid);
                 free(leaf)?;
                 return Ok(true);
             }
