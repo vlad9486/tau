@@ -18,7 +18,7 @@ pub fn spawn(
     window: &mut WindowAccess,
     module: &Module,
     context: &Context,
-    scheduler: &mut Scheduler,
+    scheduler: &Scheduler,
     entry: usize,
     message: [usize; 6],
 ) -> Result<u16, SpawnError> {
@@ -48,7 +48,7 @@ pub fn spawn(
 pub fn wait(
     window: &mut WindowAccess,
     module: &Module,
-    scheduler: &mut Scheduler,
+    scheduler: &Scheduler,
     pointer: usize,
     deadline: usize,
 ) -> Result<Option<Event>, WaitError> {
@@ -106,7 +106,7 @@ pub fn wait(
 pub fn notify(
     window: &mut WindowAccess,
     module: &Module,
-    scheduler: &mut Scheduler,
+    scheduler: &Scheduler,
     pointer: usize,
 ) -> Result<(), WaitError> {
     let mut scheduler = scheduler.lock();
@@ -142,12 +142,7 @@ pub fn notify(
     Ok(())
 }
 
-pub fn exit(
-    window: &mut WindowAccess,
-    module: &Module,
-    scheduler: &mut Scheduler,
-    hart_id: usize,
-) {
+pub fn exit(window: &mut WindowAccess, module: &Module, scheduler: &Scheduler, hart_id: usize) {
     let mut scheduler = scheduler.lock();
     let running = scheduler.running;
     unsafe { scheduler.set_deadline(running - 1, 0) };

@@ -53,7 +53,7 @@ pub(super) struct State {
 unsafe impl Sync for Scheduler {}
 
 pub(super) struct Guard<'a> {
-    scheduler: &'a mut Scheduler,
+    scheduler: &'a Scheduler,
     interrupts: usize,
 }
 
@@ -79,7 +79,7 @@ impl Drop for Guard<'_> {
 }
 
 impl Scheduler {
-    pub(super) fn lock(&mut self) -> Guard<'_> {
+    pub(super) fn lock(&self) -> Guard<'_> {
         let interrupts: usize;
         unsafe {
             core::arch::asm!("csrrc {0}, sstatus, {1}", out(reg) interrupts, in(reg) 2usize, options(nostack))
@@ -324,7 +324,7 @@ impl Scheduler {
         Ok(())
     }
 
-    pub fn active(&mut self) -> bool {
+    pub fn active(&self) -> bool {
         self.lock().active
     }
 }
@@ -338,7 +338,7 @@ pub struct Dispatch {
 pub fn notify_hardware_interrupt(
     window: &mut WindowAccess,
     module: &Module,
-    scheduler: &mut Scheduler,
+    scheduler: &Scheduler,
     hart_id: usize,
 ) {
     let mut scheduler = scheduler.lock();
@@ -369,7 +369,7 @@ pub fn notify_hardware_interrupt(
     }
 }
 
-pub fn preempt(window: &mut WindowAccess, module: &Module, scheduler: &mut Scheduler) -> Dispatch {
+pub fn preempt(window: &mut WindowAccess, module: &Module, scheduler: &Scheduler) -> Dispatch {
     let mut scheduler = scheduler.lock();
     scheduler.expire(window, module);
     let length = scheduler.length;
@@ -402,7 +402,7 @@ pub fn preempt(window: &mut WindowAccess, module: &Module, scheduler: &mut Sched
 pub fn dispatch(
     window: &mut WindowAccess,
     module: &Module,
-    scheduler: &mut Scheduler,
+    scheduler: &Scheduler,
     hart_id: usize,
 ) -> Dispatch {
     loop {
