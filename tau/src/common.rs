@@ -2,20 +2,40 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{fmt, num::NonZeroUsize, sync::atomic::AtomicBool, mem};
+use core::{fmt, sync::atomic::AtomicBool, mem};
 
 #[repr(C)]
 pub struct Manifest {
     pub this: ModuleId,
     pub entry: Entry,
+    pub stack_pages: usize,
     pub dependencies: &'static [ModuleId],
-    pub mapped_regions: &'static [MappedRegion],
     pub wait_slots: &'static [WaitSlot],
 }
 
 // The manifest is immutable image metadata. Its raw address is validated by the
 // supervisor; sharing the manifest never dereferences that address in Rust.
 unsafe impl Sync for Manifest {}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawManifest {
+    pub this: ModuleId,
+    pub entry: usize,
+    pub stack_pages: usize,
+    pub dependencies: *const [ModuleId],
+    pub wait_slots: *const [WaitSlot],
+}
+
+const _: () = {
+    assert!(size_of::<Manifest>() == size_of::<RawManifest>());
+    assert!(align_of::<Manifest>() == align_of::<RawManifest>());
+    assert!(mem::offset_of!(Manifest, this) == mem::offset_of!(RawManifest, this));
+    assert!(mem::offset_of!(Manifest, entry) == mem::offset_of!(RawManifest, entry));
+    assert!(mem::offset_of!(Manifest, stack_pages) == mem::offset_of!(RawManifest, stack_pages));
+    assert!(mem::offset_of!(Manifest, dependencies) == mem::offset_of!(RawManifest, dependencies));
+    assert!(mem::offset_of!(Manifest, wait_slots) == mem::offset_of!(RawManifest, wait_slots));
+};
 
 /// One module-global reservation. Shared request data needs its own synchronization.
 #[repr(C, align(64))]
@@ -72,27 +92,6 @@ impl ModuleHandle {
     /// The physical descriptor page number, or zero for the bootstrap module.
     pub const fn as_raw(self) -> usize {
         self.0
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct MappedRegion {
-    pub phys_start: Option<NonZeroUsize>,
-    pub virtual_start: isize,
-    pub pages: usize,
-    pub write: bool,
-}
-
-impl MappedRegion {
-    pub const fn stack(size: usize) -> Self {
-        MappedRegion {
-            // physical address is allocated dynamically
-            phys_start: None,
-            virtual_start: -(size as isize),
-            pages: size >> 12,
-            write: true,
-        }
     }
 }
 

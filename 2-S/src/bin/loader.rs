@@ -525,8 +525,8 @@ fn load_system_elf(
     }
 
     let manifest = unsafe {
-        image_ptr(elf.ehdr.e_entry as usize, size_of::<tau::Manifest>())?
-            .cast::<tau::Manifest>()
+        image_ptr(elf.ehdr.e_entry as usize, size_of::<tau::RawManifest>())?
+            .cast::<tau::RawManifest>()
             .read_unaligned()
     };
     if !manifest.dependencies.is_empty() {
@@ -535,38 +535,22 @@ fn load_system_elf(
             .len()
             .checked_mul(size_of::<tau::ModuleId>())
             .ok_or(Error::Address)?;
-        image_ptr(manifest.dependencies.as_ptr().addr(), dep_bytes)?;
+        image_ptr(manifest.dependencies.addr(), dep_bytes)?;
     }
-    if manifest.mapped_regions.len() != 1 {
+    if manifest.stack_pages == 0 || manifest.stack_pages > 256 {
         return Err(Error::Address);
     }
-    let region = unsafe {
-        image_ptr(
-            manifest.mapped_regions.as_ptr().addr(),
-            size_of::<tau::MappedRegion>(),
-        )?
-        .cast::<tau::MappedRegion>()
-        .read_unaligned()
-    };
-    if region.phys_start.is_some()
-        || !region.write
-        || region.pages == 0
-        || region.pages > 256
-        || (region.virtual_start as usize) != (region.pages << 12).wrapping_neg()
-    {
-        return Err(Error::Address);
-    }
-    let stack_start = region.virtual_start as usize;
-    for page_idx in 0..region.pages {
+    let stack_start = (manifest.stack_pages << 12).wrapping_neg();
+    for page_idx in 0..manifest.stack_pages {
         map_page(stack_start + (page_idx << 12), b"rw-u-")?;
     }
 
     unsafe { arch::asm!("fence.i") };
     Ok(matter::ModuleSpec {
-        entry: manifest.entry as usize,
-        stack_pages: region.pages,
+        entry: manifest.entry,
+        stack_pages: manifest.stack_pages,
         wait_table: matter::WaitTable {
-            base: manifest.wait_slots.as_ptr().addr(),
+            base: manifest.wait_slots.addr(),
             count: manifest.wait_slots.len(),
         },
     })

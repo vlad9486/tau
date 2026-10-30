@@ -249,7 +249,7 @@ fn prepare_elf_module(
         abi::{EM_RISCV, ET_EXEC, PF_R, PF_W, PF_X, PT_LOAD},
         endian::LittleEndian,
     };
-    use super::{Manifest, MappedRegion, ModuleId};
+    use super::{Manifest, ModuleId};
 
     const PAGE: usize = 4096;
     const STAGE_VA: usize = 31 << 30;
@@ -323,19 +323,9 @@ fn prepare_elf_module(
             .ok_or(ModuleError::InvalidImage)?;
         image_range(&elf, word(manifest, deps)?, dep_bytes)?;
     }
-    let regions = mem::offset_of!(Manifest, mapped_regions);
-    if word(manifest, regions + 8)? != 1 {
-        return Err(ModuleError::InvalidImage);
-    }
-    let stack = image_range(&elf, word(manifest, regions)?, size_of::<MappedRegion>())?;
-    let stack_pages = word(stack, mem::offset_of!(MappedRegion, pages))?;
-    if stack_pages == 0
-        || stack_pages > 256
-        || word(stack, mem::offset_of!(MappedRegion, phys_start))? != 0
-        || word(stack, mem::offset_of!(MappedRegion, virtual_start))?
-            != (stack_pages * PAGE).wrapping_neg()
-        || stack.get(mem::offset_of!(MappedRegion, write)) != Some(&1)
-    {
+    let stack_pages = mem::offset_of!(Manifest, stack_pages);
+    let stack_pages = word(manifest, stack_pages)?;
+    if stack_pages == 0 || stack_pages > 256 {
         return Err(ModuleError::InvalidImage);
     }
 

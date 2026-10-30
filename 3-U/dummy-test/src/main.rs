@@ -17,10 +17,10 @@ static MANIFEST: tau::Manifest = tau::Manifest {
         version: (0, 1),
         name: *b"dummy-test\0\0\0\0\0\0\0\0\0\0",
     },
-    wait_slots: &WAIT_SLOTS,
     entry: dummy_entry,
+    stack_pages: 1,
     dependencies: &[],
-    mapped_regions: &[tau::MappedRegion::stack(0x1000)],
+    wait_slots: &WAIT_SLOTS,
 };
 
 static WAIT_SLOTS: [tau::WaitSlot; 4] = [const { tau::WaitSlot::new() }; 4];

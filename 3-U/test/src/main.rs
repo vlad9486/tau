@@ -22,10 +22,10 @@ static MANIFEST: tau::Manifest = tau::Manifest {
         version: (0, 1),
         name: *b"system-test\0\0\0\0\0\0\0\0\0",
     },
-    wait_slots: &scheduling::SLOTS,
     entry: main,
+    stack_pages: 0x20,
     dependencies: &[],
-    mapped_regions: &[tau::MappedRegion::stack(0x20000)],
+    wait_slots: &scheduling::SLOTS,
 };
 
 // Naked C functions preserve their argument registers at the first instruction.

@@ -39,13 +39,13 @@ static MANIFEST: tau::Manifest = tau::Manifest {
         version: (0, 1),
         name: *b"system\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
     },
-    wait_slots: &WAIT_SLOTS,
     entry: main,
+    stack_pages: 0x20,
     dependencies: &[tau::ModuleId {
         version: (0, 1),
         name: *b"some other module\0\0\0",
     }],
-    mapped_regions: &[tau::MappedRegion::stack(0x20000)],
+    wait_slots: &WAIT_SLOTS,
 };
 
 #[cold]
