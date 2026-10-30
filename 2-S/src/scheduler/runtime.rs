@@ -3,6 +3,7 @@
 // See LICENSE for the full license text.
 
 use core::{
+    arch,
     cell::UnsafeCell,
     hint,
     ops::{Deref, DerefMut},
@@ -20,7 +21,8 @@ use super::{
     space::{self, Mapping, Root, Window, WindowAccess},
 };
 
-const CAPACITY: usize = 128;
+const CAPACITY: usize = Module::WAIT_SIZE;
+const MAX_HARTS: usize = 64;
 // Raw time-counter ticks, deliberately independent of wall-clock time.
 const QUANTUM: usize = 100_000;
 
@@ -36,16 +38,32 @@ pub struct InterruptTarget {
     pub slot: usize,
 }
 
-pub(super) struct State {
-    pub(super) threads: [Option<ThreadState>; CAPACITY],
-    pub(super) count: usize,
+pub(super) struct HartState {
     pub(super) queue: [u16; CAPACITY],
     pub(super) head: usize,
     pub(super) length: usize,
     pub(super) running: usize,
     pub(super) active: bool,
     pub(super) quantum: usize,
-    pub(super) interrupt_targets: [Option<InterruptTarget>; 8],
+    pub(super) interrupt_target: Option<InterruptTarget>,
+}
+
+impl HartState {
+    const EMPTY: Self = Self {
+        queue: [0; CAPACITY],
+        head: 0,
+        length: 0,
+        running: 0,
+        active: false,
+        quantum: 0,
+        interrupt_target: None,
+    };
+}
+
+pub(super) struct State {
+    pub(super) threads: [Option<ThreadState>; CAPACITY],
+    pub(super) count: usize,
+    pub(super) harts: [HartState; MAX_HARTS],
     pub(super) deadlines: [usize; CAPACITY],
 }
 
@@ -82,7 +100,7 @@ impl Scheduler {
     pub(super) fn lock(&self) -> Guard<'_> {
         let interrupts: usize;
         unsafe {
-            core::arch::asm!("csrrc {0}, sstatus, {1}", out(reg) interrupts, in(reg) 2usize, options(nostack))
+            arch::asm!("csrrc {0}, sstatus, {1}", out(reg) interrupts, in(reg) 2usize, options(nostack))
         };
         while self
             .lock
@@ -132,53 +150,84 @@ impl State {
             .unwrap_or_else(|| invariant_failed()) = Some(thread);
     }
 
-    pub(super) fn enqueue(&mut self, id: usize) {
-        if self.length >= CAPACITY {
-            invariant_failed();
-        }
-        self.queue[(self.head + self.length) % CAPACITY] = id as u16;
-        self.length += 1;
+    pub(super) fn hart(&self, hart_id: usize) -> &HartState {
+        self.harts
+            .get(hart_id)
+            .unwrap_or_else(|| invariant_failed())
     }
 
-    pub(super) fn push_front(&mut self, id: usize) {
-        if self.length >= CAPACITY {
-            invariant_failed();
-        }
-        self.head = (self.head + CAPACITY - 1) % CAPACITY;
-        self.queue[self.head] = id as u16;
-        self.length += 1;
+    pub(super) fn hart_mut(&mut self, hart_id: usize) -> &mut HartState {
+        self.harts
+            .get_mut(hart_id)
+            .unwrap_or_else(|| invariant_failed())
     }
 
-    fn pop(&mut self) -> Option<usize> {
-        if self.length == 0 {
+    pub(super) fn running(&self, hart_id: usize) -> usize {
+        self.hart(hart_id).running
+    }
+
+    pub(super) fn set_running(&mut self, hart_id: usize, id: usize) {
+        self.hart_mut(hart_id).running = id;
+    }
+
+    pub(super) fn enqueue(&mut self, hart_id: usize, id: usize) {
+        let hart = self.hart_mut(hart_id);
+        if hart.length >= CAPACITY {
+            invariant_failed();
+        }
+        hart.queue[(hart.head + hart.length) % CAPACITY] = id as u16;
+        hart.length += 1;
+    }
+
+    pub(super) fn push_front(&mut self, hart_id: usize, id: usize) {
+        let hart = self.hart_mut(hart_id);
+        if hart.length >= CAPACITY {
+            invariant_failed();
+        }
+        hart.head = (hart.head + CAPACITY - 1) % CAPACITY;
+        hart.queue[hart.head] = id as u16;
+        hart.length += 1;
+    }
+
+    fn pop(&mut self, hart_id: usize) -> Option<usize> {
+        let hart = self.hart_mut(hart_id);
+        if hart.length == 0 {
             return None;
         }
-        let id = self
+        let id = hart
             .queue
-            .get(self.head)
+            .get(hart.head)
             .copied()
             .unwrap_or_else(|| invariant_failed()) as usize;
-        self.head = (self.head + 1) % CAPACITY;
-        self.length -= 1;
+        hart.head = (hart.head + 1) % CAPACITY;
+        hart.length -= 1;
         Some(id)
     }
 
-    pub(super) fn enable(&mut self) {
-        if !self.active {
-            self.active = true;
+    pub(super) fn enable(&mut self, hart_id: usize) {
+        let hart = self.hart_mut(hart_id);
+        if !hart.active {
+            hart.active = true;
             csr::rs!("sie", 1 << 5);
-            self.quantum = now().saturating_add(QUANTUM);
+            hart.quantum = now().saturating_add(QUANTUM);
         }
     }
 
-    pub(super) fn program(&self) {
-        let mut next = if self.running != 0 && self.length != 0 {
-            self.quantum
+    pub(super) fn program(&self, hart_id: usize) {
+        let hart = self.hart(hart_id);
+        let mut next = if hart.running != 0 && hart.length != 0 {
+            hart.quantum
         } else {
             usize::MAX
         };
-        for &deadline in self.deadlines.iter().take(self.count) {
-            if deadline != 0 {
+        for (index, &deadline) in self.deadlines.iter().take(self.count).enumerate() {
+            if deadline != 0
+                && self
+                    .threads
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|t| t.hart == hart_id)
+            {
                 next = next.min(deadline);
             }
         }
@@ -196,6 +245,7 @@ impl State {
     ) {
         slot.thread_id = 0;
         slot.sequence = 0;
+        let hart_id = thread.hart;
         let wait = unsafe { thread.wait.take().unwrap_unchecked() };
         unsafe { module.write_wait(wait.slot, slot) };
         let enqueue = thread.complete([0, event.encode(), 0, 0, 0, 0]);
@@ -203,9 +253,9 @@ impl State {
         unsafe { self.set_deadline(thread_id - 1, 0) };
         if enqueue {
             if high_priority {
-                self.push_front(thread_id);
+                self.push_front(hart_id, thread_id);
             } else {
-                self.enqueue(thread_id);
+                self.enqueue(hart_id, thread_id);
             }
         }
     }
@@ -250,8 +300,8 @@ impl State {
         }
     }
 
-    fn pop_running(&mut self) -> Option<Dispatch> {
-        let id = self.pop()?;
+    fn pop_running(&mut self, hart_id: usize) -> Option<Dispatch> {
+        let id = self.pop(hart_id)?;
         let thread = self.thread_state_mut(id);
         if thread.phase != Phase::Runnable {
             invariant_failed();
@@ -262,9 +312,10 @@ impl State {
             kind: thread.resume,
             message: thread.message,
         };
-        self.running = id;
-        self.quantum = now().saturating_add(QUANTUM);
-        self.program();
+        let hart = self.hart_mut(hart_id);
+        hart.running = id;
+        hart.quantum = now().saturating_add(QUANTUM);
+        self.program(hart_id);
         Some(dispatch)
     }
 
@@ -301,6 +352,7 @@ impl Scheduler {
                 || context.page(0), // scheduler is equaly used from all harts
             )
             .map_err(|_| tau::AllocError::OutOfMemory)?;
+        let hart_id = thread.hart;
         thread.phase = Phase::Running;
         unsafe {
             ptr::addr_of_mut!((*this).lock).write(AtomicBool::new(false));
@@ -311,21 +363,21 @@ impl Scheduler {
             }
             threads.write(Some(thread));
             ptr::addr_of_mut!((*state).count).write(1);
-            ptr::addr_of_mut!((*state).queue).write([0; CAPACITY]);
-            ptr::addr_of_mut!((*state).head).write(0);
-            ptr::addr_of_mut!((*state).length).write(0);
-            ptr::addr_of_mut!((*state).running).write(1);
-            ptr::addr_of_mut!((*state).active).write(false);
-            ptr::addr_of_mut!((*state).quantum).write(0);
-            ptr::addr_of_mut!((*state).interrupt_targets)
-                .write([None, None, None, None, None, None, None, None]);
+            let harts = ptr::addr_of_mut!((*state).harts).cast::<HartState>();
+            for i in 0..MAX_HARTS {
+                harts.add(i).write(HartState::EMPTY);
+            }
+            if hart_id >= MAX_HARTS {
+                invariant_failed();
+            }
+            ptr::addr_of_mut!((*harts.add(hart_id)).running).write(1);
             ptr::addr_of_mut!((*state).deadlines).write([0; CAPACITY]);
         }
         Ok(())
     }
 
-    pub fn active(&self) -> bool {
-        self.lock().active
+    pub fn active(&self, hart_id: usize) -> bool {
+        self.lock().hart(hart_id).active
     }
 }
 
@@ -342,11 +394,7 @@ pub fn notify_hardware_interrupt(
     hart_id: usize,
 ) {
     let mut scheduler = scheduler.lock();
-    let Some(target) = scheduler
-        .interrupt_targets
-        .get(hart_id)
-        .and_then(Option::as_ref)
-    else {
+    let Some(target) = &scheduler.hart(hart_id).interrupt_target else {
         return;
     };
     let target_module_addr = target.module;
@@ -364,16 +412,17 @@ pub fn notify_hardware_interrupt(
         slot.pending = true;
         unsafe { target_module.write_wait(target_slot, slot) };
     }
-    if scheduler.active {
-        scheduler.program();
+    if scheduler.hart(hart_id).active {
+        scheduler.program(hart_id);
     }
 }
 
 pub fn preempt(window: &mut WindowAccess, module: &Module, scheduler: &Scheduler) -> Dispatch {
     let mut scheduler = scheduler.lock();
+    let hart_id = window.hart().hart_id;
     scheduler.expire(window, module);
-    let length = scheduler.length;
-    let id = scheduler.running;
+    let length = scheduler.hart(hart_id).length;
+    let id = scheduler.running(hart_id);
     let thread = scheduler.thread_state_mut(id);
     thread.root = Window::current_root();
     thread.resume = Resume::Interrupt;
@@ -384,14 +433,14 @@ pub fn preempt(window: &mut WindowAccess, module: &Module, scheduler: &Scheduler
             kind: thread.resume,
             message: thread.message,
         };
-        scheduler.quantum = now().saturating_add(QUANTUM);
-        scheduler.program();
+        scheduler.hart_mut(hart_id).quantum = now().saturating_add(QUANTUM);
+        scheduler.program(hart_id);
         dispatch
     } else {
         thread.phase = Phase::Runnable;
-        scheduler.enqueue(id);
+        scheduler.enqueue(hart_id, id);
         scheduler
-            .pop_running()
+            .pop_running(hart_id)
             .unwrap_or_else(|| invariant_failed())
     }
 }
@@ -409,9 +458,9 @@ pub fn dispatch(
         {
             let mut scheduler = scheduler.lock();
             scheduler.expire(window, module);
-            if scheduler.running != 0 {
-                let id = scheduler.running;
-                let thread = scheduler.thread_state_mut(id);
+            let running = scheduler.running(hart_id);
+            if running != 0 {
+                let thread = scheduler.thread_state_mut(running);
                 if thread.phase != Phase::Parking {
                     invariant_failed();
                 }
@@ -422,17 +471,17 @@ pub fn dispatch(
                         kind: thread.resume,
                         message: thread.message,
                     };
-                    scheduler.program();
+                    scheduler.program(hart_id);
                     return dispatch;
                 }
-                scheduler.running = 0;
+                scheduler.set_running(hart_id, 0);
             }
-            if let Some(dispatch) = scheduler.pop_running() {
+            if let Some(dispatch) = scheduler.pop_running(hart_id) {
                 return dispatch;
             }
-            scheduler.program();
+            scheduler.program(hart_id);
         }
-        unsafe { core::arch::asm!("wfi", options(nostack)) };
+        unsafe { arch::asm!("wfi", options(nostack)) };
         if csr::r!("sip") & (1 << 9) != 0 {
             csr::rc!("sie", 1 << 9);
             notify_hardware_interrupt(window, module, scheduler, hart_id);

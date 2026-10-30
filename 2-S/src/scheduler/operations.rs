@@ -27,21 +27,22 @@ pub fn spawn(
         return Err(SpawnError::NoSlots);
     }
     let id = scheduler.count + 1;
+    let hart = window.hart().hart_id;
     let mut desc = module.header.descriptor;
     desc.entry = entry;
     let root = matter::spawn(window, context, desc)?;
     let mut message = message;
     message[0] = 0;
-    let thread = ThreadState::runnable(root, message, Resume::Entry(entry));
+    let thread = ThreadState::runnable(hart, root, message, Resume::Entry(entry));
     *scheduler
         .threads
         .get_mut(id - 1)
         .unwrap_or_else(|| runtime::invariant_failed()) = Some(thread);
     unsafe { scheduler.set_deadline(id - 1, 0) };
     scheduler.count = id;
-    scheduler.enqueue(id);
-    scheduler.enable();
-    scheduler.program();
+    scheduler.enqueue(hart, id);
+    scheduler.enable(hart);
+    scheduler.program(hart);
     Ok(id as u16)
 }
 
@@ -59,21 +60,21 @@ pub fn wait(
     if !table.occupied(window, root, index)? {
         return Err(WaitError::InvalidWaiter);
     }
-    let mut slot = unsafe { module.read_wait(index) };
-    if slot.thread_id != 0 {
+    let mut wait_slot = unsafe { module.read_wait(index) };
+    if wait_slot.thread_id != 0 {
         return Err(WaitError::Busy);
     }
-    if slot.pending {
-        slot.pending = false;
-        unsafe { module.write_wait(index, slot) };
+    if wait_slot.pending {
+        wait_slot.pending = false;
+        unsafe { module.write_wait(index, wait_slot) };
         return Ok(Some(Event::Notified { arg: 0 }));
     }
     if deadline != 0 && deadline <= runtime::now() {
         return Ok(Some(Event::Timeout));
     }
     let module_addr = module.header.descriptor.physical;
-    let running = scheduler.running;
     let hart = window.hart().hart_id;
+    let running = scheduler.running(hart);
     let thread = scheduler.thread_state_mut(running);
     // No old timer references remain: deadlines are embedded in active waits.
     thread.sequence = thread.sequence.wrapping_add(1);
@@ -85,21 +86,19 @@ pub fn wait(
         slot: index,
         sequence: thread.sequence,
     });
-    slot.thread_id = running;
-    slot.sequence = thread.sequence;
-    unsafe { module.write_wait(index, slot) };
+    wait_slot.thread_id = running;
+    wait_slot.sequence = thread.sequence;
+    unsafe { module.write_wait(index, wait_slot) };
     unsafe { scheduler.set_deadline(running - 1, deadline) };
     if module.header.loader_authority && index == hart {
-        if hart < scheduler.interrupt_targets.len() {
-            scheduler.interrupt_targets[hart] = Some(runtime::InterruptTarget {
-                module: module_addr,
-                thread_id: running,
-                slot: index,
-            });
-        }
+        scheduler.hart_mut(hart).interrupt_target = Some(runtime::InterruptTarget {
+            module: module_addr,
+            thread_id: running,
+            slot: index,
+        });
         csr::rs!("sie", 1 << 9);
     }
-    scheduler.enable();
+    scheduler.enable(hart);
     Ok(None)
 }
 
@@ -110,6 +109,7 @@ pub fn notify(
     pointer: usize,
 ) -> Result<(), WaitError> {
     let mut scheduler = scheduler.lock();
+    let hart = window.hart().hart_id;
     let root = Window::current_root();
     let table = &module.header.wait_table;
     let index = table.index(pointer)?;
@@ -136,20 +136,23 @@ pub fn notify(
             scheduler.set_thread(slot.thread_id, thread);
         }
     }
-    if scheduler.active {
-        scheduler.program();
+    if scheduler.hart(hart).active {
+        scheduler.program(hart);
     }
     Ok(())
 }
 
 pub fn exit(window: &mut WindowAccess, module: &Module, scheduler: &Scheduler, hart_id: usize) {
     let mut scheduler = scheduler.lock();
-    let running = scheduler.running;
+    let running = scheduler.running(hart_id);
     unsafe { scheduler.set_deadline(running - 1, 0) };
-    if let Some(target) = scheduler.interrupt_targets.get_mut(hart_id)
-        && target.as_ref().is_some_and(|t| t.thread_id == running)
+    let hart_state = scheduler.hart_mut(hart_id);
+    if hart_state
+        .interrupt_target
+        .as_ref()
+        .is_some_and(|t| t.thread_id == running)
     {
-        *target = None;
+        hart_state.interrupt_target = None;
         csr::rc!("sie", 1 << 9);
     }
     let thread = scheduler.thread_state_mut(running);
@@ -169,6 +172,6 @@ pub fn exit(window: &mut WindowAccess, module: &Module, scheduler: &Scheduler, h
     thread.phase = Phase::Exited;
     thread.wait = None;
     thread.sequence = thread.sequence.wrapping_add(1);
-    scheduler.running = 0;
-    scheduler.enable();
+    scheduler.set_running(hart_id, 0);
+    scheduler.enable(hart_id);
 }

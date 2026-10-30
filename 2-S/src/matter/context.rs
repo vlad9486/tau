@@ -33,7 +33,7 @@ pub struct ModuleContextHeader {
 pub struct ModuleContext {
     pub header: ModuleContextHeader,
     /// cached address space roots of dependencies
-    dependencies: [Option<space::Root>; 0x800],
+    dependencies: [Option<space::Root>; Module::MAX_DEPS],
 }
 
 // The complete context fits before __MODULE.

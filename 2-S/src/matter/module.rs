@@ -50,14 +50,14 @@ pub struct Module {
     pub header: ModuleHeader,
     // Slot zero is the free-list head. Free entries contain the next slot;
     // occupied entries contain a tagged physical descriptor address.
-    dependencies: [AtomicUsize; Self::END],
+    dependencies: [AtomicUsize; Self::MAX_DEPS],
     wait_records: [UnsafeCell<WaitRecord>; Self::WAIT_SIZE],
     // TODO:
     // wait_slots: [[u64; 8]; Self::WAIT_SIZE],
 }
 
 impl Module {
-    const END: usize = 0x800;
+    pub const MAX_DEPS: usize = 0x800;
     const OCCUPIED: usize = 1 << (usize::BITS - 1);
 
     pub const WAIT_SIZE: usize = 0x80;
@@ -85,7 +85,7 @@ impl Module {
         unsafe { ptr::addr_of_mut!((*this).header.poisoned).write(AtomicBool::new(false)) };
         unsafe { ptr::addr_of_mut!((*this).header.dependency_lock).write(AtomicBool::new(false)) };
         let dependencies = unsafe { ptr::addr_of_mut!((*this).dependencies).cast::<AtomicUsize>() };
-        for index in 0..Self::END {
+        for index in 0..Self::MAX_DEPS {
             unsafe { dependencies.add(index).write(AtomicUsize::new(index + 1)) };
         }
         let wait_table = unsafe { ptr::addr_of_mut!((*this).wait_records).cast::<WaitRecord>() };
@@ -115,7 +115,7 @@ impl Module {
         }
         let _guard = self.lock_dependencies();
         let slot = self.dependencies[0].load(Ordering::Relaxed);
-        if slot == Self::END {
+        if slot == Self::MAX_DEPS {
             return None;
         }
         let cell = self.dependencies.get(slot)?;

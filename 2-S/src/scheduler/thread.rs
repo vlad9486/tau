@@ -28,6 +28,7 @@ pub(super) struct ActiveWait {
 
 pub struct ThreadState {
     pub(super) phase: Phase,
+    pub(super) hart: usize,
     pub root: Root,
     pub resume: Resume,
     pub message: [usize; 6],
@@ -36,9 +37,10 @@ pub struct ThreadState {
 }
 
 impl ThreadState {
-    pub fn runnable(root: Root, message: [usize; 6], resume: Resume) -> Self {
+    pub fn runnable(hart: usize, root: Root, message: [usize; 6], resume: Resume) -> Self {
         ThreadState {
             phase: Phase::Runnable,
+            hart,
             root,
             resume,
             message,
