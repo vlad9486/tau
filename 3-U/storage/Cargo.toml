@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Vladyslav Melnyk
+# SPDX-License-Identifier: GPL-3.0-or-later
+# See LICENSE for the full license text.
+
+[package]
+name = "storage"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "storage"
+test = false
+doctest = false
+bench = false
+
+[features]
+nightly = []
+
+[dependencies]
+bitflags = { version = "2.13" }
+
+tau = { path = "../../tau" }

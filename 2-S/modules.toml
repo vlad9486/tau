@@ -30,3 +30,8 @@ size = 20
 name = "dummy-test"
 offset = 100
 size = 8
+
+[[module]]
+name = "storage"
+offset = 108
+size = 16
