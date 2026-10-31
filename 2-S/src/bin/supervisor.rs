@@ -172,11 +172,21 @@ extern "C" fn init(hart_id: usize, info: usize, info_pages: usize) -> ! {
     let root = window.init(hart_id);
     writeln!(sbi::Console, "SU: {}\r", window.hart()).unwrap_or_default();
 
-    let (satp, sepc) =
-        su_try(unsafe { state::init(&mut window, hart_id, module, tables, context) });
-
-    let thread = ThreadState::runnable(hart_id, root, [0; 6], ReturnKind::Syscall);
-    unsafe { su_try(Scheduler::init(scheduler, &mut window, context, thread)) };
+    let (satp, sepc) = if info == 0 && info_pages == 0 {
+        let tables = unsafe { &*tables };
+        let (satp, sepc) = su_try(unsafe {
+            state::init_hart(&mut window, hart_id, module, tables, context)
+        });
+        let thread = ThreadState::runnable(hart_id, root, [0; 6], ReturnKind::Syscall);
+        su_try(unsafe { (&*scheduler).init_hart(thread) });
+        (satp, sepc)
+    } else {
+        let (satp, sepc) =
+            su_try(unsafe { state::init(&mut window, hart_id, module, tables, context) });
+        let thread = ThreadState::runnable(hart_id, root, [0; 6], ReturnKind::Syscall);
+        unsafe { su_try(Scheduler::init(scheduler, &mut window, context, thread)) };
+        (satp, sepc)
+    };
     unsafe {
         arch::asm! {
             "li t0, 0x100",
@@ -664,6 +674,13 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                     msg[0] = error.encode();
                     msg[1] = 0;
                 }
+            }
+        }
+        Ok(tau::Call::StartHart) => {
+            let res = scheduler::start_hart(window, local.module, context, scheduler, msg[1]);
+            msg = [0; 6];
+            if let Err(error) = res {
+                msg[0] = error as usize;
             }
         }
         Ok(tau::Call::Debug) => {

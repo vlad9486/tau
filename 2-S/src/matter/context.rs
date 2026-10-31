@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{mem, num::NonZero, ptr};
+use core::{arch, mem, num::NonZero, ptr};
 
 use super::{
     space::{self, Window, WindowAccess, Mapping},
@@ -150,6 +150,63 @@ pub fn spawn(
         }
         let tag = window.allocate_tag().ok_or(tau::SpawnError::OutOfMemory)?;
         let root = space::Root::sv39(root.page(), tag);
+        unsafe { arch::asm!("fence.i", options(nostack)) };
+        Ok(root)
+    })();
+    if result.is_err() {
+        let _ = window.destroy(root, |page| context.free(hart, page));
+    }
+    result
+}
+
+/// Construct a fresh root and private per-hart window/stack for a secondary hart.
+pub fn spawn_hart(
+    window: &mut WindowAccess,
+    context: &Context,
+    desc: ModuleDescriptor,
+) -> Result<space::Root, tau::SpawnError> {
+    let caller = Window::current_root();
+    let hart = window.hart().hart_id;
+    let Some(index) = desc.root_index else {
+        return Err(tau::SpawnError::InvalidEntry);
+    };
+    let index = index as usize;
+    let loader_index = (context.base_addr >> 30) & 511;
+    let loader_stem = window
+        .root_branch(context.bootstrap_root, loader_index)
+        .ok_or(tau::SpawnError::InvalidEntry)?;
+    if desc.entry & 1 != 0
+        || (desc.entry >> 30) & 511 != index
+        || !window
+            .resolve_stem(desc.stem, desc.entry)
+            .is_some_and(|(_, flags)| flags & 26 == 26)
+    {
+        return Err(tau::SpawnError::InvalidEntry);
+    }
+    let root = window
+        .create(0, || context.page(hart))
+        .map_err(|_| tau::SpawnError::OutOfMemory)?;
+    let result = (|| {
+        window.attach(root, index, desc.stem);
+        if loader_index != index {
+            window.attach(root, loader_index, loader_stem);
+        }
+        window
+            .hart_mappings(caller, root, || context.page(hart))
+            .map_err(|_| tau::SpawnError::OutOfMemory)?;
+        window
+            .map(
+                root,
+                Mapping {
+                    addr_virtual: space::MODULE,
+                    virtual_pages: size_of::<Module>().div_ceil(space::PAGE),
+                    addr_physical: NonZero::new(desc.physical),
+                    physical_pages: size_of::<Module>().div_ceil(space::PAGE),
+                    flags: *b"rw---",
+                },
+                || context.page(hart),
+            )
+            .map_err(|_| tau::SpawnError::OutOfMemory)?;
         Ok(root)
     })();
     if result.is_err() {

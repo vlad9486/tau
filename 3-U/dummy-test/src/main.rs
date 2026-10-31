@@ -101,6 +101,9 @@ extern "C" fn dummy_main(
             ) && matches!(
                 tau::Ubi::map(None, 0x10000, 1),
                 Err(tau::AllocError::AccessDenied)
+            ) && matches!(
+                tau::Ubi::start_hart(1),
+                Err(tau::SpawnError::AccessDenied)
             );
             if !denied {
                 tau::Ubi::respond(3, []);

@@ -397,7 +397,16 @@ extern "C" fn handle_trap(frame: &mut TrapFrame) {
                 frame.registers[14],
                 frame.registers[15],
             ];
-            let ret = board::SBI.handle_ecall(extension, function, params);
+            let ret = if extension == u32::from_be_bytes(*b"TIME") as usize && function == 1 {
+                if board::valid_hart(params[0]) {
+                    unsafe { mtimecmp(params[0]).write_volatile(0) };
+                    SbiRet::success(0)
+                } else {
+                    SbiRet::invalid_param()
+                }
+            } else {
+                board::SBI.handle_ecall(extension, function, params)
+            };
             frame.registers[TrapFrame::A0] = ret.error;
             frame.registers[TrapFrame::A1] = ret.value;
             write_csr::<0x341>(read_csr::<0x341>() + 4);

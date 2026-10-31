@@ -141,6 +141,17 @@ impl Ubi {
         }
     }
 
+    /// Start secondary hart `hart_id` in the bootstrap module.
+    /// Requires `loader_authority`.
+    pub fn start_hart(hart_id: usize) -> Result<(), SpawnError> {
+        let (r0, []) = ubi(Call::StartHart, [hart_id]);
+        if let Some(code) = NonZero::new(r0) {
+            Err(unsafe { SpawnError::decode(code) })
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn exit() -> ! {
         let (_, []) = ubi(Call::Exit, []);
         unsafe { hint::unreachable_unchecked() }

@@ -7,7 +7,7 @@
 use tau::{Event, SpawnError, WaitError};
 
 use super::{
-    csr,
+    csr, sbi,
     thread::{ActiveWait, Phase, Resume, ThreadState},
     runtime, Context, Scheduler,
     matter::{self, Module},
@@ -44,6 +44,37 @@ pub fn spawn(
     scheduler.enable(hart);
     scheduler.program(hart);
     Ok(id as u16)
+}
+
+pub fn start_hart(
+    window: &mut WindowAccess,
+    module: &Module,
+    context: &Context,
+    scheduler: &Scheduler,
+    hart_id: usize,
+) -> Result<(), SpawnError> {
+    if !module.header.loader_authority {
+        return Err(SpawnError::AccessDenied);
+    }
+    if hart_id >= runtime::MAX_HARTS {
+        return Err(SpawnError::InvalidHart);
+    }
+    {
+        let scheduler = scheduler.lock();
+        if scheduler.hart(hart_id).running != 0 {
+            return Err(SpawnError::InvalidHart);
+        }
+        if scheduler.count == scheduler.threads.len() {
+            return Err(SpawnError::NoSlots);
+        }
+    }
+    let root = matter::spawn_hart(window, context, module.header.descriptor)?;
+    if sbi::hart_start(hart_id, context.base_addr, root.0.get()).is_err() {
+        let local_hart = window.hart().hart_id;
+        let _ = window.destroy(root, |page| context.free(local_hart, page));
+        return Err(SpawnError::InvalidHart);
+    }
+    Ok(())
 }
 
 pub fn wait(
@@ -117,6 +148,7 @@ pub fn notify(
         return Ok(());
     }
     let mut slot = unsafe { module.read_wait(index) };
+    let mut target_hart = hart;
     if slot.thread_id == 0 {
         slot.pending = true;
         unsafe { module.write_wait(index, slot) };
@@ -130,14 +162,19 @@ pub fn notify(
             && wait.slot == index
             && wait.sequence == slot.sequence
         {
+            target_hart = thread.hart;
             let event = Event::Notified { arg: 0 };
             scheduler.complete(module, slot.thread_id, thread, slot, event, false);
         } else {
             scheduler.set_thread(slot.thread_id, thread);
         }
     }
-    if scheduler.hart(hart).active {
-        scheduler.program(hart);
+    if target_hart == hart {
+        if scheduler.hart(hart).active {
+            scheduler.program(hart);
+        }
+    } else if scheduler.hart(target_hart).active {
+        let _ = sbi::wake_hart(target_hart);
     }
     Ok(())
 }

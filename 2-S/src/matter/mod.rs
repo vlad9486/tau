@@ -10,4 +10,4 @@ pub use self::module::{
 };
 
 mod context;
-pub use self::context::{ModuleContext, spawn, invoke};
+pub use self::context::{ModuleContext, spawn, spawn_hart, invoke};

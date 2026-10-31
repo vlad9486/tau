@@ -153,3 +153,41 @@ pub unsafe fn init(
     }
     Ok((root, boot.entry))
 }
+
+/// # Safety
+/// `module_context` must denote the aligned linker-provided context address
+/// unmapped in the secondary hart's fresh root, and `module` must already map
+/// the shared bootstrap module tables.
+pub unsafe fn init_hart(
+    window: &mut WindowAccess,
+    hart_id: usize,
+    module_context: *mut ModuleContext,
+    module: &Module,
+    context: &Context,
+) -> Result<(Root, usize), InitError> {
+    let root = Window::current_root();
+    let desc = module.header.descriptor;
+    for mapping in [
+        Mapping {
+            addr_virtual: (desc.stack_pages * PAGE).wrapping_neg(),
+            virtual_pages: desc.stack_pages,
+            flags: *b"rw-u-",
+            ..Mapping::default()
+        },
+        Mapping {
+            addr_virtual: module_context.addr(),
+            virtual_pages: size_of::<ModuleContext>().div_ceil(PAGE),
+            flags: *b"rw---",
+            ..Mapping::default()
+        },
+    ] {
+        window
+            .map(root, mapping, || context.page(hart_id))
+            .map_err(|_| tau::AllocError::OutOfMemory)
+            .map_err(InitError::Alloc)?;
+    }
+    unsafe {
+        ModuleContext::init_zeroed(module_context, root, desc.entry);
+    }
+    Ok((root, desc.entry))
+}

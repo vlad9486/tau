@@ -216,6 +216,8 @@ pub enum Call {
     /// Loader-only: bind dependency handle a2 under parent handle a1.
     /// Return status in a0 and a fresh parent-local slot in a1.
     BindDependency,
+    /// Loader-only: start secondary hart a1 in the current module.
+    StartHart,
     /// Emit a diagnostic checkpoint through the supervisor console.
     Debug,
 }
@@ -244,6 +246,7 @@ impl Call {
             }
             Self::CreateModule => (8 << 4) + 0b1001,
             Self::BindDependency => (9 << 4) + 0b1001,
+            Self::StartHart => (10 << 4) + 0b1001,
             Self::Debug => (5 << 4) + 0b1001,
         }
     }
@@ -286,6 +289,7 @@ impl Call {
                     }
                     8 => Ok(Self::CreateModule),
                     9 => Ok(Self::BindDependency),
+                    10 => Ok(Self::StartHart),
                     5 => Ok(Self::Debug),
                     _ => Err(a0),
                 },

@@ -22,7 +22,7 @@ use super::{
 };
 
 const CAPACITY: usize = Module::WAIT_SIZE;
-const MAX_HARTS: usize = 64;
+pub(super) const MAX_HARTS: usize = 64;
 // Raw time-counter ticks, deliberately independent of wall-clock time.
 const QUANTUM: usize = 100_000;
 
@@ -290,11 +290,18 @@ impl State {
         true
     }
 
-    fn expire(&mut self, window: &mut WindowAccess, module: &Module) {
+    fn expire(&mut self, window: &mut WindowAccess, module: &Module, hart_id: usize) {
         let time = now();
         for index in 0..self.count {
             let deadline = unsafe { self.deadline(index) };
-            if deadline != 0 && deadline <= time {
+            if deadline != 0
+                && deadline <= time
+                && self
+                    .threads
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|t| t.hart == hart_id)
+            {
                 self.complete_wait(window, module, index + 1, Event::Timeout, false);
             }
         }
@@ -376,6 +383,24 @@ impl Scheduler {
         Ok(())
     }
 
+    pub fn init_hart(&self, mut thread: ThreadState) -> Result<(), tau::SpawnError> {
+        let mut scheduler = self.lock();
+        let hart_id = thread.hart;
+        if hart_id >= MAX_HARTS || scheduler.hart(hart_id).running != 0 {
+            return Err(tau::SpawnError::InvalidHart);
+        }
+        if scheduler.count == CAPACITY {
+            return Err(tau::SpawnError::NoSlots);
+        }
+        let id = scheduler.count + 1;
+        thread.phase = Phase::Running;
+        scheduler.set_thread(id, thread);
+        unsafe { scheduler.set_deadline(id - 1, 0) };
+        scheduler.count = id;
+        scheduler.set_running(hart_id, id);
+        Ok(())
+    }
+
     pub fn active(&self, hart_id: usize) -> bool {
         self.lock().hart(hart_id).active
     }
@@ -420,7 +445,7 @@ pub fn notify_hardware_interrupt(
 pub fn preempt(window: &mut WindowAccess, module: &Module, scheduler: &Scheduler) -> Dispatch {
     let mut scheduler = scheduler.lock();
     let hart_id = window.hart().hart_id;
-    scheduler.expire(window, module);
+    scheduler.expire(window, module, hart_id);
     let length = scheduler.hart(hart_id).length;
     let id = scheduler.running(hart_id);
     let thread = scheduler.thread_state_mut(id);
@@ -457,7 +482,7 @@ pub fn dispatch(
     loop {
         {
             let mut scheduler = scheduler.lock();
-            scheduler.expire(window, module);
+            scheduler.expire(window, module, hart_id);
             let running = scheduler.running(hart_id);
             if running != 0 {
                 let thread = scheduler.thread_state_mut(running);
@@ -478,6 +503,29 @@ pub fn dispatch(
             }
             if let Some(dispatch) = scheduler.pop_running(hart_id) {
                 return dispatch;
+            }
+            let mut hart_alive = false;
+            let mut system_alive = false;
+            for thread in scheduler.threads.iter().take(scheduler.count).flatten() {
+                if thread.phase != Phase::Exited {
+                    system_alive = true;
+                    if thread.hart == hart_id {
+                        hart_alive = true;
+                        break;
+                    }
+                }
+            }
+            if !hart_alive {
+                scheduler.hart_mut(hart_id).active = false;
+                sbi::set_timer(usize::MAX).unwrap_or_default();
+                drop(scheduler);
+                if !system_alive {
+                    sbi::system_reset();
+                }
+                let _ = sbi::hart_stop();
+                loop {
+                    hint::spin_loop();
+                }
             }
             scheduler.program(hart_id);
         }

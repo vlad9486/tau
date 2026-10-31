@@ -192,6 +192,9 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
     if arg != 0 {
         tau_test_failed(0, 2, arg);
     }
+    if info == 0 && pages == 0 {
+        scheduling::secondary_hart(hart);
+    }
     tau_test_ready(hart);
     let case = unsafe { ptr::read_volatile(ptr::addr_of!(TAU_TEST_CONTROL[2])) } as usize;
     match case {
@@ -444,7 +447,7 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             tau_test_passed(case, 128)
         }
         6 => graph::run(case, info, pages),
-        7 => scheduling::run(case, info, pages),
+        7 => scheduling::run(case, hart, info, pages),
         8 => scheduling::rollback(case),
         _ => tau_test_failed(case, 0, case),
     }

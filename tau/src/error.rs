@@ -37,9 +37,11 @@ impl WaitError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum SpawnError {
+    AccessDenied = ERR_PERMISSION,
     OutOfMemory = ERR_OUTOFMEMORY,
     InvalidEntry = 0x100,
     NoSlots = 0x101,
+    InvalidHart = 0x102,
 }
 
 impl SpawnError {
@@ -48,9 +50,11 @@ impl SpawnError {
     #[inline]
     pub const unsafe fn decode(code: NonZero<usize>) -> Self {
         match code.get() {
+            ERR_PERMISSION => Self::AccessDenied,
             ERR_OUTOFMEMORY => Self::OutOfMemory,
             0x100 => Self::InvalidEntry,
             0x101 => Self::NoSlots,
+            0x102 => Self::InvalidHart,
             _ => unsafe { hint::unreachable_unchecked() },
         }
     }
@@ -60,9 +64,11 @@ impl From<SpawnError> for ModuleError {
     #[inline]
     fn from(error: SpawnError) -> Self {
         match error {
+            SpawnError::AccessDenied => Self::AccessDenied,
             SpawnError::OutOfMemory => Self::OutOfMemory,
             SpawnError::InvalidEntry => Self::InvalidImage,
             SpawnError::NoSlots => Self::NoSlots,
+            SpawnError::InvalidHart => Self::InvalidDependency,
         }
     }
 }

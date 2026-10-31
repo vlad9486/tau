@@ -54,6 +54,8 @@ extern "C" fn _start() -> ! {
         "add a3, a3, t0",
         "lui a4, %hi({hp})",
         "add a4, a4, t0",
+        "srli t0, a1, 56",
+        "bnez t0, {secondary}",
         "mv gp, a3",
         "mv sp, a4",
         "lui t0, 1",
@@ -63,6 +65,26 @@ extern "C" fn _start() -> ! {
         ro = sym __RO,
         hp = sym __HP,
         inner = sym inner,
+        secondary = sym secondary,
+    }
+}
+
+#[unsafe(naked)]
+extern "C" fn secondary() -> ! {
+    arch::naked_asm! {
+        "li t0, {sepc}",
+        "csrw sepc, t0",
+        "li t0, 8",
+        "csrw scause, t0",
+        "li t0, 0x100",
+        "csrrs t1, sstatus, t0",
+        "li t0, 0x20",
+        "csrrc t1, sstatus, t0",
+        "csrw satp, a1",
+        "li a1, 0",
+        "li a2, 0",
+        "sret",
+        sepc = const { space::SUPERVISOR_TEXT },
     }
 }
 
@@ -467,13 +489,13 @@ fn load_system_elf(
         if l0[vpn2] == 0 {
             let FrameId(frame) = allocator.alloc(hart_id, 0)?;
             let page = unsafe { &mut *st.add(frame) }.write([0; 512]);
-            l0[vpn2] = (page.as_mut_ptr().addr() >> 2) | 1 | space::OWNED;
+            l0[vpn2] = (page.as_mut_ptr().addr() >> 2) | 1;
         }
         let l1 = unsafe { &mut *st.with_addr((l0[vpn2] >> 10) << 12).cast::<[usize; 512]>() };
         if l1[vpn1] == 0 {
             let FrameId(frame) = allocator.alloc(hart_id, 0)?;
             let page = unsafe { &mut *st.add(frame) }.write([0; 512]);
-            l1[vpn1] = (page.as_mut_ptr().addr() >> 2) | 1 | space::OWNED;
+            l1[vpn1] = (page.as_mut_ptr().addr() >> 2) | 1;
         }
         let l2 = unsafe { &mut *st.with_addr((l1[vpn1] >> 10) << 12).cast::<[usize; 512]>() };
         if l2[vpn0] != 0 {
@@ -481,7 +503,7 @@ fn load_system_elf(
         }
         let FrameId(frame) = allocator.alloc(hart_id, 0)?;
         let page = unsafe { &mut *st.add(frame) }.write([0; 512]);
-        l2[vpn0] = (page.as_mut_ptr().addr() >> 2) | space::flags_new(flags) | space::OWNED;
+        l2[vpn0] = (page.as_mut_ptr().addr() >> 2) | space::flags_new(flags);
         Ok(page)
     };
 

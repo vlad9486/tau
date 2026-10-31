@@ -667,6 +667,59 @@ impl WindowAccess {
         Ok(())
     }
 
+    /// Construct a fresh supervisor branch with a private per-hart window and stack.
+    pub fn hart_mappings(
+        &mut self,
+        caller: Root,
+        root: Root,
+        page: impl Fn() -> Result<usize, llfree::Error>,
+    ) -> Result<(), llfree::Error> {
+        let old = self
+            .root_branch(caller, SUPERVISOR_INDEX)
+            .ok_or(llfree::Error::Address)?;
+        let l1 = page()?;
+        self.write_pte(
+            PTE_L0_SLOT,
+            root.page(),
+            SUPERVISOR_INDEX,
+            branch(l1) | OWNED,
+        );
+        let window_l2 = self.new_page(&page)?;
+        let hart_mmu = self.new_page(&page)?;
+        let stack = self.new_page(&page)?;
+        self.write_pte(
+            PTE_L2_SLOT,
+            window_l2,
+            0,
+            (window_l2 >> 2) | flags_new(b"rw---"),
+        );
+        self.write_pte(
+            PTE_L2_SLOT,
+            window_l2,
+            HART_SLOT,
+            (hart_mmu >> 2) | flags_new(b"rw---") | OWNED,
+        );
+        self.write_pte(
+            PTE_L2_SLOT,
+            window_l2,
+            STACK_SLOT,
+            (stack >> 2) | flags_new(b"rw---") | OWNED,
+        );
+        self.alias(PTE_L1_SLOT, old);
+        self.alias(PAGE_SLOT, l1);
+        let src = unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte_l1).cast::<usize>() };
+        let dst = unsafe { UnsafeCell::raw_get(&raw const (*self.base).page).cast::<usize>() };
+        for i in 0..512 {
+            let pte = match i {
+                0 => branch(window_l2) | 32 | OWNED,
+                1 => 0,
+                _ => unsafe { src.add(i).read_volatile() & !OWNED },
+            };
+            unsafe { dst.add(i).write_volatile(pte) };
+        }
+        Ok(())
+    }
+
     fn empty_table(&mut self, slot: usize, physical: usize) -> bool {
         (0..512).all(|i| self.read_pte(slot, physical, i) == 0)
     }

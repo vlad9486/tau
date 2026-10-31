@@ -46,6 +46,11 @@ pub fn set_timer(time: usize) -> Result<usize, SbiError> {
 }
 
 #[inline(always)]
+pub fn wake_hart(hart_id: usize) -> Result<usize, SbiError> {
+    SbiError::from_code(unsafe { sbi(u32::from_be_bytes(*b"TIME"), 1, [hart_id]) })
+}
+
+#[inline(always)]
 pub fn hart_start(hart_id: usize, start_addr: usize, opaque: usize) -> Result<usize, SbiError> {
     SbiError::from_code(unsafe {
         sbi(

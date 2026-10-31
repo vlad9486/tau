@@ -18,6 +18,7 @@ static RACE_DEADLINE: AtomicUsize = AtomicUsize::new(0);
 static RUN_WORKER: AtomicUsize = AtomicUsize::new(1);
 static COMPUTE_STARTED: AtomicUsize = AtomicUsize::new(0);
 static COMPUTED: AtomicUsize = AtomicUsize::new(0);
+static HART_DONE: AtomicUsize = AtomicUsize::new(0);
 
 fn pointer(index: usize) -> *const WaitSlot {
     &SLOTS[index]
@@ -95,10 +96,35 @@ extern "C" fn worker(_: usize, role: usize, _: usize, _: usize, _: usize, _: usi
                 Ubi::notify(pointer(0)).unwrap();
             }
         }
+        7 => {
+            notified(7);
+            HART_DONE.store(usize::MAX - 1, SeqCst);
+            Ubi::notify(pointer(6)).unwrap();
+            Ubi::exit()
+        }
         _ => panic!("worker role"),
     }
     DONE.store(role, SeqCst);
     Ubi::notify(pointer(0)).unwrap();
+    Ubi::exit()
+}
+
+pub(super) fn secondary_hart(hart: usize) -> ! {
+    assert_eq!(hart, HART_DONE.load(SeqCst));
+    reserve(6);
+    reserve(7);
+    Ubi::spawn(worker, [7]).unwrap();
+    Ubi::notify(pointer(7)).unwrap();
+    while HART_DONE.load(SeqCst) == hart {
+        notified(6);
+    }
+    release(6);
+    release(7);
+    HART_DONE.store(usize::MAX, SeqCst);
+    Ubi::notify(pointer(0)).unwrap();
+    while HART_DONE.load(SeqCst) != usize::MAX - 2 {
+        core::hint::spin_loop();
+    }
     Ubi::exit()
 }
 
@@ -159,7 +185,7 @@ fn spawn_raw(entry: usize) -> [usize; 6] {
     words
 }
 
-pub(super) fn run(case: usize, info: usize, pages: usize) -> ! {
+pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
     let raw = tau::Area::new(info, pages << 12).sl();
     let (dtb, _) = tau::Dtb::new(raw).unwrap();
     let image = dtb.boot_module("dummy-test").unwrap().sl::<u8>();
@@ -347,6 +373,16 @@ pub(super) fn run(case: usize, info: usize, pages: usize) -> ! {
     for word in &marker {
         assert_eq!(unsafe { core::ptr::read_volatile(word) }, 0xabcdef);
     }
+    let secondary = usize::from(hart == 0);
+    HART_DONE.store(secondary, SeqCst);
+    assert_eq!(Ubi::start_hart(hart), Err(tau::SpawnError::InvalidHart));
+    assert_eq!(Ubi::start_hart(64), Err(tau::SpawnError::InvalidHart));
+    Ubi::start_hart(secondary).unwrap();
+    while HART_DONE.load(SeqCst) != usize::MAX {
+        notified(0);
+    }
+    assert_eq!(Ubi::start_hart(secondary), Err(tau::SpawnError::InvalidHart));
+    HART_DONE.store(usize::MAX - 2, SeqCst);
     release(0);
     tau_test_passed(case, 128)
 }
