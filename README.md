@@ -8,44 +8,47 @@ instead provides a clean-slate architecture optimized for modern software develo
 
 ### RISC-V Exclusive
 
-Tau is designed exclusively for RISC-V and takes full advantage of its tagged TLBs 
-to enable efficient address-space switching.
+Tau is designed exclusively for RISC-V and takes full advantage of its tagged TLBs
+(ASIDs) to enable efficient address-space switching.
 
-### Designed for High-Core-Count Systems
+### Unconventional Execution & IPC Model
 
-Tau is optimized for 64+ core systems, ensuring superior scalability compared to Linux
-by minimizing contention points and leveraging lock-free data structures.
+* **Single-Thread Per Address Space**: Only one thread can execute in a given
+  address space (`ModuleContext`) at a time, eliminating concurrent access within
+  a context and reducing the need for locks during memory allocation.
+* **Per-Thread Address-Space Trees**: Each thread has its own tree of address
+  spaces (contexts). Because this requires more memory for page tables, userspace
+  should prefer green threads over OS threads.
+* **Two IPC Mechanisms**: Inter-process communication is performed exclusively
+  via synchronous **thread migration** between address spaces (`Invoke`/`Respond`)
+  and **shared memory**.
+* **Static Dependency Classes & Runtime Installation**: Modules declare their
+  dependency classes (defining possible IPC targets) statically *(currently not
+  implemented properly)*. Modules can be installed and uninstalled at runtime,
+  with dependencies verified at installation time rather than during IPC.
 
-### Isolation by Default
+### Bounded Supervisor & $O(1)$ Design
 
-* Each thread has its own address space, improving security and reducing the need
-  for locks during memory allocation.
-* Tagged MMU support enables lightweight and efficient context switching, improving
-  performance for high-load applications.
+The supervisor does not allocate privileged virtual memory dynamically and avoids
+unbounded dynamic data structures. All supervisor structures live at fixed virtual
+addresses (declared in the `extern "C"` block of `2-S/src/bin/supervisor.rs`)
+whose scope is determined by the physical pages mapped into the active address space:
 
-### Local execution state
+* `__WINDOW` (`space::Window`): Per-hart sparse virtual window for page-table
+  walks, temporary physical page aliases, per-hart MMU state, and the supervisor stack.
+* `__MODULE_CONTEXT` (`matter::ModuleContext`): Context-private execution state
+  (saved registers, resume PC, caller `satp`, and cached callee dependency roots).
+  The invocation chain is implicit via the caller's `satp`.
+* `__MODULE` (`matter::Module`): Module-wide metadata shared across all contexts
+  of a module, including prepared ELF stems, bound dependency slots, and wait-table
+  records.
+* `__SCHEDULER` (`scheduler::Scheduler`): System-wide scheduler state holding
+  fixed-capacity thread tables and per-hart FIFO run queues.
+* `__CONTEXT` (`state::Context`): System-wide lock-free physical frame allocators
+  (`llfree`) and bootstrap metadata.
 
-A thread's `__THREAD` mapping holds local thread metadata. Parent/child lifetime
-information for spawn and join belongs there; saved registers belong to each
-`__MODULE_CONTEXT`, together with its resume PC and caller's `satp`. Contexts
-executing the same thread share its thread metadata, while each context keeps
-its own register storage.
-
-The invocation chain is implicit in the address spaces: each context links back
-to its caller through `satp`. Shared module tables hold prepared ELF templates;
-each context's private dependency slots cache callee roots constructed on first
-use. Returns retain roots, private mappings, and stable hart-local ASIDs. These
-roots form a context tree without a separate context registry. The scheduler is
-the only owner of a global task registry. Synchronous invocation and return are
-implemented for the `dummy-test` module; same-module spawning, single-hart scheduling,
-and software waiting are implemented. Join and successful thread/context reclamation
-remain deferred.
-
-### Lock-Free Kernel Components
-
-* **Lock-free page frame allocation** for efficient memory management.
-* The initial scheduler uses one interrupt-safe lock, FIFO round-robin dispatch,
-  timer preemption, and module-local software waits on one active hart.
+The supervisor is designed to perform all operations in $O(1)$ time, though a few
+paths do not achieve this yet.
 
 ### Status
 
