@@ -31,6 +31,8 @@ pub use self::dtb::{Dtb, DtbProps, DtbHeaderError, DtbRsv};
 mod heap;
 pub use self::heap::Area;
 
+pub mod register;
+
 pub fn to_size<T>(v: T) -> usize
 where
     T: Into<u32>,
@@ -39,4 +41,19 @@ where
     compile_error!("Tau requires 32- or 64-bit targets");
 
     unsafe { usize::try_from(v.into()).unwrap_unchecked() }
+}
+
+#[derive(Debug)]
+pub struct Timeout;
+
+pub fn spin(mut timeout: u32, cond: impl Fn() -> bool) -> Result<(), Timeout> {
+    while !cond() {
+        core::hint::spin_loop();
+        timeout -= 1;
+        if timeout == 0 {
+            return Err(Timeout);
+        }
+    }
+
+    Ok(())
 }

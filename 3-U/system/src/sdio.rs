@@ -4,10 +4,9 @@
 
 use core::{time::Duration, fmt};
 
-use super::{
-    register::Register,
-    scheduler::{self, Timeout, DriverState, Shared},
-};
+use tau::register::Register;
+
+use super::scheduler::{DriverState, Shared};
 
 pub struct State {
     reg: &'static Registers,
@@ -42,16 +41,16 @@ pub enum Task {
 
 #[derive(Debug)]
 pub enum DriverError {
-    Control(Timeout),
-    Clock(Timeout),
+    Control(tau::Timeout),
+    Clock(tau::Timeout),
     CmdFailed(u32),
 }
 
 impl fmt::Display for DriverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Control(Timeout) => write!(f, "timeout"),
-            Self::Clock(Timeout) => write!(f, "timeout"),
+            Self::Control(tau::Timeout) => write!(f, "timeout"),
+            Self::Clock(tau::Timeout) => write!(f, "timeout"),
             Self::CmdFailed(code) => write!(f, "failed CMD{code}"),
         }
     }
@@ -204,7 +203,7 @@ impl State {
                         } else {
                             *acmd41_attempt -= 1;
                             return if *acmd41_attempt == 0 {
-                                Err(DriverError::Control(Timeout))
+                                Err(DriverError::Control(tau::Timeout))
                             } else {
                                 *acmd41_sleep = true;
                                 shared.sleep(1, Self::ACMD_41_DELAY);
@@ -345,7 +344,7 @@ impl Registers {
     fn init(&self, fifo_depth: u32) -> Result<(), DriverError> {
         let ctrl_reset = Ctrl::RESET_CONTROLLER | Ctrl::FIFO_RESET | Ctrl::DMA_RESET;
         self.ctrl.write(ctrl_reset);
-        scheduler::spin(CTRL_RESET_TO, || !self.ctrl.read().intersects(ctrl_reset))
+        tau::spin(CTRL_RESET_TO, || !self.ctrl.read().intersects(ctrl_reset))
             .map_err(DriverError::Control)?;
 
         self.rintsts.write(u32::MAX);
@@ -376,7 +375,7 @@ impl Registers {
 
     fn init_clk(&self, freq: u32) -> Result<(), DriverError> {
         // wait while the card is busy
-        scheduler::spin(1000, || self.status.read() & (1 << 9) == 0).map_err(DriverError::Clock)?;
+        tau::spin(1000, || self.status.read() & (1 << 9) == 0).map_err(DriverError::Clock)?;
 
         // Disable clock output while changing dividers
         self.clkena.write(0u32);
@@ -388,7 +387,7 @@ impl Registers {
 
         // Trigger clock update (CMD with bit 21)
         self.cmd.write((1u32 << 31) | (1 << 13) | (1 << 21)); // START_CMD | UPDATE_CLOCK
-        scheduler::spin(CLK_SET_TO, || self.cmd.read() & (1u32 << 31) == 0)
+        tau::spin(CLK_SET_TO, || self.cmd.read() & (1u32 << 31) == 0)
             .map_err(DriverError::Clock)?;
 
         // Enable clock to the card
@@ -396,7 +395,7 @@ impl Registers {
 
         // Trigger another update
         self.cmd.write((1u32 << 31) | (1 << 13) | (1 << 21));
-        scheduler::spin(CLK_SET_TO, || self.cmd.read() & (1u32 << 31) == 0)
+        tau::spin(CLK_SET_TO, || self.cmd.read() & (1u32 << 31) == 0)
             .map_err(DriverError::Clock)?;
 
         Ok(())

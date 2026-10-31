@@ -4,7 +4,7 @@
 
 //! Minimal polling transactions to AXP15060 on the board's DW I2C5 bus.
 
-use super::{Error, Registers, spin};
+use super::{Error, Registers};
 
 pub(super) struct Pmic(Registers);
 
@@ -19,7 +19,7 @@ impl Pmic {
     }
 
     fn wait(&self, cond: impl Fn() -> bool) -> Result<(), Error> {
-        spin(5_000_000, cond).map_err(|_| Error::Pmic)
+        tau::spin(5_000_000, cond).map_err(|_| Error::Pmic)
     }
 
     fn begin(&self) -> Result<(), Error> {

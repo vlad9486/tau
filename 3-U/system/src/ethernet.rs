@@ -16,10 +16,9 @@ pub use self::tx::{TxTask, TxDone, TxError};
 
 use core::time::Duration;
 
-use super::{
-    scheduler::{self, Shared, DriverState},
-    register::Register,
-};
+use tau::register::Register;
+
+use super::scheduler::{Shared, DriverState};
 
 const OWN: u32 = 1 << 31;
 const RING_LEN: usize = 4;
@@ -97,8 +96,7 @@ impl State {
     }
 
     fn wait_mdio(&self) -> Result<(), &'static str> {
-        scheduler::spin(100_000, || self.reg.mdio_addr.read() & 1 == 0)
-            .map_err(|_| "MDIO busy timeout")
+        tau::spin(100_000, || self.reg.mdio_addr.read() & 1 == 0).map_err(|_| "MDIO busy timeout")
     }
 
     fn mdio(&self, phy: u8, register: u8, value: Option<u16>) -> Result<u16, &'static str> {
@@ -210,7 +208,7 @@ impl State {
         cfg[mode / 4].write((cfg[mode / 4].read() & !(7 << shift)) | (1 << shift)); // RGMII
         crg[rst / 4].write(crg[rst / 4].read() & !mask);
         tau::asm::fence();
-        scheduler::spin(100_000, || crg[status / 4].read() & mask == mask)
+        tau::spin(100_000, || crg[status / 4].read() & mask == mask)
             .map_err(|_| "GMAC bus reset did not deassert")
     }
 

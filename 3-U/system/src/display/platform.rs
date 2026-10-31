@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use super::{Error, Pmic, Registers, spin};
+use super::{Error, Pmic, Registers};
 
 pub(super) struct Platform {
     sys: Registers,
@@ -39,7 +39,7 @@ impl Platform {
     ) -> Result<(), Error> {
         bank.update(control, mask, if assert { mask } else { 0 });
         // Assert bits are active high; status bits report deasserted state.
-        spin(100_000, || {
+        tau::spin(100_000, || {
             bank.read(status) & mask == if assert { 0 } else { mask }
         })
         .map_err(|_| Error::Reset)

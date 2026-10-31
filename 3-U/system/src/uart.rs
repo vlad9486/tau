@@ -9,10 +9,9 @@ use core::{
     num::NonZeroU32,
 };
 
-use super::{
-    register::Register,
-    scheduler::{DriverState, Shared},
-};
+use tau::register::Register;
+
+use super::scheduler::{DriverState, Shared};
 
 pub struct Config {
     pub area: tau::Area,

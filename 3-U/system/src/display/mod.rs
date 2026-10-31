@@ -5,8 +5,9 @@
 //! VisionFive 2 CPU-rendered ARGB8888 scanout, fixed at 1920x1080/60 Hz.
 //! One task owns the framebuffer; completions mean drawing finished, not vblank.
 
-use super::register::Register;
-use super::scheduler::{DriverState, Shared, spin};
+use tau::register::Register;
+
+use super::scheduler::{DriverState, Shared};
 
 mod controller;
 mod drawing;

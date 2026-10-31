@@ -14,7 +14,9 @@ use core::{
 
 use alloc::boxed::Box;
 
-use super::{display, ethernet, register::Register, scheduler::Shared, sdio};
+use tau::register::Register;
+
+use super::{display, ethernet, scheduler::Shared, sdio};
 
 pub struct State<'a> {
     fut: Pin<Box<dyn Future<Output = ()> + 'a>>,

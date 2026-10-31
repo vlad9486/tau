@@ -4,7 +4,7 @@
 
 use core::num::NonZeroU32;
 
-use super::register::Register;
+use tau::register::Register;
 
 #[repr(transparent)]
 pub struct InterruptNumber(NonZeroU32);

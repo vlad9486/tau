@@ -12,8 +12,6 @@
 
 extern crate alloc;
 
-mod register;
-
 mod scheduler;
 mod plic;
 

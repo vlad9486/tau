@@ -4,7 +4,7 @@
 
 //! DWMAC4/5 register layout used by the Ethernet driver.
 
-use crate::register::Register;
+use tau::register::Register;
 
 #[repr(C)]
 pub(super) struct Registers {

@@ -3,7 +3,7 @@
 // See LICENSE for the full license text.
 
 use core::cell::UnsafeCell;
-use core::{hint, fmt, num::NonZeroUsize, time::Duration};
+use core::{fmt, num::NonZeroUsize, time::Duration};
 
 use smallvec::SmallVec;
 
@@ -60,21 +60,6 @@ impl Shared {
     pub fn nanos(&self, ticks: usize) -> u128 {
         ((ticks as u128) * 1_000_000_000) / self.freq
     }
-}
-
-#[derive(Debug)]
-pub struct Timeout;
-
-pub fn spin(mut timeout: u32, cond: impl Fn() -> bool) -> Result<(), Timeout> {
-    while !cond() {
-        hint::spin_loop();
-        timeout -= 1;
-        if timeout == 0 {
-            return Err(Timeout);
-        }
-    }
-
-    Ok(())
 }
 
 struct Driver<S> {
