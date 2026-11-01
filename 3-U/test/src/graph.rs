@@ -57,11 +57,11 @@ pub(super) fn run(case: usize, info: usize, pages: usize) -> ! {
     let application = &mut buffer[..image.len()];
     application_image(image, application);
 
-    let (a_slot, a) = Ubi::prepare_module(ModuleHandle::ROOT, application).unwrap();
-    let (b_slot, b) = Ubi::prepare_module(ModuleHandle::ROOT, application).unwrap();
-    let (a_service, service) = Ubi::prepare_module(a, image).unwrap();
+    let (a_slot, a) = Ubi::prepare_module(ModuleHandle::ROOT, application, &dtb).unwrap();
+    let (b_slot, b) = Ubi::prepare_module(ModuleHandle::ROOT, application, &dtb).unwrap();
+    let (a_service, service) = Ubi::prepare_module(a, image, &dtb).unwrap();
     let b_service = Ubi::bind_dependency(b, service).unwrap();
-    let (service_leaf, leaf) = Ubi::prepare_module(service, image).unwrap();
+    let (service_leaf, leaf) = Ubi::prepare_module(service, image, &dtb).unwrap();
     let handles = [a, b, service, leaf];
     for (index, handle) in handles.iter().enumerate() {
         assert_ne!(*handle, ModuleHandle::ROOT);

@@ -25,6 +25,7 @@ static MANIFEST: tau::Manifest = tau::Manifest {
     entry: main,
     stack_pages: 0x20,
     dependencies: &[],
+    mapped_regions: &[],
     wait_slots: &scheduling::SLOTS,
 };
 
@@ -264,13 +265,13 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             let (dtb, _) = tau::Dtb::new(raw).unwrap();
             let image = dtb.boot_module("dummy-test").unwrap().sl::<u8>();
             assert_eq!(
-                tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, &[0]),
+                tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, &[0], &dtb),
                 Err(tau::ModuleError::InvalidImage)
             );
-            let (slot, module) = tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, image)
+            let (slot, module) = tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, image, &dtb)
                 .expect("prepare dummy-test");
             let (sibling, sibling_module) =
-                tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, image)
+                tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, image, &dtb)
                     .expect("prepare second dummy-test");
             assert_ne!(module, sibling_module);
             assert_eq!(
@@ -333,11 +334,11 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             // These failed preparations must not retain snapshot/root pages.
             for _ in 0..8 {
                 assert_eq!(
-                    tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, &[0]),
+                    tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, &[0], &dtb),
                     Err(tau::ModuleError::InvalidImage)
                 );
                 assert_eq!(
-                    tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, malformed),
+                    tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, malformed, &dtb),
                     Err(tau::ModuleError::InvalidImage)
                 );
             }

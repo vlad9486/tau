@@ -53,7 +53,7 @@ impl<'a> DtbPath<'a> {
         self.size -= 1;
     }
 
-    fn iter(&self) -> impl Iterator<Item = &str> {
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
         self.parts.iter().take(self.size).copied()
     }
 

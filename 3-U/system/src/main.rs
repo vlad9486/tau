@@ -43,6 +43,7 @@ static MANIFEST: tau::Manifest = tau::Manifest {
         version: (0, 1),
         name: *b"some other module\0\0\0",
     }],
+    mapped_regions: &[],
     wait_slots: &WAIT_SLOTS,
 };
 
@@ -74,7 +75,7 @@ extern "C" fn main(
     }
 
     let (slot, _module) =
-        tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, dummy_bytes).expect("prepare dummy-test");
+        tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, dummy_bytes, &dtb).expect("prepare dummy-test");
     tau::Ubi::debug(0x5344_494f, slot as usize);
 
     let Some((cpu_props, cpu_path)) = dtb

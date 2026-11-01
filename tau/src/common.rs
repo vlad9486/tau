@@ -10,6 +10,7 @@ pub struct Manifest {
     pub entry: Entry,
     pub stack_pages: usize,
     pub dependencies: &'static [ModuleId],
+    pub mapped_regions: &'static [MappedRegion],
     pub wait_slots: &'static [WaitSlot],
 }
 
@@ -24,6 +25,7 @@ pub struct RawManifest {
     pub entry: usize,
     pub stack_pages: usize,
     pub dependencies: *const [ModuleId],
+    pub mapped_regions: *const [MappedRegionRaw],
     pub wait_slots: *const [WaitSlot],
 }
 
@@ -34,8 +36,31 @@ const _: () = {
     assert!(mem::offset_of!(Manifest, entry) == mem::offset_of!(RawManifest, entry));
     assert!(mem::offset_of!(Manifest, stack_pages) == mem::offset_of!(RawManifest, stack_pages));
     assert!(mem::offset_of!(Manifest, dependencies) == mem::offset_of!(RawManifest, dependencies));
+    assert!(mem::offset_of!(Manifest, mapped_regions) == mem::offset_of!(RawManifest, mapped_regions));
     assert!(mem::offset_of!(Manifest, wait_slots) == mem::offset_of!(RawManifest, wait_slots));
 };
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MappedRegion {
+    /// Device identifier or DTB path, e.g. "/soc/sdio1"
+    pub dtb_path: &'static str,
+    /// Destination virtual address in the module's address space
+    pub ptr: *const (),
+    /// Number of 4 KiB pages required
+    pub pages: usize,
+}
+
+unsafe impl Send for MappedRegion {}
+unsafe impl Sync for MappedRegion {}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MappedRegionRaw {
+    pub dtb_path: *const str,
+    pub ptr: *const (),
+    pub pages: usize,
+}
 
 /// One module-global reservation. Shared request data needs its own synchronization.
 #[repr(C, align(64))]

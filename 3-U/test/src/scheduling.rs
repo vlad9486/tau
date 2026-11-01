@@ -189,8 +189,8 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
     let raw = tau::Area::new(info, pages << 12).sl();
     let (dtb, _) = tau::Dtb::new(raw).unwrap();
     let image = dtb.boot_module("dummy-test").unwrap().sl::<u8>();
-    let (a, _) = Ubi::prepare_module(ModuleHandle::ROOT, image).unwrap();
-    let (b, _) = Ubi::prepare_module(ModuleHandle::ROOT, image).unwrap();
+    let (a, _) = Ubi::prepare_module(ModuleHandle::ROOT, image, &dtb).unwrap();
+    let (b, _) = Ubi::prepare_module(ModuleHandle::ROOT, image, &dtb).unwrap();
     tau_test_progress(case, pointer(0).addr(), SLOTS.len());
 
     Ubi::notify(pointer(0)).unwrap(); // valid free slots are no-ops

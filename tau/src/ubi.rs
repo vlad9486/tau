@@ -9,6 +9,9 @@ use super::{
     WaitSlot, AllocError, FreeError,
 };
 
+#[cfg(feature = "elf")]
+use super::Dtb;
+
 #[inline(always)]
 fn ubi<const I: usize, const O: usize>(call: Call, arg: [usize; I]) -> (usize, [usize; O]) {
     const {
@@ -91,8 +94,9 @@ impl Ubi {
     pub fn prepare_module(
         parent_module_id: ModuleHandle,
         image: &[u8],
+        dtb: &Dtb<'_>,
     ) -> Result<(u16, ModuleHandle), ModuleError> {
-        prepare_elf_module(parent_module_id, image)
+        prepare_elf_module(parent_module_id, image, dtb)
     }
 
     /// Attach an existing module instance without copying its ELF or globals.
@@ -253,14 +257,15 @@ impl Ubi {
 fn prepare_elf_module(
     parent: ModuleHandle,
     bytes: &[u8],
+    dtb: &Dtb<'_>,
 ) -> Result<(u16, ModuleHandle), ModuleError> {
-    use core::{mem, ptr};
+    use core::{mem, ptr, str};
     use elf::{
         ElfBytes,
         abi::{EM_RISCV, ET_EXEC, PF_R, PF_W, PF_X, PT_LOAD},
         endian::LittleEndian,
     };
-    use super::{Manifest, ModuleId};
+    use super::{Manifest, MappedRegion, ModuleId};
 
     const PAGE: usize = 4096;
     const STAGE_VA: usize = 31 << 30;
@@ -340,6 +345,79 @@ fn prepare_elf_module(
         return Err(ModuleError::InvalidImage);
     }
 
+    let regions_offset = mem::offset_of!(Manifest, mapped_regions);
+    let regions_count = word(manifest, regions_offset + 8)?;
+    let mut resolved_mmio = [const { None }; 16];
+    let mut resolved_count = 0;
+    if regions_count != 0 {
+        if regions_count > 16 {
+            return Err(ModuleError::InvalidImage);
+        }
+        let region_bytes = regions_count
+            .checked_mul(size_of::<MappedRegion>())
+            .ok_or(ModuleError::InvalidImage)?;
+        let regions_data = image_range(&elf, word(manifest, regions_offset)?, region_bytes)?;
+        for i in 0..regions_count {
+            let offset = i * size_of::<MappedRegion>();
+            let path_addr = word(regions_data, offset)?;
+            let path_len = word(regions_data, offset + 8)?;
+            let ptr = word(regions_data, offset + 16)?;
+            let manifest_pages = word(regions_data, offset + 24)?;
+
+            if manifest_pages == 0 || manifest_pages > 256 {
+                return Err(ModuleError::InvalidImage);
+            }
+            if ptr & (PAGE - 1) != 0 {
+                return Err(ModuleError::InvalidImage);
+            }
+
+            let path_bytes = image_range(&elf, path_addr, path_len)?;
+            let dtb_path = str::from_utf8(path_bytes).map_err(|_| ModuleError::InvalidImage)?;
+
+            let area = dtb
+                .iter()
+                .find_map(|(props, path)| {
+                    let mut target_parts = dtb_path.split('/').filter(|s| !s.is_empty());
+                    let mut node_parts = path.iter().filter(|s| !s.is_empty());
+                    loop {
+                        match (target_parts.next(), node_parts.next()) {
+                            (Some(target), Some(node)) => {
+                                if target == node
+                                    || (node.starts_with(target)
+                                        && node[target.len()..].starts_with('@'))
+                                {
+                                    continue;
+                                }
+                                return None;
+                            }
+                            (None, None) => return props.find_reg(),
+                            _ => return None,
+                        }
+                    }
+                })
+                .ok_or(ModuleError::InvalidImage)?;
+
+            let phys_base = area.base;
+            let dtb_pages = area.len / PAGE;
+            if phys_base & (PAGE - 1) != 0 || dtb_pages == 0 {
+                return Err(ModuleError::InvalidImage);
+            }
+
+            let pages = manifest_pages.min(dtb_pages);
+            if pages == 0 {
+                return Err(ModuleError::InvalidImage);
+            }
+
+            let byte_len = pages.checked_mul(PAGE).ok_or(ModuleError::InvalidImage)?;
+            if !user_range(ptr, byte_len) {
+                return Err(ModuleError::InvalidImage);
+            }
+
+            resolved_mmio[resolved_count] = Some((ptr, phys_base, pages));
+            resolved_count += 1;
+        }
+    }
+
     let segments = elf.segments().ok_or(ModuleError::InvalidImage)?;
     let mut root_index = None;
     let mut executable_entry = false;
@@ -395,6 +473,23 @@ fn prepare_elf_module(
         return Err(ModuleError::InvalidImage);
     }
     let root_index = root_index.ok_or(ModuleError::InvalidImage)?;
+    for &(virt, _, pages) in resolved_mmio[..resolved_count].iter().flatten() {
+        let end = virt + pages * PAGE;
+        if (virt >> 30) & 511 != root_index || ((end - 1) >> 30) & 511 != root_index {
+            return Err(ModuleError::InvalidImage);
+        }
+    }
+    for i in 0..resolved_count {
+        let (virt1, _, pages1) = resolved_mmio[i].unwrap();
+        let end1 = virt1 + pages1 * PAGE;
+        for j in i + 1..resolved_count {
+            let (virt2, _, pages2) = resolved_mmio[j].unwrap();
+            let end2 = virt2 + pages2 * PAGE;
+            if virt1 < end2 && virt2 < end1 {
+                return Err(ModuleError::InvalidImage);
+            }
+        }
+    }
     let wait_base = word(manifest, mem::offset_of!(Manifest, wait_slots))?;
     let wait_count = word(
         manifest,
@@ -439,6 +534,15 @@ fn prepare_elf_module(
     }
 
     let handle = Ubi::create_module(entry, stack_pages, wait_base, wait_count)?;
+    for &(virt, phys, pages) in resolved_mmio[..resolved_count].iter().flatten() {
+        for p in 0..pages {
+            let va = virt + p * PAGE;
+            let pa = phys + p * PAGE;
+            if Ubi::map_module(handle, NonZero::new(pa), va, 1, PageFlags::RW).is_err() {
+                return Err(ModuleError::OutOfMemory);
+            }
+        }
+    }
     for ph in segments
         .iter()
         .filter(|p| p.p_type == PT_LOAD && p.p_memsz != 0)
@@ -460,6 +564,13 @@ fn prepare_elf_module(
         let file_end = address + file.len();
         for i in 0..pages {
             let page_va = first + i * PAGE;
+            let is_mmio = resolved_mmio[..resolved_count]
+                .iter()
+                .flatten()
+                .any(|&(virt, _, p_count)| page_va >= virt && page_va < virt + p_count * PAGE);
+            if is_mmio {
+                continue;
+            }
             let phys =
                 Ubi::alloc_physical(0, MemoryZone::Normal).map_err(|_| ModuleError::OutOfMemory)?;
             let copy_start = page_va.max(address);

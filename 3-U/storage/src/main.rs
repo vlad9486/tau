@@ -39,6 +39,11 @@ static MANIFEST: tau::Manifest = tau::Manifest {
     entry: main,
     stack_pages: 0x10,
     dependencies: &[],
+    mapped_regions: &[tau::MappedRegion {
+        dtb_path: "/soc/sdio1",
+        ptr: REGISTERS.as_ptr().cast(),
+        pages: 1,
+    }],
     wait_slots: &WAIT_SLOTS,
 };
 
