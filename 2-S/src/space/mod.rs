@@ -11,10 +11,7 @@ use super::{
 };
 
 mod alloc;
-pub use self::alloc::{
-    map_pages, unmap_pages, validate_map, validate_map_unprivileged, validate_unmap,
-    validate_module_handle,
-};
+pub use self::alloc::{map_pages, unmap_pages, validate_map, validate_unmap, validate_module_handle};
 
 mod vmem;
 pub use self::vmem::{

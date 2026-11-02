@@ -53,7 +53,7 @@ pub fn start_hart(
     scheduler: &Scheduler,
     hart_id: usize,
 ) -> Result<(), SpawnError> {
-    if !module.header.loader_authority {
+    if !module.header.caps.loader {
         return Err(SpawnError::AccessDenied);
     }
     if hart_id >= runtime::MAX_HARTS {
@@ -121,7 +121,7 @@ pub fn wait(
     wait_slot.sequence = thread.sequence;
     unsafe { module.write_wait(index, wait_slot) };
     unsafe { scheduler.set_deadline(running - 1, deadline) };
-    if module.header.loader_authority && index == hart {
+    if module.header.caps.loader && index == hart {
         scheduler.hart_mut(hart).interrupt_target = Some(runtime::InterruptTarget {
             module: module_addr,
             thread_id: running,

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{arch, hint, num::NonZero};
+use core::{arch, hint, num::NonZero, ptr};
 
 use super::{
     Call, Entry, Event, MemoryZone, ModuleError, ModuleHandle, PageFlags, SpawnError, WaitError,
@@ -222,12 +222,9 @@ impl Ubi {
 
     /// Consume readiness or suspend this thread, resuming here in this context.
     /// Shared-state publication/checking still needs module synchronization.
-    pub fn wait(
-        slot: *const WaitSlot,
-        deadline: Option<NonZero<usize>>,
-    ) -> Result<Event, WaitError> {
+    pub fn wait(slot: &WaitSlot, deadline: Option<NonZero<usize>>) -> Result<Event, WaitError> {
         let deadline = deadline.map(NonZero::get).unwrap_or_default();
-        let (r0, [event]) = ubi(Call::Wait, [slot.addr(), deadline]);
+        let (r0, [event]) = ubi(Call::Wait, [ptr::from_ref(slot).addr(), deadline]);
         if let Some(code) = NonZero::new(r0) {
             Err(unsafe { WaitError::decode(code) })
         } else {
@@ -237,8 +234,8 @@ impl Ubi {
 
     /// Record coalesced readiness for a waiter in this module. Does not transfer
     /// this thread or execute code in the receiver's context.
-    pub fn notify(slot: *const WaitSlot) -> Result<(), WaitError> {
-        let (r0, []) = ubi(Call::Notify, [slot.addr()]);
+    pub fn notify(slot: &WaitSlot) -> Result<(), WaitError> {
+        let (r0, []) = ubi(Call::Notify, [ptr::from_ref(slot).addr()]);
         if let Some(code) = NonZero::new(r0) {
             Err(unsafe { WaitError::decode(code) })
         } else {

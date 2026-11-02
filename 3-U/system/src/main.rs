@@ -21,8 +21,6 @@ mod ethernet;
 mod display;
 mod user;
 
-use core::sync::atomic::Ordering;
-
 #[cfg(not(test))]
 #[panic_handler]
 fn panic_handler(_info: &core::panic::PanicInfo) -> ! {
@@ -56,27 +54,13 @@ extern "C" fn main(
     _: usize,
     _: usize,
 ) -> ! {
-    if let Some(slot) = WAIT_SLOTS.get(hart_id) {
-        slot.occupied.store(true, Ordering::SeqCst);
-    }
+    use core::sync::atomic::Ordering;
+
     let len = info_pages << 12;
     let raw = tau::Area::new(info, len).sl();
     let Ok((dtb, reservations)) = tau::Dtb::new(raw) else {
         tau::Ubi::respond(1, []);
     };
-
-    // Prepare the test service from the DTB-provided ELF image.
-    let Some(dummy_image) = dtb.boot_module("dummy-test") else {
-        tau::Ubi::respond(7, []);
-    };
-    let dummy_bytes = dummy_image.sl::<u8>();
-    if dummy_bytes.get(..4) != Some(b"\x7fELF") {
-        tau::Ubi::respond(7, []);
-    }
-
-    let (slot, _module) =
-        tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, dummy_bytes, &dtb).expect("prepare dummy-test");
-    tau::Ubi::debug(0x5344_494f, slot as usize);
 
     let Some((cpu_props, cpu_path)) = dtb
         .iter()
@@ -124,7 +108,7 @@ extern "C" fn main(
         tau::Ubi::respond(8, []);
     };
 
-    let plic = tau::Area::new(plic_area.base, 0x2000).r();
+    let plic = tau::Area::new(plic_area.base, 0x2000).r::<plic::PlicPriority>();
 
     let plic_e = tau::Area::new(plic_area.base + plic::enable_offset(context_id), 0x1000)
         .r::<plic::PlicEnable>();
@@ -133,6 +117,20 @@ extern "C" fn main(
     let plic_ctx = tau::Area::new(plic_area.base + plic::context_offset(context_id), 0x1000)
         .r::<plic::PlicCtx>();
     plic_ctx.set_threshold(plic::InterruptPriority::_0);
+
+    // Prepare the test service from the DTB-provided ELF image.
+    let Some(dummy_image) = dtb.boot_module("dummy-test") else {
+        tau::Ubi::respond(7, []);
+    };
+    let dummy_bytes = dummy_image.sl::<u8>();
+    if dummy_bytes.get(..4) != Some(b"\x7fELF") {
+        tau::Ubi::respond(7, []);
+    }
+    let (slot, _module) = tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, dummy_bytes, &dtb)
+        .expect("prepare dummy-test");
+    if let Some(slot) = WAIT_SLOTS.get(hart_id) {
+        slot.occupied.store(true, Ordering::SeqCst);
+    }
 
     scheduler::Tasks::new(&dtb, reservations, plic, plic_e, context_id)
         .run(plic_ctx, slot, hart_id);

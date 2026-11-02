@@ -3,7 +3,7 @@
 // See LICENSE for the full license text.
 
 use core::cell::UnsafeCell;
-use core::{fmt, num::NonZeroUsize, time::Duration};
+use core::{fmt, num::NonZero, time::Duration};
 
 use smallvec::SmallVec;
 
@@ -36,14 +36,14 @@ pub struct Shared {
 
 #[derive(Clone, Copy)]
 pub struct Deadline {
-    val: NonZeroUsize,
+    val: NonZero<usize>,
     issuer: u8,
 }
 
 impl Shared {
     pub fn sleep(&mut self, issuer: u8, delay: Duration) {
         let tick = ((delay.as_nanos() * self.freq) / 1_000_000_000) as usize;
-        let val = unsafe { NonZeroUsize::new_unchecked(tau::asm::read_time().wrapping_add(tick)) };
+        let val = unsafe { NonZero::new_unchecked(tau::asm::read_time().wrapping_add(tick)) };
         let d = Deadline { val, issuer };
         *self
             .deadline
@@ -343,3 +343,49 @@ impl Tasks {
         }
     }
 }
+
+//         if let Some(driver) = &mut self.sdio {
+//             let Some(sdio_image) = dtb.boot_module("storage") else {
+//                 tau::Ubi::respond(7, []);
+//             };
+//             let sdio_bytes = sdio_image.sl::<u8>();
+//             if sdio_bytes.get(..4) != Some(b"\x7fELF") {
+//                 tau::Ubi::respond(7, []);
+//             }
+//             let (sdio_slot, _module) =
+//                 tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, sdio_bytes, dtb)
+//                     .expect("prepare sdio");
+//             shared.write(format_args!("storage is at slot={sdio_slot}"));
+//
+//             let freq = self.freq as u64;
+//             let fifo_depth = driver.state.0;
+//             let phys = driver.state.1;
+//             let ctx = alloc::boxed::Box::new(Ctx {
+//                 sdio_slot,
+//                 fifo_depth,
+//                 freq,
+//                 phys,
+//             });
+//             tau::Ubi::spawn(storage_thread, [Box::into_raw(ctx).addr()]).unwrap();
+//         }
+
+// #[repr(C)]
+// struct Ctx {
+//     sdio_slot: u16,
+//     fifo_depth: u32,
+//     freq: u64,
+//     phys: u32,
+// }
+//
+// extern "C" fn storage_thread(ctx: usize, _: usize, _: usize, _: usize, _: usize, _: usize) -> ! {
+//     let ctx = unsafe { alloc::boxed::Box::from_raw(ctx as *mut Ctx) };
+//     use_storage(ctx.sdio_slot, ctx.fifo_depth, ctx.freq, ctx.phys);
+//     drop(ctx);
+//     tau::Ubi::exit()
+// }
+//
+// fn use_storage(sdio_slot: u16, fifo_depth: u32, freq: u64, phys: u32) {
+//     let [] = tau::Ubi::invoke(sdio_slot, 0, [fifo_depth as usize, freq as usize])
+//         .expect("invoke dummy-test");
+//     let [] = tau::Ubi::invoke(sdio_slot, 1, [0x600, phys as usize]).expect("invoke dummy-test");
+// }

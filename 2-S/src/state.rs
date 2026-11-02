@@ -6,7 +6,7 @@ use core::num::NonZero;
 
 use super::{
     llfree,
-    matter::{ModuleDescriptor, ModuleContext, Module, ModuleSpec},
+    matter::{ModuleDescriptor, ModuleContext, Module, ModuleSpec, Capabilities},
     space::{Root, Mapping, Window, WindowAccess, PAGE},
 };
 
@@ -63,10 +63,7 @@ impl Context {
         if order > llfree::MAX_ORDER as u32 || page & ((1usize << (12 + order)) - 1) != 0 {
             return Err(llfree::Error::Address);
         }
-        let frame = page
-            .checked_sub(base_addr)
-            .ok_or(llfree::Error::Address)?
-            >> 12;
+        let frame = page.checked_sub(base_addr).ok_or(llfree::Error::Address)? >> 12;
         let count = 1usize << order;
         if frame
             .checked_add(count)
@@ -148,7 +145,7 @@ pub unsafe fn init(
         physical: module_physical,
     };
     unsafe {
-        Module::init_at(module, descriptor, boot.wait_table, true, false);
+        Module::init_at(module, descriptor, boot.wait_table, Capabilities::LOADER);
         ModuleContext::init_zeroed(module_context, root, boot.entry);
     }
     Ok((root, boot.entry))

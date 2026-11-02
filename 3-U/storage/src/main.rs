@@ -136,6 +136,10 @@ extern "C" fn main(a0: usize, a1: usize, a2: usize, _: usize, _: usize, _: usize
                 Err(_err) => tau::Ubi::respond(1, []),
             }
         }
+        3 => {
+            tau::Ubi::notify(WAIT_SLOTS.get(1).unwrap()).unwrap();
+            tau::Ubi::respond(0, [])
+        }
         _ => tau::Ubi::respond(1, []),
     }
 }

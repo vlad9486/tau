@@ -174,9 +174,8 @@ extern "C" fn init(hart_id: usize, info: usize, info_pages: usize) -> ! {
 
     let (satp, sepc) = if info == 0 && info_pages == 0 {
         let tables = unsafe { &*tables };
-        let (satp, sepc) = su_try(unsafe {
-            state::init_hart(&mut window, hart_id, module, tables, context)
-        });
+        let (satp, sepc) =
+            su_try(unsafe { state::init_hart(&mut window, hart_id, module, tables, context) });
         let thread = ThreadState::runnable(hart_id, root, [0; 6], ReturnKind::Syscall);
         su_try(unsafe { (&*scheduler).init_hart(thread) });
         (satp, sepc)
@@ -385,7 +384,7 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
         let selected = scheduler::preempt(&mut window, local.module, scheduler);
         resume_scheduled(&window, local, selected)
     } else if cause & INTERRUPT_BIT == 0 {
-        if !local.module.header.pure {
+        if !local.module.header.caps.pure {
             local.module.header.poisoned.store(true, Ordering::Release);
         }
         let sepc = csr::r!("sepc");
@@ -568,7 +567,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             resume_scheduled(window, local, selected)
         }
         Ok(tau::Call::AllocPhysical { order, zone }) => {
-            if !local.module.header.loader_authority {
+            if !local.module.header.caps.frame_alloc {
                 msg[0] = tau::AllocError::AccessDenied as usize;
                 msg[1] = 0;
             } else {
@@ -585,7 +584,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             }
         }
         Ok(tau::Call::FreePhysical { order, zone }) => {
-            if !local.module.header.loader_authority {
+            if !local.module.header.caps.frame_alloc {
                 msg[0] = tau::FreeError::AccessDenied as usize;
             } else {
                 msg[0] = match context.free_block_zone(hart_id, msg[1], order as u32, zone) {
@@ -599,11 +598,16 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             let res = (|| {
                 let mapping = space::validate_map(NonZero::new(msg[2]), msg[3], msg[4], msg[5])?;
                 let target = NonZero::new(msg[1]);
-                if !local.module.header.loader_authority {
+                if !local.module.header.caps.loader {
                     if target.is_some() {
                         return Err(tau::AllocError::AccessDenied);
                     }
-                    space::validate_map_unprivileged(&mapping)?;
+                    if !local.module.header.caps.frame_alloc && mapping.addr_physical.is_some() {
+                        return Err(tau::AllocError::AccessDenied);
+                    }
+                    if mapping.flags[2] != b'-' {
+                        return Err(tau::AllocError::AccessDenied);
+                    }
                 }
                 if target.is_none() && local.module.overlaps_stem(msg[3], msg[4]) {
                     return Err(tau::AllocError::AccessDenied);
@@ -617,9 +621,19 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
         }
         Ok(tau::Call::Unmap) => {
             let res = (|| {
-                let authority = local.module.header.loader_authority;
-                space::validate_unmap(window, authority, msg[2], msg[3], msg[1])?;
+                space::validate_unmap(msg[2], msg[3])?;
                 let target = NonZero::new(msg[1]);
+                if !local.module.header.caps.loader {
+                    if target.is_some() {
+                        return Err(tau::FreeError::AccessDenied);
+                    }
+                    let root = space::Window::current_root();
+                    if !local.module.header.caps.frame_alloc
+                        && !window.range_owned(root, msg[2], msg[3])
+                    {
+                        return Err(tau::FreeError::AccessDenied);
+                    }
+                }
                 if target.is_none() && local.module.overlaps_stem(msg[2], msg[3]) {
                     return Err(tau::FreeError::AccessDenied);
                 };
@@ -633,7 +647,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
         }
         Ok(tau::Call::CreateModule) => {
             let res = (|| {
-                if !local.module.header.loader_authority {
+                if !local.module.header.caps.loader {
                     return Err(tau::ModuleError::AccessDenied);
                 }
                 let spec = matter::ModuleSpec {
@@ -660,7 +674,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
         Ok(tau::Call::BindDependency) => {
             let res = (|| {
                 // Check the caller's authority before interpreting either physical handle.
-                if !local.module.header.loader_authority {
+                if !local.module.header.caps.loader {
                     return Err(tau::ModuleError::AccessDenied);
                 }
                 matter::bind_dependency(window, context, local.module, msg[1], msg[2])
@@ -686,7 +700,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
         Ok(tau::Call::Debug) => {
             write!(
                 sbi::Console,
-                "SYS: checkpoint={} value=0x{:016x}\r\n",
+                "SYS: checkpoint={:016x} value=0x{:016x}\r\n",
                 msg[1],
                 msg[2]
             )

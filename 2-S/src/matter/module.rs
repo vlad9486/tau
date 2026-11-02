@@ -25,11 +25,29 @@ pub struct ModuleDescriptor {
     pub physical: usize,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Capabilities {
+    // is the root system module, can create new modules
+    pub loader: bool,
+    // doesn't have global state that can be poisoned
+    pub pure: bool,
+    // can allocate physical memory and know the physical address, including DMA zone
+    pub frame_alloc: bool,
+}
+
+impl Capabilities {
+    pub const LOADER: Self = Capabilities {
+        loader: true,
+        pure: false,
+        frame_alloc: true,
+    };
+}
+
 #[repr(C, align(4096))]
 pub struct ModuleHeader {
     pub descriptor: ModuleDescriptor,
-    pub loader_authority: bool,
-    pub pure: bool,
+    pub caps: Capabilities,
     pub poisoned: AtomicBool,
     dependency_lock: AtomicBool,
     pub wait_table: WaitTable,
@@ -73,15 +91,13 @@ impl Module {
         this: *mut Self,
         descriptor: ModuleDescriptor,
         wait_table: WaitTable,
-        loader_authority: bool,
-        pure: bool,
+        caps: Capabilities,
     ) {
         unsafe {
             ptr::addr_of_mut!((*this).header.descriptor).write(descriptor);
             ptr::addr_of_mut!((*this).header.wait_table).write(wait_table);
         }
-        unsafe { ptr::addr_of_mut!((*this).header.loader_authority).write(loader_authority) };
-        unsafe { ptr::addr_of_mut!((*this).header.pure).write(pure) };
+        unsafe { ptr::addr_of_mut!((*this).header.caps).write(caps) };
         unsafe { ptr::addr_of_mut!((*this).header.poisoned).write(AtomicBool::new(false)) };
         unsafe { ptr::addr_of_mut!((*this).header.dependency_lock).write(AtomicBool::new(false)) };
         let dependencies = unsafe { ptr::addr_of_mut!((*this).dependencies).cast::<AtomicUsize>() };
@@ -305,14 +321,13 @@ pub fn create_module(
         stack_pages: spec.stack_pages,
         physical,
     };
+    let caps = Capabilities {
+        loader: false,
+        pure: false,
+        frame_alloc: true,
+    };
     unsafe {
-        Module::init_at(
-            ptr::from_mut(module),
-            descriptor,
-            spec.wait_table,
-            false,
-            false,
-        );
+        Module::init_at(ptr::from_mut(module), descriptor, spec.wait_table, caps);
     }
     Ok(physical / space::PAGE)
 }

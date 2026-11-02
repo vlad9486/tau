@@ -71,15 +71,6 @@ fn validate_target(
     Ok(dep.stem)
 }
 
-/// Validate memory mapping request from unprivileged module.
-pub fn validate_map_unprivileged(mapping: &Mapping) -> Result<(), tau::AllocError> {
-    if mapping.flags[2] != b'-' || mapping.addr_physical.is_some() {
-        return Err(tau::AllocError::AccessDenied);
-    }
-
-    Ok(())
-}
-
 /// Validate memory mapping request.
 pub fn validate_map(
     addr_physical: Option<NonZero<usize>>,
@@ -147,24 +138,9 @@ pub fn map_pages(
 }
 
 /// Validate memory unmapping request.
-pub fn validate_unmap(
-    window: &mut WindowAccess,
-    loader_authority: bool,
-    virtual_addr: usize,
-    number_of_pages: usize,
-    target: usize,
-) -> Result<(), tau::FreeError> {
+pub fn validate_unmap(virtual_addr: usize, number_of_pages: usize) -> Result<(), tau::FreeError> {
     if !valid_pages(virtual_addr, number_of_pages) {
         return Err(tau::FreeError::AlreadyFree);
-    }
-    if target != 0 && !loader_authority {
-        return Err(tau::FreeError::AccessDenied);
-    }
-    if target == 0 {
-        let root = Window::current_root();
-        if !loader_authority && !window.range_owned(root, virtual_addr, number_of_pages) {
-            return Err(tau::FreeError::AccessDenied);
-        }
     }
 
     Ok(())

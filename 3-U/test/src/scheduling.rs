@@ -5,6 +5,7 @@
 //! End-to-end scheduling and software-wait checks on the normal supervisor.
 use core::{
     num::NonZeroUsize,
+    ptr,
     sync::atomic::{AtomicUsize, Ordering::SeqCst},
 };
 use tau::{Event, ModuleHandle, Ubi, WaitError, WaitSlot};
@@ -20,9 +21,14 @@ static COMPUTE_STARTED: AtomicUsize = AtomicUsize::new(0);
 static COMPUTED: AtomicUsize = AtomicUsize::new(0);
 static HART_DONE: AtomicUsize = AtomicUsize::new(0);
 
-fn pointer(index: usize) -> *const WaitSlot {
+fn pointer(index: usize) -> &'static WaitSlot {
     &SLOTS[index]
 }
+
+fn slot_addr(index: usize) -> usize {
+    ptr::from_ref(&SLOTS[index]).addr()
+}
+
 fn reserve(index: usize) {
     assert!(
         SLOTS[index]
@@ -191,37 +197,21 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
     let image = dtb.boot_module("dummy-test").unwrap().sl::<u8>();
     let (a, _) = Ubi::prepare_module(ModuleHandle::ROOT, image, &dtb).unwrap();
     let (b, _) = Ubi::prepare_module(ModuleHandle::ROOT, image, &dtb).unwrap();
-    tau_test_progress(case, pointer(0).addr(), SLOTS.len());
+    tau_test_progress(case, slot_addr(0), SLOTS.len());
 
     Ubi::notify(pointer(0)).unwrap(); // valid free slots are no-ops
     assert_eq!(
         Ubi::wait(pointer(0), expired()),
         Err(WaitError::InvalidWaiter)
     );
-    for address in [
-        0,
-        pointer(0).addr() + 1,
-        pointer(0).addr() + 63,
-        pointer(0).addr() + 64 * SLOTS.len(),
-        usize::MAX,
-    ] {
-        assert_eq!(
-            Ubi::wait(address as *const WaitSlot, expired()),
-            Err(WaitError::InvalidWaiter)
-        );
-        assert_eq!(
-            Ubi::notify(address as *const WaitSlot),
-            Err(WaitError::InvalidWaiter)
-        );
-    }
     let local = WaitSlot::new();
     assert_eq!(Ubi::wait(&local, expired()), Err(WaitError::InvalidWaiter));
-    assert!(Ubi::unmap(pointer(0).addr() & !4095, 1).is_err());
+    assert!(Ubi::unmap(slot_addr(0) & !4095, 1).is_err());
     assert!(matches!(
-        Ubi::map(None, pointer(0).addr() & !4095, 1),
+        Ubi::map(None, slot_addr(0) & !4095, 1),
         Err(tau::AllocError::AccessDenied)
     ));
-    for entry in [0, pointer(0).addr(), 0xffff_ffc0_0020_0000, 0x10_0000_0000] {
+    for entry in [0, slot_addr(0), 0xffff_ffc0_0020_0000, 0x10_0000_0000] {
         assert_eq!(
             spawn_raw(entry),
             [tau::SpawnError::InvalidEntry as usize, 0, 0, 0, 0, 0]
@@ -268,7 +258,7 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
         [Event::Notified { arg: 0 }.encode()]
     );
     assert_eq!(
-        Ubi::wait(address as *const WaitSlot, expired()),
+        Ubi::wait(unsafe { &*(address as *const WaitSlot) }, expired()),
         Err(WaitError::InvalidWaiter)
     );
 
@@ -381,7 +371,10 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
     while HART_DONE.load(SeqCst) != usize::MAX {
         notified(0);
     }
-    assert_eq!(Ubi::start_hart(secondary), Err(tau::SpawnError::InvalidHart));
+    assert_eq!(
+        Ubi::start_hart(secondary),
+        Err(tau::SpawnError::InvalidHart)
+    );
     HART_DONE.store(usize::MAX - 2, SeqCst);
     release(0);
     tau_test_passed(case, 128)

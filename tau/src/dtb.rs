@@ -183,6 +183,12 @@ impl<'a> Dtb<'a> {
             .flatten()
         })
     }
+
+    pub fn device(&self, pattern: &str) -> Option<DtbProps<'_>> {
+        self.iter()
+            .find(|(_, path)| path.len() == 3 && path[1] == "soc" && path[2].starts_with(pattern))
+            .map(|(x, _)| x)
+    }
 }
 
 impl Iterator for DtbRsv<'_> {

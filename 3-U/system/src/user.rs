@@ -80,10 +80,6 @@ async fn run(
     has_display: bool,
     dummy_slot: u16,
 ) {
-    measure_roundtrips(shared, dummy_slot);
-    if has_display {
-        unsafe { &mut *shared.get() }.display_task = Some(display::Task::TestPattern);
-    }
     if has_sdio {
         let base = tau::Ubi::alloc_physical(0, tau::MemoryZone::Dma).expect("alloc sdio dma");
         let phys = u32::try_from(base).expect("sdio dma 32-bit");
@@ -102,6 +98,11 @@ async fn run(
                 {i:02x} {j:02x} {k:02x} {l:02x} {m:02x} {n:02x} {o:02x} {p:02x}"
             ));
         }
+    }
+
+    measure_roundtrips(shared, dummy_slot);
+    if has_display {
+        unsafe { &mut *shared.get() }.display_task = Some(display::Task::TestPattern);
     }
 
     let mut tx_phys = [0u32; 2];
