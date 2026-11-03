@@ -338,6 +338,10 @@ extern "C" fn handle_syscall() -> ! {
         "srli t0, t0, 60",
         "addi t0, t0, -1",
         "beqz t0, {invoke}",
+        "slli t0, a0, 48",
+        "srli t0, t0, 48",
+        "addi t0, t0, -21",
+        "beqz t0, {respond}",
         "j {syscall}",
 
         pc  = const { mem::offset_of!(matter::ModuleContext, header.sepc) },
@@ -390,7 +394,7 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
         let sepc = csr::r!("sepc");
         let stval = csr::r!("stval");
         let code = unsafe { u16::try_from(0x8000 | (cause & 0x7fff)).unwrap_unchecked() };
-        respond_code(code, sepc, stval, 0, 0, 0);
+        respond_code(code, false, sepc, stval, 0, 0, 0);
         unsafe { hint::unreachable_unchecked() };
     } else {
         match cause & !INTERRUPT_BIT {
@@ -411,17 +415,17 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
 
 #[unsafe(link_section = ".text.hot")]
 extern "C" fn respond(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
-    let Ok(tau::Call::Respond { code }) = tau::Call::decode(a0) else {
+    let Ok(tau::Call::Respond { code, keep }) = tau::Call::decode(a0) else {
         unsafe { hint::unreachable_unchecked() };
     };
-    respond_code(code, a1, a2, a3, a4, a5)
+    respond_code(code, keep, a1, a2, a3, a4, a5)
 }
 
 #[inline(always)]
-fn respond_code(code: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
+fn respond_code(code: u16, keep: bool, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
     let window = unsafe { space::WindowAccess::new(&raw const __WINDOW) };
     let local = unsafe { local_access() };
-    let Some(caller) = local.module_context.take_caller() else {
+    let Some(caller) = local.module_context.take_caller(keep) else {
         hint::cold_path();
         unsafe {
             arch::asm!("li sp, {stack}", stack = const { WINDOW_END });
@@ -465,8 +469,11 @@ extern "C" fn invoke(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: 
         hint::cold_path();
         invoke_poisoned(caller);
     }
-    local.module_context.enter(caller);
-    enter_invocation_hot(arg as usize, a1, a2, a3, a4, a5)
+    if local.module_context.enter(caller) {
+        restore_syscall_hot(arg as usize, a1, a2, a3, a4, a5)
+    } else {
+        enter_invocation_hot(arg as usize, a1, a2, a3, a4, a5)
+    }
 }
 
 #[cold]

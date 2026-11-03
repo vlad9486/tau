@@ -131,8 +131,20 @@ impl Ubi {
     }
 
     pub fn respond<const O: usize>(code: u16, msg: [usize; O]) -> ! {
-        let (_, []) = ubi(Call::Respond { code }, msg);
+        let (_, []) = ubi(Call::Respond { code, keep: false }, msg);
         unsafe { hint::unreachable_unchecked() }
+    }
+
+    pub fn respond_keep<const O: usize, const I: usize>(
+        code: u16,
+        msg: [usize; O],
+    ) -> Result<[usize; I], NonZero<usize>> {
+        let (r0, msg) = ubi(Call::Respond { code, keep: true }, msg);
+        if let Some(error) = NonZero::new(r0) {
+            Err(error)
+        } else {
+            Ok(msg)
+        }
     }
 
     pub fn spawn<const I: usize>(entry: Entry, msg: [usize; I]) -> Result<u16, SpawnError> {
@@ -479,8 +491,8 @@ fn prepare_elf_module(
     for i in 0..resolved_count {
         let (virt1, _, pages1) = resolved_mmio[i].unwrap();
         let end1 = virt1 + pages1 * PAGE;
-        for j in i + 1..resolved_count {
-            let (virt2, _, pages2) = resolved_mmio[j].unwrap();
+        for x in resolved_mmio.iter().take(resolved_count).skip(i + 1) {
+            let (virt2, _, pages2) = x.unwrap();
             let end2 = virt2 + pages2 * PAGE;
             if virt1 < end2 && virt2 < end1 {
                 return Err(ModuleError::InvalidImage);

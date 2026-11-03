@@ -20,6 +20,7 @@ pub enum DriverError {
     Control(tau::Timeout),
     Clock(tau::Timeout),
     CmdFailed(u32),
+    Dma,
 }
 
 impl fmt::Display for DriverError {
@@ -28,6 +29,7 @@ impl fmt::Display for DriverError {
             Self::Control(tau::Timeout) => write!(f, "timeout"),
             Self::Clock(tau::Timeout) => write!(f, "timeout"),
             Self::CmdFailed(code) => write!(f, "failed CMD{code}"),
+            Self::Dma => write!(f, "failed allocator dma buffer"),
         }
     }
 }

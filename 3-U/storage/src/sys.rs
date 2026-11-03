@@ -2,16 +2,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{fmt, num::NonZero, sync::atomic::Ordering, time::Duration};
-
-use super::MANIFEST;
+use core::{fmt, num::NonZero, time::Duration};
 
 pub fn sleep(_id: u8, delay: Duration, freq: u64) {
     let tick = ((delay.as_nanos() * u128::from(freq)) / 1_000_000_000) as usize;
     let deadline = unsafe { NonZero::new_unchecked(tau::asm::read_time().wrapping_add(tick)) };
-    let slot = MANIFEST.wait_slots.get(0).unwrap();
-    slot.occupied.store(true, Ordering::SeqCst);
-    let _ = tau::Ubi::wait(slot, Some(deadline));
+    loop {
+        match tau::Ubi::respond_keep(0, [0, deadline.get()]) {
+            Ok([]) => break,
+            Err(_err) => {
+                let eps = 100;
+                if tau::asm::read_time() + eps >= deadline.get() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 // TODO: system logger
@@ -21,7 +27,5 @@ pub fn write(_args: fmt::Arguments<'_>, freq: u64) {
 
 // TODO: handle error
 pub fn wait_interrupt() {
-    let slot = MANIFEST.wait_slots.get(1).unwrap();
-    slot.occupied.store(true, Ordering::SeqCst);
-    let _ = tau::Ubi::wait(slot, None);
+    let _ = tau::Ubi::respond_keep::<_, 0>(0, [0, 0]);
 }

@@ -36,7 +36,9 @@ const _: () = {
     assert!(mem::offset_of!(Manifest, entry) == mem::offset_of!(RawManifest, entry));
     assert!(mem::offset_of!(Manifest, stack_pages) == mem::offset_of!(RawManifest, stack_pages));
     assert!(mem::offset_of!(Manifest, dependencies) == mem::offset_of!(RawManifest, dependencies));
-    assert!(mem::offset_of!(Manifest, mapped_regions) == mem::offset_of!(RawManifest, mapped_regions));
+    assert!(
+        mem::offset_of!(Manifest, mapped_regions) == mem::offset_of!(RawManifest, mapped_regions)
+    );
     assert!(mem::offset_of!(Manifest, wait_slots) == mem::offset_of!(RawManifest, wait_slots));
 };
 
@@ -205,9 +207,10 @@ pub enum Call {
     /// `slot` selects a dependency; `arg` is a small dispatch argument.
     Invoke { slot: u16, arg: u16 },
     /// Return this thread to its previous module context with the response code
-    /// and message. Never returns in the callee; the thread continues in its
-    /// caller. Zero is success.
-    Respond { code: u16 },
+    /// and message. Of keep is false never returns in the callee; the thread
+    /// continues in its caller. Otherwise, the continuation is kept and a new
+    /// invocation will continue in the callee at the stored continuation.
+    Respond { code: u16, keep: bool },
     /// Wait on a reserved module-global slot: a1 = slot address, a2 = absolute
     /// time-counter deadline (zero for none). Return status in a0, Event in a1.
     Wait,
@@ -248,7 +251,7 @@ pub enum Call {
 }
 
 impl Call {
-    // WARNING: some assembly code might rely on this encoding
+    // WARNING: invoke/respond assembly code rely on this encoding
     // check all `naked_asm!` and `asm!` before modify this
     #[inline]
     pub const fn encode(self) -> usize {
@@ -256,7 +259,10 @@ impl Call {
             Self::Invoke { slot, arg } => {
                 ((arg as usize) << 16) + (((slot & 0xfff) as usize) << 4) + 0b0001
             }
-            Self::Respond { code } => ((code as usize) << 16) + 0b0101,
+            Self::Respond { code, keep } => {
+                let flags = if keep { 1 } else { 0 };
+                ((code as usize) << 16) + (flags << 4) + 0b0101
+            }
             Self::Wait => (6 << 4) + 0b1001,
             Self::Notify => (7 << 4) + 0b1001,
             Self::Spawn { entry } => entry,
@@ -287,7 +293,10 @@ impl Call {
             let arg = ((a0 & 0xffff0000) >> 16) as u16;
             match discriminant {
                 0b00 => Ok(Self::Invoke { slot: id, arg }),
-                0b01 if id == 0 => Ok(Self::Respond { code: arg }),
+                0b01 if id <= 1 => {
+                    let keep = id != 0;
+                    Ok(Self::Respond { code: arg, keep })
+                }
                 0b10 => match id {
                     6 => Ok(Self::Wait),
                     7 => Ok(Self::Notify),

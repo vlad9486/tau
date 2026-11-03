@@ -26,6 +26,8 @@ pub struct ModuleContextHeader {
     caller: Option<space::Root>,
     /// cached entry point of the module
     pub entry: usize,
+    /// whether a saved continuation from `respond_keep` is active
+    pub keep: bool,
 }
 
 /// Module context is similar to a thread, but has its own address space
@@ -57,15 +59,21 @@ impl ModuleContext {
         }
     }
 
-    /// Set linkage and PC for a fresh invocation, retaining dependency roots.
-    /// Saved registers remain stale until the next user trap; fresh entry must
-    /// clear the hardware registers rather than restore this saved state.
-    pub fn enter(&mut self, caller: space::Root) {
-        self.header.sepc = self.header.entry;
+    /// Set linkage and PC for an invocation, retaining dependency roots.
+    /// Returns `true` when resuming a saved `respond_keep` continuation.
+    pub fn enter(&mut self, caller: space::Root) -> bool {
         self.header.caller = Some(caller);
+        if self.header.keep {
+            self.header.keep = false;
+            true
+        } else {
+            self.header.sepc = self.header.entry;
+            false
+        }
     }
 
-    pub fn take_caller(&mut self) -> Option<space::Root> {
+    pub fn take_caller(&mut self, keep: bool) -> Option<space::Root> {
+        self.header.keep = keep;
         self.header.caller.take()
     }
 
