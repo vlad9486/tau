@@ -17,8 +17,11 @@ extern crate alloc;
 
 mod sys;
 mod sdio;
+mod queue;
 
 use core::mem::MaybeUninit;
+
+use self::queue::Queue;
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -47,6 +50,13 @@ static WAIT_SLOTS: [tau::WaitSlot; 1] = [tau::WaitSlot::new()];
 
 static REGISTERS: MaybeUninit<sdio::Registers> = MaybeUninit::uninit();
 
+enum Request {
+    Read { page: u32, phys: u32 },
+    Write { page: u32, phys: u32 },
+}
+
+static QUEUE: Queue<Request, 16> = Queue::new();
+
 #[cold]
 extern "C" fn main(a0: usize, a1: usize, a2: usize, _: usize, _: usize, _: usize) -> ! {
     let regs = unsafe { REGISTERS.assume_init_ref() };
@@ -63,9 +73,21 @@ extern "C" fn main(a0: usize, a1: usize, a2: usize, _: usize, _: usize, _: usize
                 }
             }
         }
-        1 => {
-            // TODO: enqueue request
-            tau::Ubi::respond(0, [])
+        1 | 2 => {
+            let page = a1 as u32;
+            let phys = a2 as u32;
+            let req = if arg == 1 {
+                Request::Read { page, phys }
+            } else {
+                Request::Write { page, phys }
+            };
+            match QUEUE.enqueue(req) {
+                Ok(()) => {
+                    let _ = tau::Ubi::notify(&WAIT_SLOTS[0]);
+                    tau::Ubi::respond(0, [])
+                }
+                Err(_) => tau::Ubi::respond(1, []),
+            }
         }
         _ => tau::Ubi::respond(1, []),
     }
@@ -78,12 +100,12 @@ fn run(regs: &sdio::Registers, fifo_depth: u32, freq: u64) -> Result<(), sdio::D
     state.init(regs, fifo_depth)?;
     WAIT_SLOTS[0].occupied.store(true, Ordering::SeqCst);
     loop {
-        // TODO: create FIFO queue of requests, check the queue here and do
-        // `state.read(regs, page, phys)` or corresponding `write`
+        while let Some(req) = QUEUE.dequeue() {
+            match req {
+                Request::Read { page, phys } => state.read(regs, page, phys)?,
+                Request::Write { page, phys } => state.write(regs, page, phys)?,
+            }
+        }
         let _ = tau::Ubi::wait(&WAIT_SLOTS[0], None);
-        let _ = || {
-            let _ = state.read(regs, 0x600, 0xdeadbeef);
-            let _ = state.write(regs, 0x600, 0xdeadbeef);
-        };
     }
 }
