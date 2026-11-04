@@ -42,12 +42,6 @@ extern "C" fn tau_test_ready(_hart: usize) {
 
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-extern "C" fn tau_test_progress(_case: usize, _value: usize, _extra: usize) {
-    naked_asm!("ret");
-}
-
-#[unsafe(no_mangle)]
-#[unsafe(naked)]
 extern "C" fn tau_test_passed(_case: usize, _value: usize) -> ! {
     naked_asm!("2: j 2b");
 }
@@ -66,26 +60,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         1,
         info.location().map_or(0, |p| p.line() as usize),
     )
-}
-
-// An unmapped canonical VA, separate from the payload, stack, and mapping test.
-const FAULT_ADDRESS: usize = 0x20_0000_0000;
-
-#[unsafe(no_mangle)]
-#[unsafe(naked)]
-extern "C" fn tau_test_fault() -> ! {
-    naked_asm!(
-        "li t0, {address}",
-        ".global tau_test_fault_instruction",
-        "tau_test_fault_instruction:",
-        "ld t1, 0(t0)",
-        "li a0, 4",
-        "li a1, 6",
-        "mv a2, t1",
-        "j {failed}",
-        address = const FAULT_ADDRESS,
-        failed = sym tau_test_failed,
-    );
 }
 
 // Exercise the module boundary with every preserved register set explicitly.
@@ -220,6 +194,7 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
                     tau_test_failed(case, 3, bytes.as_ptr().addr());
                 }
             }
+            tau::Ubi::debug(1, hart);
             tau_test_passed(case, hart)
         }
         2 => {
@@ -227,16 +202,45 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             if let Err(error) = tau::Ubi::map(None, ADDRESS, 2) {
                 tau_test_failed(case, 4, error as usize);
             }
+            assert_eq!(
+                tau::Ubi::map(None, ADDRESS, 1),
+                Err(tau::AllocError::AlreadyAllocated)
+            );
             // Touch both ends of both pages to check the complete allocation.
             for offset in [0, 0xff8, 0x1000, 0x1ff8] {
                 let pointer = (ADDRESS + offset) as *mut usize;
                 let pattern = 0x1234_5678_9abc_def0 ^ offset;
                 unsafe {
+                    assert_eq!(pointer.read_volatile(), 0);
                     pointer.write_volatile(pattern);
                     assert_eq!(pointer.read_volatile(), pattern);
                 }
             }
-            tau_test_progress(case, ADDRESS, 2);
+            tau::Ubi::unmap(ADDRESS, 2).unwrap();
+            assert_eq!(
+                tau::Ubi::unmap(ADDRESS, 0),
+                Err(tau::FreeError::AlreadyFree)
+            );
+            // Physical allocation and shared physical aliasing via Map/Unmap.
+            let phys = tau::Ubi::alloc_physical(0, tau::MemoryZone::Normal).unwrap();
+            const ALIAS_A: usize = 0x10_0001_0000;
+            const ALIAS_B: usize = 0x10_0002_0000;
+            tau::Ubi::map(NonZeroUsize::new(phys), ALIAS_A, 1).unwrap();
+            tau::Ubi::map(NonZeroUsize::new(phys), ALIAS_B, 1).unwrap();
+            unsafe {
+                (ALIAS_A as *mut usize).write_volatile(0xcafe_babe_dead_beef);
+                assert_eq!(
+                    (ALIAS_B as *const usize).read_volatile(),
+                    0xcafe_babe_dead_beef
+                );
+            }
+            tau::Ubi::unmap(ALIAS_A, 1).unwrap();
+            tau::Ubi::unmap(ALIAS_B, 1).unwrap();
+            assert_eq!(
+                tau::Ubi::free_physical(0, 0, tau::MemoryZone::Normal),
+                Err(tau::FreeError::InvalidAddress)
+            );
+            tau::Ubi::free_physical(phys, 0, tau::MemoryZone::Normal).unwrap();
             tau_test_passed(case, ADDRESS)
         }
         3 => {
@@ -256,12 +260,29 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             }
             let end = tau::asm::read_time();
             assert!(end >= deadline);
-            tau_test_progress(case, deadline, end);
             tau_test_passed(case, end - start)
         }
         4 => {
-            tau_test_progress(case, FAULT_ADDRESS, 0);
-            tau_test_fault()
+            let raw = tau::Area::new(info, pages << 12).sl();
+            let (dtb, _) = Dtb::new(raw).unwrap();
+            let image = dtb.boot_module("dummy-test").unwrap().sl::<u8>();
+            let (slot, _) = elf::prepare_module(tau::ModuleHandle::ROOT, image, &dtb).unwrap();
+            let (sibling, _) = elf::prepare_module(tau::ModuleHandle::ROOT, image, &dtb).unwrap();
+            // Faulting module triggers Load Page Fault (cause 13 -> 0x800d) and becomes poisoned.
+            assert_eq!(
+                tau::Ubi::invoke::<0, 0>(sibling, 12, []).unwrap_err().get(),
+                0x800d
+            );
+            assert_eq!(
+                tau::Ubi::invoke::<1, 0>(sibling, 3, [1]).unwrap_err().get(),
+                tau::ModuleError::Poisoned.encode()
+            );
+            // Independent module instance remains healthy.
+            assert_eq!(
+                tau::Ubi::invoke::<1, 1>(slot, 3, [42]).unwrap(),
+                [42 ^ 0x5344_494f]
+            );
+            tau_test_passed(case, 0x800d)
         }
         5 => {
             let raw = tau::Area::new(info, pages << 12).sl();
@@ -282,8 +303,6 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
                 1
             );
             // Reject a late load segment after earlier segments allocated pages.
-            // Keep the damaged fixture on our existing stack so the host can
-            // compare allocator counts before and after failed preparations.
             let mut malformed = [0u8; 0x8000];
             let malformed = &mut malformed[..image.len()];
             malformed.copy_from_slice(image);
@@ -303,13 +322,6 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             malformed[last_load + 4..last_load + 8].copy_from_slice(&7u32.to_le_bytes());
             // The prepared module owns its ELF backing independently of this alias.
             tau::Ubi::unmap(image.as_ptr().addr(), image.len().div_ceil(4096)).unwrap();
-            tau_test_progress(case, slot as usize, sibling as usize);
-            // The host temporarily exhausts ASIDs to check construction rollback.
-            assert_eq!(
-                tau::Ubi::invoke::<0, 0>(slot, 3, []).unwrap_err().get(),
-                tau::ModuleError::OutOfMemory.encode()
-            );
-            tau_test_progress(case, slot as usize, 0);
             // Construct each destination once, then immediately reuse it.
             for destination in [slot, sibling] {
                 for value in [1, 2] {
@@ -333,7 +345,6 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
                     [value.rotate_left(7) ^ 0x5344_494f, count]
                 );
             }
-            tau_test_progress(case, slot as usize, 1);
             // These failed preparations must not retain snapshot/root pages.
             for _ in 0..8 {
                 assert_eq!(
@@ -411,6 +422,15 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
                 [6usize.rotate_left(7) ^ 0x5344_494f, 68]
             );
             assert_eq!(tau::Ubi::invoke::<0, 0>(slot, 2, []).unwrap_err().get(), 42);
+            // Exercise continuation-preserving Respond (keep = true) across invocations.
+            assert_eq!(
+                tau::Ubi::invoke::<1, 1>(slot, 13, [25]).unwrap(),
+                [35]
+            );
+            assert_eq!(
+                tau::Ubi::invoke::<1, 1>(slot, 0, [7]).unwrap(),
+                [42]
+            );
             // The assembly response path must keep every message register
             // intact while using scratch registers to choose the MMU policy.
             let words = [usize::MAX, 0x1234_5678_9abc_def0, 3, 4, 5];

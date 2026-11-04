@@ -324,7 +324,7 @@ pub fn create_module(
     let caps = Capabilities {
         loader: false,
         pure: false,
-        frame_alloc: true,
+        frame_alloc: false,
     };
     unsafe {
         Module::init_at(ptr::from_mut(module), descriptor, spec.wait_table, caps);

@@ -203,6 +203,12 @@ extern "C" fn dummy_main(
             let val = unsafe { ptr.read_volatile() };
             tau::Ubi::respond(0, [val])
         }
+        13 => {
+            let mut acc = value + 10;
+            let [next] = tau::Ubi::respond_keep::<1, 1>(0, [acc]).unwrap();
+            acc += next;
+            tau::Ubi::respond(0, [acc])
+        }
         _ => tau::Ubi::respond(7, []),
     }
 }

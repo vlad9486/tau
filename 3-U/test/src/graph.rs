@@ -6,14 +6,7 @@ use tau::{ModuleError, ModuleHandle, Ubi};
 
 use dtb::Dtb;
 
-use super::{tau_test_passed, tau_test_progress, elf};
-
-/// Debugger checkpoint data: four descriptor PPNs followed by five local slots.
-#[repr(C)]
-struct Graph {
-    handles: [usize; 4],
-    slots: [usize; 5],
-}
+use super::{tau_test_passed, elf};
 
 // Give application fixtures a real declared dependency, backed by the image's
 // own ModuleId. Services use the original dependency-free image. Resolution
@@ -71,10 +64,6 @@ pub(super) fn run(case: usize, info: usize, pages: usize) -> ! {
             assert_ne!(handle, other);
         }
     }
-    let graph = Graph {
-        handles: handles.map(ModuleHandle::as_raw),
-        slots: [a_slot, b_slot, a_service, b_service, service_leaf].map(usize::from),
-    };
 
     assert_eq!(
         Ubi::bind_dependency(a, a),
@@ -93,7 +82,6 @@ pub(super) fn run(case: usize, info: usize, pages: usize) -> ! {
         Err(ModuleError::InvalidDependency),
     );
     Ubi::unmap(image.as_ptr().addr(), image.len().div_ceil(4096)).unwrap();
-    tau_test_progress(case, (&raw const graph).addr(), 0);
 
     // Identical ELF bytes prepared twice have independent counters.
     walk(a_slot, 0, 0, 1, 1);
@@ -108,7 +96,6 @@ pub(super) fn run(case: usize, info: usize, pages: usize) -> ! {
     let b_route = usize::from(b_service) | (usize::from(service_leaf) << 16);
     walk(a_slot, a_route, 2, 3, 1 | (1 << 16) | (2 << 32));
     walk(b_slot, b_route, 2, 4, 2 | (2 << 16) | (2 << 32));
-    tau_test_progress(case, (&raw const graph).addr(), 1);
 
     // Both paths share service/leaf counters while A and B remain independent.
     for round in 1..=64 {

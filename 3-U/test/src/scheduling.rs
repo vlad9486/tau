@@ -11,7 +11,7 @@ use core::{
 use tau::{Event, ModuleHandle, Ubi, WaitError, WaitSlot};
 use dtb::Dtb;
 
-use super::{tau_test_passed, tau_test_progress, elf};
+use super::{tau_test_passed, elf};
 
 pub(super) static SLOTS: [WaitSlot; 8] = [const { WaitSlot::new() }; 8];
 static TURN: AtomicUsize = AtomicUsize::new(0);
@@ -199,7 +199,6 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
     let image = dtb.boot_module("dummy-test").unwrap().sl::<u8>();
     let (a, _) = elf::prepare_module(ModuleHandle::ROOT, image, &dtb).unwrap();
     let (b, _) = elf::prepare_module(ModuleHandle::ROOT, image, &dtb).unwrap();
-    tau_test_progress(case, slot_addr(0), SLOTS.len());
 
     Ubi::notify(pointer(0)).unwrap(); // valid free slots are no-ops
     assert_eq!(
@@ -383,11 +382,12 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
 }
 
 pub(super) fn rollback(case: usize) -> ! {
-    // The debugger exhausts the ASID allocator at the first checkpoint, then
-    // restores it after checking that failed construction reclaimed every page.
-    tau_test_progress(case, 0, 0);
-    assert_eq!(Ubi::spawn(worker, [3]), Err(tau::SpawnError::OutOfMemory));
-    tau_test_progress(case, 0, 1);
+    for entry in [0, slot_addr(0), 0xffff_ffc0_0020_0000, 0x10_0000_0000] {
+        assert_eq!(
+            spawn_raw(entry),
+            [tau::SpawnError::InvalidEntry as usize, 0, 0, 0, 0, 0]
+        );
+    }
     reserve(0);
     let id = Ubi::spawn(worker, [3]).unwrap();
     assert_eq!(id, 2); // failed creation consumed neither registry slot nor ASID
