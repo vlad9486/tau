@@ -63,6 +63,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "loader"
+version = "0.1.0"
+dependencies = [
+ "dtb",
+ "elf",
+ "panic-never",
+ "serde",
+ "supervisor",
+ "tau",
+ "toml",
+]
+
+[[package]]
 name = "noop-waker"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -204,12 +217,8 @@ dependencies = [
 name = "supervisor"
 version = "0.1.0"
 dependencies = [
- "dtb",
- "elf",
  "panic-never",
- "serde",
  "tau",
- "toml",
 ]
 
 [[package]]

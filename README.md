@@ -66,7 +66,7 @@ cargo install --path .
 This workspace provides `tau-firmware` in `0-M` with `tau-qemu` and `tau-visionfive2`
 binary targets, plus `tau-visionfive2-spl` in `0-M/vf2` for the board's first boot stage.
 The supervisor package lives in `2-S`; U-mode modules live in `3-U/system`, `3-U/test`,
-and `3-U/dummy-test`. Their static image layout is defined in `2-S/modules.toml`.
+and `3-U/dummy-test`. Their static image layout is defined in `2-S/loader/modules.toml`.
 The tool uses the binary target names when selecting and locating firmware images.
 
 ## Build for Vision Five 2
