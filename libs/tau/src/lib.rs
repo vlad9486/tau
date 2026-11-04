@@ -25,13 +25,11 @@ pub use self::error::{SpawnError, ModuleError, WaitError, AllocError, FreeError}
 mod ubi;
 pub use self::ubi::Ubi;
 
-mod dtb;
-pub use self::dtb::{Dtb, DtbProps, DtbHeaderError, DtbRsv};
-
 mod heap;
 pub use self::heap::Area;
 
-pub mod register;
+mod register;
+pub use self::register::Register;
 
 pub fn to_size<T>(v: T) -> usize
 where

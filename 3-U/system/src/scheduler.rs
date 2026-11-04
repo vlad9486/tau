@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::cell::UnsafeCell;
-use core::{fmt, num::NonZero, time::Duration};
+use core::{fmt, cell::UnsafeCell, num::NonZero, time::Duration};
 
+use dtb::{Dtb, DtbProps, DtbRsv};
 use smallvec::SmallVec;
 
 use super::plic::{PlicPriority, PlicEnable, PlicCtx, InterruptNumber, InterruptId, InterruptPriority};
@@ -69,14 +69,14 @@ struct Driver<S> {
 
 impl<S> Driver<S> {
     pub fn parse_dtb<'dtb, F>(
-        config: tau::DtbProps<'dtb>,
+        config: DtbProps<'dtb>,
         plic: &PlicPriority,
         plic_e: &PlicEnable,
         context_id: usize,
         factory: F,
     ) -> Option<Self>
     where
-        F: FnOnce(tau::DtbProps<'dtb>) -> Option<S>,
+        F: FnOnce(DtbProps<'dtb>) -> Option<S>,
     {
         let sl = config.find_int(|name| name == "interrupts").unwrap_or(&[]);
         let mut int = [u32::MAX; 16];
@@ -120,8 +120,8 @@ pub struct Tasks {
 
 impl Tasks {
     pub fn new(
-        dtb: &tau::Dtb<'_>,
-        reservations: tau::DtbRsv<'_>,
+        dtb: &Dtb<'_>,
+        reservations: DtbRsv<'_>,
         plic: &PlicPriority,
         plic_e: &PlicEnable,
         context_id: usize,

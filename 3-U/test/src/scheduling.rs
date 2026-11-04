@@ -9,7 +9,9 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering::SeqCst},
 };
 use tau::{Event, ModuleHandle, Ubi, WaitError, WaitSlot};
-use super::{tau_test_passed, tau_test_progress};
+use dtb::Dtb;
+
+use super::{tau_test_passed, tau_test_progress, elf};
 
 pub(super) static SLOTS: [WaitSlot; 8] = [const { WaitSlot::new() }; 8];
 static TURN: AtomicUsize = AtomicUsize::new(0);
@@ -193,10 +195,10 @@ fn spawn_raw(entry: usize) -> [usize; 6] {
 
 pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
     let raw = tau::Area::new(info, pages << 12).sl();
-    let (dtb, _) = tau::Dtb::new(raw).unwrap();
+    let (dtb, _) = Dtb::new(raw).unwrap();
     let image = dtb.boot_module("dummy-test").unwrap().sl::<u8>();
-    let (a, _) = Ubi::prepare_module(ModuleHandle::ROOT, image, &dtb).unwrap();
-    let (b, _) = Ubi::prepare_module(ModuleHandle::ROOT, image, &dtb).unwrap();
+    let (a, _) = elf::prepare_module(ModuleHandle::ROOT, image, &dtb).unwrap();
+    let (b, _) = elf::prepare_module(ModuleHandle::ROOT, image, &dtb).unwrap();
     tau_test_progress(case, slot_addr(0), SLOTS.len());
 
     Ubi::notify(pointer(0)).unwrap(); // valid free slots are no-ops

@@ -14,8 +14,6 @@ use core::{
 
 use alloc::boxed::Box;
 
-use tau::register::Register;
-
 use super::{display, ethernet, scheduler::Shared, sdio};
 
 pub struct State<'a> {
@@ -106,13 +104,13 @@ async fn run(
     }
 
     let mut tx_phys = [0u32; 2];
-    let mut tx_buffers: [Option<&'static [Register<u8, u8>; 0x1000]>; 2] = [None; 2];
+    let mut tx_buffers: [Option<&'static [tau::Register<u8, u8>; 0x1000]>; 2] = [None; 2];
     let mut tx_usable = [has_ethernet, false];
     let mut tx_pending = [None; 2];
 
     // User-owned RX pages, separate from both descriptor rings and TX buffers.
     let mut rx_phys = [0u32; 2];
-    let mut rx_buffers: [Option<&'static [Register<u8, u8>; 0x1000]>; 2] = [None; 2];
+    let mut rx_buffers: [Option<&'static [tau::Register<u8, u8>; 0x1000]>; 2] = [None; 2];
     if has_ethernet {
         for port in 0..2 {
             let tx_base =

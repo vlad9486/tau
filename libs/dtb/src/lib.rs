@@ -2,9 +2,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
+#![no_std]
+#![cfg_attr(
+    feature = "nightly",
+    feature(custom_test_frameworks),
+    test_runner(tau::tester::test_runner)
+)]
+
 use core::{fmt, ops::Index, slice, str, ptr};
 
-use super::{asm, heap::Area, to_size};
+use tau::{Area, to_size};
 
 pub struct Dtb<'a> {
     dt: &'a [u32],
@@ -366,7 +373,7 @@ impl<'a> DtbProps<'a> {
                     }
                 }
                 NOP => cursor += 1,
-                a => asm::dbg([a as usize, 0xdeadbeef]),
+                _a => break None,
             }
         }
     }

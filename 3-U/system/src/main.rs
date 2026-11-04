@@ -12,6 +12,8 @@
 
 extern crate alloc;
 
+mod elf;
+
 mod scheduler;
 mod plic;
 
@@ -55,10 +57,11 @@ extern "C" fn main(
     _: usize,
 ) -> ! {
     use core::sync::atomic::Ordering;
+    use dtb::Dtb;
 
     let len = info_pages << 12;
     let raw = tau::Area::new(info, len).sl();
-    let Ok((dtb, reservations)) = tau::Dtb::new(raw) else {
+    let Ok((dtb, reservations)) = Dtb::new(raw) else {
         tau::Ubi::respond(1, []);
     };
 
@@ -126,7 +129,7 @@ extern "C" fn main(
     if dummy_bytes.get(..4) != Some(b"\x7fELF") {
         tau::Ubi::respond(7, []);
     }
-    let (slot, _module) = tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, dummy_bytes, &dtb)
+    let (slot, _module) = elf::prepare_module(tau::ModuleHandle::ROOT, dummy_bytes, &dtb)
         .expect("prepare dummy-test");
     if let Some(slot) = WAIT_SLOTS.get(hart_id) {
         slot.occupied.store(true, Ordering::SeqCst);

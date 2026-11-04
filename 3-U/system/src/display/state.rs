@@ -4,9 +4,11 @@
 
 use core::{ops::Range, time::Duration};
 
+use dtb::{Dtb, DtbRsv};
+
 use super::{
     Controller, DriverState, FRAMEBUFFER_PHYS, FRAMEBUFFER_RESERVATION, Hdmi, MODE, Platform,
-    Register, Shared, TIMER_ISSUER, Task, UNCACHED_OFFSET,
+    Shared, TIMER_ISSUER, Task, UNCACHED_OFFSET,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +39,7 @@ pub struct State {
     platform: Platform,
     controller: Controller,
     hdmi: Hdmi,
-    framebuffer: Option<&'static [Register<u32, u32>]>,
+    framebuffer: Option<&'static [tau::Register<u32, u32>]>,
     phase: Phase,
     reserved: bool,
     render: Option<(Task, Range<usize>)>,
@@ -46,7 +48,7 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(dtb: &tau::Dtb<'_>, reservations: tau::DtbRsv<'_>) -> Option<Self> {
+    pub fn new(dtb: &Dtb<'_>, reservations: DtbRsv<'_>) -> Option<Self> {
         // Hardcoded wiring and oscillator apply only to VisionFive 2. Reject
         // other DTs before mapping any board-specific MMIO (including QEMU).
         let board = dtb.iter().next()?.0.find_str(|n| n == "compatible")?;

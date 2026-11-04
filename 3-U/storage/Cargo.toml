@@ -19,4 +19,4 @@ nightly = []
 [dependencies]
 bitflags = { version = "2.13" }
 
-tau = { path = "../../tau" }
+tau = { path = "../../libs/tau" }

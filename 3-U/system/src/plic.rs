@@ -4,15 +4,13 @@
 
 use core::num::NonZeroU32;
 
-use tau::register::Register;
-
 #[repr(transparent)]
 pub struct InterruptNumber(NonZeroU32);
 
 #[repr(C, align(0x1000))]
 pub struct PlicPriority {
-    priorities: [Register<u32, u32>; 0x400],
-    pending_bit: [Register<u32, u32>; 0x20],
+    priorities: [tau::Register<u32, u32>; 0x400],
+    pending_bit: [tau::Register<u32, u32>; 0x20],
     _0: [u32; 0x3e0],
 }
 
@@ -22,7 +20,7 @@ pub const fn enable_offset(context_id: usize) -> usize {
 
 #[repr(C, align(0x1000))]
 pub struct PlicEnable {
-    enable_bit: [[Register<u32, u32>; 0x20]; 0x20], // 0x3e00 = 0x20 * 0x1f0
+    enable_bit: [[tau::Register<u32, u32>; 0x20]; 0x20], // 0x3e00 = 0x20 * 0x1f0
 }
 
 pub const fn context_offset(context_id: usize) -> usize {
@@ -31,8 +29,8 @@ pub const fn context_offset(context_id: usize) -> usize {
 
 #[repr(C, align(0x1000))]
 pub struct PlicCtx {
-    threshold: Register<InterruptPriority, InterruptPriority>,
-    claim: Register<Option<InterruptId>, InterruptId>,
+    threshold: tau::Register<InterruptPriority, InterruptPriority>,
+    claim: tau::Register<Option<InterruptId>, InterruptId>,
     _0: [u32; 0x3fe],
 }
 

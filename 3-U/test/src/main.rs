@@ -7,8 +7,11 @@
 
 mod graph;
 mod scheduling;
+mod elf;
 
 use core::{arch::naked_asm, num::NonZeroUsize, ptr, sync::atomic::Ordering};
+
+use dtb::Dtb;
 
 // Wire protocol v1: three little-endian u64 words: magic, version, scenario.
 // The host writes scenario only while stopped at tau_test_ready. Volatile access
@@ -205,7 +208,7 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
                 tau_test_failed(case, 3, info);
             }
             let raw = tau::Area::new(info, pages << 12).sl();
-            let Ok((dtb, _)) = tau::Dtb::new(raw) else {
+            let Ok((dtb, _)) = Dtb::new(raw) else {
                 tau_test_failed(case, 3, info);
             };
             for name in ["system", "system-test", "dummy-test"] {
@@ -262,16 +265,16 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
         }
         5 => {
             let raw = tau::Area::new(info, pages << 12).sl();
-            let (dtb, _) = tau::Dtb::new(raw).unwrap();
+            let (dtb, _) = Dtb::new(raw).unwrap();
             let image = dtb.boot_module("dummy-test").unwrap().sl::<u8>();
             assert_eq!(
-                tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, &[0], &dtb),
+                elf::prepare_module(tau::ModuleHandle::ROOT, &[0], &dtb),
                 Err(tau::ModuleError::InvalidImage)
             );
-            let (slot, module) = tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, image, &dtb)
+            let (slot, module) = elf::prepare_module(tau::ModuleHandle::ROOT, image, &dtb)
                 .expect("prepare dummy-test");
             let (sibling, sibling_module) =
-                tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, image, &dtb)
+                elf::prepare_module(tau::ModuleHandle::ROOT, image, &dtb)
                     .expect("prepare second dummy-test");
             assert_ne!(module, sibling_module);
             assert_eq!(
@@ -334,11 +337,11 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             // These failed preparations must not retain snapshot/root pages.
             for _ in 0..8 {
                 assert_eq!(
-                    tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, &[0], &dtb),
+                    elf::prepare_module(tau::ModuleHandle::ROOT, &[0], &dtb),
                     Err(tau::ModuleError::InvalidImage)
                 );
                 assert_eq!(
-                    tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, malformed, &dtb),
+                    elf::prepare_module(tau::ModuleHandle::ROOT, malformed, &dtb),
                     Err(tau::ModuleError::InvalidImage)
                 );
             }

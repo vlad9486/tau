@@ -9,7 +9,7 @@ use core::{
     num::NonZeroU32,
 };
 
-use tau::register::Register;
+use dtb::DtbProps;
 
 use super::scheduler::{DriverState, Shared};
 
@@ -20,7 +20,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn parse(props: tau::DtbProps<'_>, baud_rate: u32) -> Option<Self> {
+    pub fn parse(props: DtbProps<'_>, baud_rate: u32) -> Option<Self> {
         let area = props.find_reg()?;
 
         let reg_io_width = props
@@ -136,16 +136,16 @@ impl DriverState for State {
 
 #[repr(C, align(0x1000))]
 struct Uart<const UART_16550_COMPATIBLE: bool, Word> {
-    transmit_holding: Register<Word, Word>,
-    interrupt_enable: Register<Word, Word>,
-    interrupt_status_fifo_control: Register<Word, Word>,
-    line_control: Register<Word, Word>,
-    modem_control: Register<Word, Word>,
-    line_status: Register<Word, ffi::c_void>,
-    modem_status: Register<Word, Word>,
-    scratchpad: Register<Word, Word>,
+    transmit_holding: tau::Register<Word, Word>,
+    interrupt_enable: tau::Register<Word, Word>,
+    interrupt_status_fifo_control: tau::Register<Word, Word>,
+    line_control: tau::Register<Word, Word>,
+    modem_control: tau::Register<Word, Word>,
+    line_status: tau::Register<Word, ffi::c_void>,
+    modem_status: tau::Register<Word, Word>,
+    scratchpad: tau::Register<Word, Word>,
     _hole: [Word; 23],
-    uart_status: Register<Word, ffi::c_void>,
+    uart_status: tau::Register<Word, ffi::c_void>,
 }
 
 impl<const UART_16550_COMPATIBLE: bool, Word> Uart<UART_16550_COMPATIBLE, Word>

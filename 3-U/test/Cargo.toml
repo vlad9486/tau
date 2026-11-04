@@ -14,4 +14,7 @@ doctest = false
 bench = false
 
 [dependencies]
-tau = { path = "../../tau", features = ["elf"] }
+elf = { version = "0.8.0", default-features = false }
+
+dtb = { path = "../../libs/dtb" }
+tau = { path = "../../libs/tau" }

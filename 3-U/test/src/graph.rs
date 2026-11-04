@@ -4,7 +4,9 @@ use core::mem;
 
 use tau::{ModuleError, ModuleHandle, Ubi};
 
-use super::{tau_test_passed, tau_test_progress};
+use dtb::Dtb;
+
+use super::{tau_test_passed, tau_test_progress, elf};
 
 /// Debugger checkpoint data: four descriptor PPNs followed by five local slots.
 #[repr(C)]
@@ -51,17 +53,17 @@ fn walk(slot: u16, route: usize, depth: usize, value: usize, expected: usize) {
 
 pub(super) fn run(case: usize, info: usize, pages: usize) -> ! {
     let raw = tau::Area::new(info, pages << 12).sl();
-    let (dtb, _) = tau::Dtb::new(raw).unwrap();
+    let (dtb, _) = Dtb::new(raw).unwrap();
     let image = dtb.boot_module("dummy-test").unwrap().sl::<u8>();
     let mut buffer = [0u8; 0x8000];
     let application = &mut buffer[..image.len()];
     application_image(image, application);
 
-    let (a_slot, a) = Ubi::prepare_module(ModuleHandle::ROOT, application, &dtb).unwrap();
-    let (b_slot, b) = Ubi::prepare_module(ModuleHandle::ROOT, application, &dtb).unwrap();
-    let (a_service, service) = Ubi::prepare_module(a, image, &dtb).unwrap();
+    let (a_slot, a) = elf::prepare_module(ModuleHandle::ROOT, application, &dtb).unwrap();
+    let (b_slot, b) = elf::prepare_module(ModuleHandle::ROOT, application, &dtb).unwrap();
+    let (a_service, service) = elf::prepare_module(a, image, &dtb).unwrap();
     let b_service = Ubi::bind_dependency(b, service).unwrap();
-    let (service_leaf, leaf) = Ubi::prepare_module(service, image, &dtb).unwrap();
+    let (service_leaf, leaf) = elf::prepare_module(service, image, &dtb).unwrap();
     let handles = [a, b, service, leaf];
     for (index, handle) in handles.iter().enumerate() {
         assert_ne!(*handle, ModuleHandle::ROOT);

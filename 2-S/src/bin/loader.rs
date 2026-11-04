@@ -25,6 +25,8 @@ use supervisor::{
     matter, sbi, state, space,
 };
 
+use dtb::{Dtb, DtbRsv};
+
 #[cfg(all(not(debug_assertions), feature = "panic-never"))]
 use panic_never as _;
 
@@ -109,7 +111,7 @@ extern "C" fn inner(
         let dtb_addr = st.cast::<u32>().with_addr(opaque);
         let size = u32::from_be(unsafe { *dtb_addr.add(1) }) as usize;
         let dtb = unsafe { slice::from_raw_parts(dtb_addr, size / size_of::<u32>()) };
-        let Ok((dtb, reservations)) = tau::Dtb::new(dtb) else {
+        let Ok((dtb, reservations)) = Dtb::new(dtb) else {
             sbi::Printer.ch(*b"bad dtb\r\n");
             loop {
                 hint::spin_loop();
@@ -178,8 +180,8 @@ extern "C" fn inner(
 fn init_memory(
     hart_id: usize,
     dtb_range: Range<usize>,
-    dtb: tau::Dtb<'_>,
-    reservations: tau::DtbRsv<'_>,
+    dtb: Dtb<'_>,
+    reservations: DtbRsv<'_>,
     st: *mut MaybeUninit<[usize; 512]>,
     ro: *mut MaybeUninit<[usize; 512]>,
     hp: *mut MaybeUninit<[usize; 512]>,

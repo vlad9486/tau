@@ -2,10 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use super::Register;
-
 /// A mapped bank of word-wide volatile registers, addressed by byte offset.
-pub(super) struct Registers(&'static [Register<u32, u32>]);
+pub(super) struct Registers(&'static [tau::Register<u32, u32>]);
 
 impl Registers {
     pub fn map(base: usize, len: usize) -> Self {

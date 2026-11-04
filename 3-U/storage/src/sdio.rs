@@ -4,14 +4,12 @@
 
 use core::{time::Duration, fmt};
 
-use tau::register::Register;
-
 use super::sys;
 
 pub struct State {
     rca: u32,
     freq: u64,
-    dma_desc: &'static [Register<u32, u32>; 0x200],
+    dma_desc: &'static [tau::Register<u32, u32>; 0x200],
     dma_phys: u32,
 }
 
@@ -164,34 +162,34 @@ impl State {
 
 #[repr(C, align(0x1000))]
 pub struct Registers {
-    ctrl: Register<Ctrl, Ctrl>,
-    pwren: Register<u32, u32>,
-    clkdiv: Register<u32, u32>,
-    clksrc: Register<u32, u32>,
-    clkena: Register<u32, u32>,
-    timeout: Register<u32, u32>,
-    ctype: Register<u32, u32>,
-    blksiz: Register<u32, u32>,
-    bytcnt: Register<u32, u32>,
-    intmask: Register<(), Interrupt>,
-    cmdarg: Register<u32, u32>,
-    cmd: Register<u32, u32>,
-    resp0: Register<u32, u32>,
-    resp1: Register<u32, u32>,
-    resp2: Register<u32, u32>,
-    resp3: Register<u32, u32>,
-    mintsts: Register<u32, ()>,
-    rintsts: Register<(), u32>,
-    status: Register<u32, u32>,
-    fifo_threshold: Register<u32, u32>,
+    ctrl: tau::Register<Ctrl, Ctrl>,
+    pwren: tau::Register<u32, u32>,
+    clkdiv: tau::Register<u32, u32>,
+    clksrc: tau::Register<u32, u32>,
+    clkena: tau::Register<u32, u32>,
+    timeout: tau::Register<u32, u32>,
+    ctype: tau::Register<u32, u32>,
+    blksiz: tau::Register<u32, u32>,
+    bytcnt: tau::Register<u32, u32>,
+    intmask: tau::Register<(), Interrupt>,
+    cmdarg: tau::Register<u32, u32>,
+    cmd: tau::Register<u32, u32>,
+    resp0: tau::Register<u32, u32>,
+    resp1: tau::Register<u32, u32>,
+    resp2: tau::Register<u32, u32>,
+    resp3: tau::Register<u32, u32>,
+    mintsts: tau::Register<u32, ()>,
+    rintsts: tau::Register<(), u32>,
+    status: tau::Register<u32, u32>,
+    fifo_threshold: tau::Register<u32, u32>,
     _h0: [u32; 0xc],
-    bus_mod: Register<u32, u32>,
-    poll_demand: Register<u32, u32>,
-    desc_base: Register<u32, u32>,
-    i_dmac_status: Register<u32, u32>,
-    i_dmac_int_enable: Register<u32, u32>,
-    _hole: Register<[u32; 0x5b], ()>,
-    data: Register<u32, u32>,
+    bus_mod: tau::Register<u32, u32>,
+    poll_demand: tau::Register<u32, u32>,
+    desc_base: tau::Register<u32, u32>,
+    i_dmac_status: tau::Register<u32, u32>,
+    i_dmac_int_enable: tau::Register<u32, u32>,
+    _hole: tau::Register<[u32; 0x5b], ()>,
+    data: tau::Register<u32, u32>,
 }
 
 const CTRL_RESET_TO: u32 = 1000;

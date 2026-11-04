@@ -11,7 +11,8 @@ members = [
     "3-U/test",
     "3-U/dummy-test",
     "3-U/storage",
-    "tau",
+    "libs/tau",
+    "libs/dtb",
 ]
 resolver = "3"
 

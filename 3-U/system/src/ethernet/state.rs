@@ -2,23 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-//! VisionFive 2 v1.3B YT8531/DWMAC raw Ethernet bring-up.
-//! See docs/visionfive2/transmit-test.md for the boot contract and frame format.
-
-mod registers;
-use self::registers::Registers;
-
-mod rx;
-pub use self::rx::{RxTask, RxDone, RxError};
-
-mod tx;
-pub use self::tx::{TxTask, TxDone, TxError};
-
 use core::time::Duration;
 
-use tau::register::Register;
+use dtb::DtbProps;
 
-use super::scheduler::{Shared, DriverState};
+use super::{Shared, DriverState, registers::Registers, rx, tx};
 
 const OWN: u32 = 1 << 31;
 const RING_LEN: usize = 4;
@@ -26,7 +14,7 @@ const DMA_IRQ_MASK: u32 = (1 << 15) | (1 << 14) | (1 << 12) | (1 << 6) | 1;
 const DMA_ACK_MASK: u32 = 0xd7ff;
 
 #[repr(C)]
-struct Descriptor([Register<u32, u32>; 4]);
+struct Descriptor([tau::Register<u32, u32>; 4]);
 
 const _: () = assert!(size_of::<Descriptor>() == 16);
 
@@ -48,7 +36,7 @@ pub struct State {
     tx_descriptors: &'static [Descriptor; RING_LEN],
     rx_descriptors: &'static [Descriptor; RING_LEN],
     rx_index: usize,
-    rx_pending: Option<RxTask>,
+    rx_pending: Option<rx::RxTask>,
     dma_phys: u32,
     index: usize,
     pending: bool,
@@ -59,7 +47,7 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(config: tau::DtbProps<'_>) -> Option<Self> {
+    pub fn new(config: DtbProps<'_>) -> Option<Self> {
         let area = config.find_reg()?;
         // Board-specific profile: reject other controllers, including QEMU NICs.
         let port = match area.base {
@@ -185,14 +173,14 @@ impl State {
                     2,
                 )
             };
-        let crg = tau::Area::new(base, 0x10000).r::<[Register<u32, u32>; 0x4000]>();
-        let cfg = tau::Area::new(syscon, 0x10000).r::<[Register<u32, u32>; 0x4000]>();
+        let crg = tau::Area::new(base, 0x10000).r::<[tau::Register<u32, u32>; 0x4000]>();
+        let cfg = tau::Area::new(syscon, 0x10000).r::<[tau::Register<u32, u32>; 0x4000]>();
         crg[ahb / 4].write(crg[ahb / 4].read() | (1 << 31));
         crg[axi / 4].write(crg[axi / 4].read() | (1 << 31));
         let sys = if self.port == 1 {
             crg
         } else {
-            tau::Area::new(0x1302_0000, 0x10000).r::<[Register<u32, u32>; 0x4000]>()
+            tau::Area::new(0x1302_0000, 0x10000).r::<[tau::Register<u32, u32>; 0x4000]>()
         };
         // Keep firmware's GTX divider/root configuration, enable GTX/GTXC gates.
         let (gtx, gtxc) = if self.port == 0 {
@@ -283,7 +271,7 @@ impl State {
         }
     }
 
-    fn receive(&mut self, task: RxTask) {
+    fn receive(&mut self, task: rx::RxTask) {
         let desc = &self.rx_descriptors[self.rx_index].0;
         desc[0].write(task.phys);
         desc[1].write(0u32);
@@ -309,7 +297,7 @@ impl State {
             return;
         };
         let error = if !rx::valid(task) {
-            RxError::InvalidBuffer
+            rx::RxError::InvalidBuffer
         } else {
             match self.phase {
                 Phase::Ready => {
@@ -317,7 +305,7 @@ impl State {
                     self.receive(task);
                     return;
                 }
-                Phase::Failed => RxError::Failed,
+                Phase::Failed => rx::RxError::Failed,
                 _ => return, // A posted receive waits for link, without busy retrying.
             }
         };
@@ -325,7 +313,7 @@ impl State {
         shared.ethernet_rx_done[port] = Some(Err(error));
     }
 
-    fn send(&mut self, task: TxTask) {
+    fn send(&mut self, task: tx::TxTask) {
         let desc = &self.tx_descriptors[self.index].0;
         desc[0].write(task.phys);
         desc[1].write(0u32);
@@ -350,15 +338,15 @@ impl State {
             return;
         };
         let error = if !tx::valid(task) {
-            TxError::InvalidBuffer
+            tx::TxError::InvalidBuffer
         } else {
             match self.phase {
                 Phase::Ready => {
                     self.send(task);
                     return;
                 }
-                Phase::Failed => TxError::Failed,
-                _ => TxError::NotReady,
+                Phase::Failed => tx::TxError::Failed,
+                _ => tx::TxError::NotReady,
             }
         };
         shared.ethernet_tx_done[port] = Some(Err(error));
@@ -480,7 +468,7 @@ impl State {
                         ));
                         shared.ethernet_tx_done[usize::from(self.port)] =
                             Some(if desc & (1 << 15) != 0 {
-                                Err(TxError::Descriptor)
+                                Err(tx::TxError::Descriptor)
                             } else {
                                 Ok(())
                             });
@@ -552,14 +540,14 @@ impl DriverState for State {
             self.phase = Phase::Failed;
             if self.rx_pending.take().is_some() {
                 shared.ethernet_rx_done[usize::from(self.port)] =
-                    Some(Err(RxError::BufferUnavailable));
+                    Some(Err(rx::RxError::BufferUnavailable));
             }
             if self.pending {
                 // Stopping the channel alone does not prove all bus accesses
                 // have drained. Do not promise the caller buffer ownership.
                 self.pending = false;
                 shared.ethernet_tx_done[usize::from(self.port)] =
-                    Some(Err(TxError::BufferUnavailable));
+                    Some(Err(tx::TxError::BufferUnavailable));
             }
         }
         // Interrupts never enqueue timers: exactly one outstanding per MAC.
