@@ -178,8 +178,11 @@ extern "C" fn _start() -> ! {
         // behavior. BOOT_READY lives in the loaded raw image, not .bss.
         "la t0, {ready}",
         "li t1, 1",
-        "amoswap.d.aq t2, t1, (t0)",
+        "0:",
+        "lr.d.aq t2, (t0)",
         "bnez t2, 3f",
+        "sc.d t2, t1, (t0)",
+        "bnez t2, 0b",
         "la t0, {boot_hart}",
         "sd a0, 0(t0)",
         "la t0, __BSS_START",
