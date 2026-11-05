@@ -256,8 +256,6 @@ pub enum Call {
     /// # Parameters
     /// - `entry`: The entry point of the new thread.
     Spawn { entry: usize },
-    /// Exit the current thread with the given message. Never returns, the thread cease to exist.
-    Exit,
     /// Loader-only: allocate 2^order contiguous physical frames from `zone`.
     /// Return status in a0 and the physical address in a1.
     AllocPhysical { order: u8, zone: MemoryZone },
@@ -299,7 +297,6 @@ impl Call {
             Self::Wait => (6 << 4) + 0b1001,
             Self::Notify => (7 << 4) + 0b1001,
             Self::Spawn { entry } => entry,
-            Self::Exit => 0b1001,
             Self::AllocPhysical { order, zone } => {
                 (((order as usize) | ((zone as usize) << 8)) << 16) + (1 << 4) + 0b1001
             }
@@ -333,7 +330,6 @@ impl Call {
                 0b10 => match id {
                     6 => Ok(Self::Wait),
                     7 => Ok(Self::Notify),
-                    0 => Ok(Self::Exit),
                     1 => {
                         let order = (arg & 0xff) as u8;
                         let zone = match arg >> 8 {

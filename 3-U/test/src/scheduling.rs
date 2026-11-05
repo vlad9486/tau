@@ -108,13 +108,13 @@ extern "C" fn worker(_: usize, role: usize, _: usize, _: usize, _: usize, _: usi
             notified(7);
             HART_DONE.store(usize::MAX - 1, SeqCst);
             Ubi::notify(pointer(6)).unwrap();
-            Ubi::exit()
+            Ubi::respond(0, [])
         }
         _ => panic!("worker role"),
     }
     DONE.store(role, SeqCst);
     Ubi::notify(pointer(0)).unwrap();
-    Ubi::exit()
+    Ubi::respond(0, [])
 }
 
 pub(super) fn secondary_hart(hart: usize) -> ! {
@@ -133,7 +133,7 @@ pub(super) fn secondary_hart(hart: usize) -> ! {
     while HART_DONE.load(SeqCst) != usize::MAX - 2 {
         core::hint::spin_loop();
     }
-    Ubi::exit()
+    Ubi::respond(0, [])
 }
 
 // Exercise all register classes across several timer interrupts. Only t0 is a

@@ -568,11 +568,6 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 }
             }
         }
-        Ok(tau::Call::Exit) => {
-            scheduler::exit(window, local.module, scheduler, hart_id);
-            let selected = scheduler::dispatch(window, local.module, scheduler, hart_id);
-            resume_scheduled(window, local, selected)
-        }
         Ok(tau::Call::AllocPhysical { order, zone }) => {
             if !local.module.header.caps.frame_alloc {
                 msg[0] = tau::AllocError::AccessDenied as usize;

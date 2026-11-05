@@ -161,11 +161,6 @@ impl Ubi {
         }
     }
 
-    pub fn exit() -> ! {
-        let (_, []) = ubi(Call::Exit, []);
-        unsafe { hint::unreachable_unchecked() }
-    }
-
     pub fn map(
         physical_addr: Option<NonZero<usize>>,
         virtual_addr: usize,
