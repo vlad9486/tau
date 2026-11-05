@@ -6,7 +6,7 @@ use core::{arch, hint, num::NonZero, ptr};
 
 use super::{
     Call, Entry, Event, MemoryZone, ModuleError, ModuleHandle, PageFlags, SpawnError, WaitError,
-    WaitSlot, AllocError, FreeError,
+    WaitSlot, AllocError, FreeError, ModuleCapabilities,
 };
 
 #[inline(always)]
@@ -73,10 +73,17 @@ impl Ubi {
         stack_pages: usize,
         wait_slots_addr: usize,
         wait_slots_count: usize,
+        caps: ModuleCapabilities,
     ) -> Result<ModuleHandle, ModuleError> {
         let (r0, [handle]) = ubi(
             Call::CreateModule,
-            [entry, stack_pages, wait_slots_addr, wait_slots_count],
+            [
+                entry,
+                stack_pages,
+                wait_slots_addr,
+                wait_slots_count,
+                usize::from(caps.as_raw()),
+            ],
         );
         if let Some(code) = NonZero::new(r0) {
             Err(unsafe { ModuleError::decode(code) })

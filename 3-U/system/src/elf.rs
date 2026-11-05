@@ -14,6 +14,7 @@ pub fn prepare_module(
     parent: tau::ModuleHandle,
     bytes: &[u8],
     dtb: &Dtb<'_>,
+    caps: tau::ModuleCapabilities,
 ) -> Result<(u16, tau::ModuleHandle), tau::ModuleError> {
     const PAGE: usize = 4096;
     const STAGE_VA: usize = 31 << 30;
@@ -284,7 +285,7 @@ pub fn prepare_module(
         }
     }
 
-    let handle = tau::Ubi::create_module(entry, stack_pages, wait_base, wait_count)?;
+    let handle = tau::Ubi::create_module(entry, stack_pages, wait_base, wait_count, caps)?;
     for &(virt, phys, pages) in resolved_mmio[..resolved_count].iter().flatten() {
         for p in 0..pages {
             let va = virt + p * PAGE;

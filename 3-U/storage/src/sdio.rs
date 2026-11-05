@@ -139,6 +139,11 @@ impl State {
             self.freq,
         );
 
+        let target = if flags.contains(CmdFl::DATA_EXP) {
+            Interrupt::DTO
+        } else {
+            Interrupt::DONE
+        };
         loop {
             sys::wait_interrupt();
 
@@ -153,7 +158,7 @@ impl State {
             }
             if int.contains(Interrupt::ERR) {
                 break Err(DriverError::CmdFailed(CMD));
-            } else if int.contains(Interrupt::DONE) {
+            } else if int.contains(target) {
                 break Ok(());
             }
         }
@@ -216,7 +221,7 @@ bitflags::bitflags! {
 
 bitflags::bitflags! {
     #[repr(transparent)]
-    #[derive(Debug)]
+    #[derive(Clone, Copy, Debug)]
     struct Interrupt: u32 {
         /// Card detected
         const CD = 1 << 0;
@@ -249,6 +254,17 @@ bitflags::bitflags! {
 }
 
 impl Registers {
+    pub fn clear_interrupts(&self) {
+        let int_bits = self.mintsts.read();
+        if int_bits != 0 {
+            self.rintsts.write(int_bits);
+        }
+        let dma_status = self.i_dmac_status.read();
+        if dma_status != 0 {
+            self.i_dmac_status.write(dma_status & 0x3ff);
+        }
+    }
+
     fn init(&self, fifo_depth: u32) -> Result<(), DriverError> {
         let ctrl_reset = Ctrl::RESET_CONTROLLER | Ctrl::FIFO_RESET | Ctrl::DMA_RESET;
         self.ctrl.write(ctrl_reset);

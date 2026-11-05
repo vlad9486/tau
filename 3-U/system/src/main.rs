@@ -18,7 +18,6 @@ mod scheduler;
 mod plic;
 
 mod uart;
-mod sdio;
 mod ethernet;
 mod display;
 mod user;
@@ -129,8 +128,13 @@ extern "C" fn main(
     if dummy_bytes.get(..4) != Some(b"\x7fELF") {
         tau::Ubi::respond(7, []);
     }
-    let (slot, _module) = elf::prepare_module(tau::ModuleHandle::ROOT, dummy_bytes, &dtb)
-        .expect("prepare dummy-test");
+    let (slot, _module) = elf::prepare_module(
+        tau::ModuleHandle::ROOT,
+        dummy_bytes,
+        &dtb,
+        tau::ModuleCapabilities::empty(),
+    )
+    .expect("prepare dummy-test");
     if let Some(slot) = WAIT_SLOTS.get(hart_id) {
         slot.occupied.store(true, Ordering::SeqCst);
     }

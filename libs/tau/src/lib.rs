@@ -15,8 +15,8 @@ pub mod asm;
 
 mod common;
 pub use self::common::{
-    Call, Entry, Event, Manifest, MemoryZone, ModuleHandle, ModuleId, PageFlags, RawManifest,
-    WaitSlot, MappedRegion,
+    Call, Entry, Event, Manifest, RawManifest, MemoryZone, ModuleHandle, ModuleId, PageFlags,
+    ModuleCapabilities, WaitSlot, MappedRegion,
 };
 
 pub mod error;

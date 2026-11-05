@@ -1,3 +1,5 @@
+// TODO: remove duplicated code
+
 use core::{mem, num::NonZero, ptr, str};
 
 use elf::{
@@ -284,7 +286,13 @@ pub fn prepare_module(
         }
     }
 
-    let handle = tau::Ubi::create_module(entry, stack_pages, wait_base, wait_count)?;
+    let handle = tau::Ubi::create_module(
+        entry,
+        stack_pages,
+        wait_base,
+        wait_count,
+        tau::ModuleCapabilities::empty(),
+    )?;
     for &(virt, phys, pages) in resolved_mmio[..resolved_count].iter().flatten() {
         for p in 0..pages {
             let va = virt + p * PAGE;

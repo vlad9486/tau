@@ -300,6 +300,7 @@ pub fn create_module(
     context: &Context,
     hart_id: usize,
     spec: ModuleSpec,
+    caps: tau::ModuleCapabilities,
 ) -> Result<usize, tau::ModuleError> {
     let (spec, root_index) = spec.validate()?;
     let stem = window
@@ -323,8 +324,8 @@ pub fn create_module(
     };
     let caps = Capabilities {
         loader: false,
-        pure: false,
-        frame_alloc: false,
+        pure: caps.contains(tau::ModuleCapabilities::PURE),
+        frame_alloc: caps.contains(tau::ModuleCapabilities::FRAME_ALLOC),
     };
     unsafe {
         Module::init_at(ptr::from_mut(module), descriptor, spec.wait_table, caps);

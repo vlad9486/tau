@@ -8,7 +8,7 @@ use dtb::{Dtb, DtbProps, DtbRsv};
 use smallvec::SmallVec;
 
 use super::plic::{PlicPriority, PlicEnable, PlicCtx, InterruptNumber, InterruptId, InterruptPriority};
-use super::{uart, sdio, ethernet, display, user};
+use super::{uart, ethernet, display, user, elf};
 
 pub trait DriverState
 where
@@ -20,8 +20,7 @@ where
 pub struct Shared {
     pub uart_out: uart::Buffer,
     pub uart_in: uart::Buffer,
-    pub sdio_task: Option<sdio::Task>,
-    pub sdio_done: Option<sdio::Task>,
+    pub sdio_done: bool,
     // One producer and one outstanding TX per port. Consume done before reuse.
     pub ethernet_tx_task: [Option<ethernet::TxTask>; 2],
     pub ethernet_tx_done: [Option<ethernet::TxDone>; 2],
@@ -44,6 +43,10 @@ impl Shared {
     pub fn sleep(&mut self, issuer: u8, delay: Duration) {
         let tick = ((delay.as_nanos() * self.freq) / 1_000_000_000) as usize;
         let val = unsafe { NonZero::new_unchecked(tau::asm::read_time().wrapping_add(tick)) };
+        self.sleep_until(issuer, val);
+    }
+
+    pub fn sleep_until(&mut self, issuer: u8, val: NonZero<usize>) {
         let d = Deadline { val, issuer };
         *self
             .deadline
@@ -110,9 +113,26 @@ fn handle<'a, S>(
     }
 }
 
+struct SdioNew {
+    slot: u16,
+    fifo_depth: u32,
+}
+
+impl DriverState for SdioNew {
+    fn handle(&mut self, shared: &mut Shared, _event: tau::Event) {
+        let [done, deadline] = tau::Ubi::invoke(self.slot, 0, []).unwrap();
+        if let Some(val) = NonZero::new(deadline) {
+            shared.sleep_until(1, val);
+        }
+        if done != 0 {
+            shared.sdio_done = true;
+        }
+    }
+}
+
 pub struct Tasks {
     uart: Option<Driver<uart::State>>,
-    sdio: Option<Driver<sdio::State>>,
+    sdio: Option<Driver<SdioNew>>,
     ethernet: SmallVec<[Driver<ethernet::State>; 4]>,
     display: Option<display::State>,
     freq: u128,
@@ -154,7 +174,22 @@ impl Tasks {
             .find(|(_, path)| path[1] == "soc" && path[2].starts_with("sdio1@"))
             .and_then(|(config, _)| {
                 Driver::parse_dtb(config, plic, plic_e, context_id, |config| {
-                    sdio::State::new(config)
+                    let sdio_image = dtb.boot_module("storage")?;
+                    let sdio_bytes = sdio_image.sl::<u8>();
+                    let (slot, _module) = elf::prepare_module(
+                        tau::ModuleHandle::ROOT,
+                        sdio_bytes,
+                        dtb,
+                        tau::ModuleCapabilities::FRAME_ALLOC,
+                    )
+                    .expect("prepare sdio");
+
+                    let Some(&[fifo_depth]) = config.find_int(|name| name == "fifo-depth") else {
+                        return None;
+                    };
+                    let fifo_depth = fifo_depth.to_be();
+
+                    Some(SdioNew { slot, fifo_depth })
                 })
             });
         let ethernet = dtb
@@ -183,8 +218,7 @@ impl Tasks {
         let shared = UnsafeCell::new(Shared {
             uart_out: uart::Buffer::default(),
             uart_in: uart::Buffer::default(),
-            sdio_task: None,
-            sdio_done: None,
+            sdio_done: false,
             ethernet_tx_task: [None; 2],
             ethernet_tx_done: [None; 2],
             ethernet_rx_task: [None; 2],
@@ -197,13 +231,15 @@ impl Tasks {
         });
         let mut user = user::State::new(
             &shared,
-            self.sdio.is_some(),
+            self.sdio.as_ref().map(|s| s.state.slot),
             !self.ethernet.is_empty(),
             self.display.is_some(),
             dummy_slot,
         );
 
         let shared = unsafe { &mut *shared.get() };
+
+        shared.write(format_args!("here\n"));
 
         if let Some(driver) = self.uart.as_mut() {
             driver.state.handle(shared, tau::Event::Timeout);
@@ -215,7 +251,14 @@ impl Tasks {
             driver.state.handle(shared, tau::Event::Timeout);
         }
         if let Some(driver) = self.sdio.as_mut() {
-            driver.state.handle(shared, tau::Event::Timeout);
+            let msg = [driver.state.fifo_depth as usize, self.freq as usize];
+            let [done, deadline] = tau::Ubi::invoke(driver.state.slot, 0, msg).unwrap();
+            if let Some(val) = NonZero::new(deadline) {
+                shared.sleep_until(1, val);
+            }
+            if done != 0 {
+                shared.sdio_done = true;
+            }
         }
         for driver in self.ethernet.as_mut() {
             driver.state.handle(shared, tau::Event::Timeout);
@@ -242,14 +285,14 @@ impl Tasks {
                 .map(|d| d.val)
                 .min();
 
-            match tau::Ubi::wait(&crate::WAIT_SLOTS[hart_id], deadline) {
+            match tau::Ubi::wait(&super::WAIT_SLOTS[hart_id], deadline) {
                 Ok(tau::Event::Notified { .. }) => {
                     while let Some(id) = plic.next() {
                         handle(self.uart.as_mut(), shared, &id);
                         handle(self.sdio.as_mut(), shared, &id);
                         handle(self.ethernet.iter_mut(), shared, &id);
 
-                        if shared.sdio_done.is_some() || !shared.uart_in.is_empty() {
+                        if shared.sdio_done || !shared.uart_in.is_empty() {
                             user.step();
                         }
 
@@ -273,6 +316,9 @@ impl Tasks {
                             1 => {
                                 if let Some(driver) = self.sdio.as_mut() {
                                     driver.state.handle(shared, tau::Event::Timeout);
+                                }
+                                if shared.sdio_done {
+                                    user.step();
                                 }
                             }
                             2 => user.step(),
@@ -343,49 +389,3 @@ impl Tasks {
         }
     }
 }
-
-//         if let Some(driver) = &mut self.sdio {
-//             let Some(sdio_image) = dtb.boot_module("storage") else {
-//                 tau::Ubi::respond(7, []);
-//             };
-//             let sdio_bytes = sdio_image.sl::<u8>();
-//             if sdio_bytes.get(..4) != Some(b"\x7fELF") {
-//                 tau::Ubi::respond(7, []);
-//             }
-//             let (sdio_slot, _module) =
-//                 tau::Ubi::prepare_module(tau::ModuleHandle::ROOT, sdio_bytes, dtb)
-//                     .expect("prepare sdio");
-//             shared.write(format_args!("storage is at slot={sdio_slot}"));
-//
-//             let freq = self.freq as u64;
-//             let fifo_depth = driver.state.0;
-//             let phys = driver.state.1;
-//             let ctx = alloc::boxed::Box::new(Ctx {
-//                 sdio_slot,
-//                 fifo_depth,
-//                 freq,
-//                 phys,
-//             });
-//             tau::Ubi::spawn(storage_thread, [Box::into_raw(ctx).addr()]).unwrap();
-//         }
-
-// #[repr(C)]
-// struct Ctx {
-//     sdio_slot: u16,
-//     fifo_depth: u32,
-//     freq: u64,
-//     phys: u32,
-// }
-//
-// extern "C" fn storage_thread(ctx: usize, _: usize, _: usize, _: usize, _: usize, _: usize) -> ! {
-//     let ctx = unsafe { alloc::boxed::Box::from_raw(ctx as *mut Ctx) };
-//     use_storage(ctx.sdio_slot, ctx.fifo_depth, ctx.freq, ctx.phys);
-//     drop(ctx);
-//     tau::Ubi::exit()
-// }
-//
-// fn use_storage(sdio_slot: u16, fifo_depth: u32, freq: u64, phys: u32) {
-//     let [] = tau::Ubi::invoke(sdio_slot, 0, [fifo_depth as usize, freq as usize])
-//         .expect("invoke dummy-test");
-//     let [] = tau::Ubi::invoke(sdio_slot, 1, [0x600, phys as usize]).expect("invoke dummy-test");
-// }

@@ -665,7 +665,9 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                         count: msg[4],
                     },
                 };
-                matter::create_module(window, context, hart_id, spec)
+                // don't need to validate, loader is trusted
+                let caps = tau::ModuleCapabilities::from_raw(msg[5] as u8);
+                matter::create_module(window, context, hart_id, spec, caps)
             })();
             match res {
                 Ok(handle) => {

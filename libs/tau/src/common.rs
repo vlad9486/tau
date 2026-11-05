@@ -198,6 +198,39 @@ impl PageFlags {
     }
 }
 
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModuleCapabilities(u8);
+
+impl ModuleCapabilities {
+    pub const PURE: Self = Self(1 << 0);
+    pub const FRAME_ALLOC: Self = Self(1 << 1);
+
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn from_raw(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    pub const fn as_raw(self) -> u8 {
+        self.0
+    }
+
+    pub const fn bits(self) -> usize {
+        self.0 as usize
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
 /// The supervisor interface. Additional machine words are passed in registers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Call {
@@ -238,8 +271,8 @@ pub enum Call {
     /// a1 = target handle (0 for self), a2 = virtual address, a3 = pages.
     Unmap,
     /// Loader-only: create an empty module template with a1 = entry,
-    /// a2 = stack_pages, a3 = wait_slots_addr, a4 = wait_slots_count.
-    /// Return status in a0 and the new ModuleHandle in a1.
+    /// a2 = stack_pages, a3 = wait_slots_addr, a4 = wait_slots_count,
+    /// a5 = capabilities. Return status in a0 and the new ModuleHandle in a1.
     CreateModule,
     /// Loader-only: bind dependency handle a2 under parent handle a1.
     /// Return status in a0 and a fresh parent-local slot in a1.

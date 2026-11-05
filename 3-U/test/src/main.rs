@@ -381,7 +381,13 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
                 (0x1000, 0),                // invalid stack pages
             ] {
                 assert_eq!(
-                    tau::Ubi::create_module(entry, stack_pages, 0, 0),
+                    tau::Ubi::create_module(
+                        entry,
+                        stack_pages,
+                        0,
+                        0,
+                        tau::ModuleCapabilities::empty()
+                    ),
                     Err(tau::ModuleError::InvalidImage)
                 );
             }
@@ -423,14 +429,8 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             );
             assert_eq!(tau::Ubi::invoke::<0, 0>(slot, 2, []).unwrap_err().get(), 42);
             // Exercise continuation-preserving Respond (keep = true) across invocations.
-            assert_eq!(
-                tau::Ubi::invoke::<1, 1>(slot, 13, [25]).unwrap(),
-                [35]
-            );
-            assert_eq!(
-                tau::Ubi::invoke::<1, 1>(slot, 0, [7]).unwrap(),
-                [42]
-            );
+            assert_eq!(tau::Ubi::invoke::<1, 1>(slot, 13, [25]).unwrap(), [35]);
+            assert_eq!(tau::Ubi::invoke::<1, 1>(slot, 0, [7]).unwrap(), [42]);
             // The assembly response path must keep every message register
             // intact while using scratch registers to choose the MMU policy.
             let words = [usize::MAX, 0x1234_5678_9abc_def0, 3, 4, 5];

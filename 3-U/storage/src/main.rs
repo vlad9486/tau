@@ -83,7 +83,7 @@ extern "C" fn main(a0: usize, a1: usize, a2: usize, _: usize, _: usize, _: usize
             };
             match QUEUE.enqueue(req) {
                 Ok(()) => {
-                    let _ = tau::Ubi::notify(&WAIT_SLOTS[0]);
+                    // TODO: raise software irq that will trigger `op = 3`
                     tau::Ubi::respond(0, [])
                 }
                 Err(_) => tau::Ubi::respond(1, []),
@@ -94,18 +94,37 @@ extern "C" fn main(a0: usize, a1: usize, a2: usize, _: usize, _: usize, _: usize
 }
 
 fn run(regs: &sdio::Registers, fifo_depth: u32, freq: u64) -> Result<(), sdio::DriverError> {
-    use core::sync::atomic::Ordering;
-
     let mut state = sdio::State::new(freq).ok_or(sdio::DriverError::Dma)?;
     state.init(regs, fifo_depth)?;
-    WAIT_SLOTS[0].occupied.store(true, Ordering::SeqCst);
+
+    let mut done = 1;
     loop {
-        while let Some(req) = QUEUE.dequeue() {
-            match req {
-                Request::Read { page, phys } => state.read(regs, page, phys)?,
-                Request::Write { page, phys } => state.write(regs, page, phys)?,
+        // [1, 0] signals to system that init / the previous request is complete
+        let Ok([op, page, phys]) = tau::Ubi::respond_keep(0, [done, 0]) else {
+            done = 0;
+            continue;
+        };
+        match op {
+            1 => {
+                state.read(regs, page as u32, phys as u32)?;
+                done = 1;
+            }
+            2 => {
+                state.write(regs, page as u32, phys as u32)?;
+                done = 1;
+            }
+            3 => {
+                while let Some(req) = QUEUE.dequeue() {
+                    match req {
+                        Request::Read { page, phys } => state.read(regs, page, phys)?,
+                        Request::Write { page, phys } => state.write(regs, page, phys)?,
+                    }
+                }
+            }
+            _ => {
+                regs.clear_interrupts();
+                done = 0;
             }
         }
-        let _ = tau::Ubi::wait(&WAIT_SLOTS[0], None);
     }
 }

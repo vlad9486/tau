@@ -14,7 +14,7 @@ use core::{
 
 use alloc::boxed::Box;
 
-use super::{display, ethernet, scheduler::Shared, sdio};
+use super::{display, ethernet, scheduler::Shared};
 
 pub struct State<'a> {
     fut: Pin<Box<dyn Future<Output = ()> + 'a>>,
@@ -23,13 +23,19 @@ pub struct State<'a> {
 impl<'a> State<'a> {
     pub fn new(
         shared: &'a UnsafeCell<Shared>,
-        has_sdio: bool,
+        sdio_slot: Option<u16>,
         has_ethernet: bool,
         has_display: bool,
         dummy_slot: u16,
     ) -> Self {
         State {
-            fut: Box::pin(run(shared, has_sdio, has_ethernet, has_display, dummy_slot)),
+            fut: Box::pin(run(
+                shared,
+                sdio_slot,
+                has_ethernet,
+                has_display,
+                dummy_slot,
+            )),
         }
     }
 
@@ -73,17 +79,18 @@ fn measure_roundtrips(shared: &UnsafeCell<Shared>, slot: u16) {
 
 async fn run(
     shared: &UnsafeCell<Shared>,
-    has_sdio: bool,
+    sdio_slot: Option<u16>,
     has_ethernet: bool,
     has_display: bool,
     dummy_slot: u16,
 ) {
-    if has_sdio {
+    if let Some(sdio_slot) = sdio_slot {
+        wait_sdio_init(shared).await;
         let base = tau::Ubi::alloc_physical(0, tau::MemoryZone::Dma).expect("alloc sdio dma");
         let phys = u32::try_from(base).expect("sdio dma 32-bit");
         let page = tau::Area::new(base, 0x1000).r::<MaybeUninit<[[u8; 0x10]; 0x100]>>();
 
-        read_sdio(shared, phys, 0x600).await;
+        read_sdio(shared, sdio_slot, phys, 0x600).await;
 
         unsafe { &mut *shared.get() }.write(format_args!("___page: 0x600"));
         let dma_data = unsafe { page.assume_init() };
@@ -275,12 +282,27 @@ async fn wait_event(shared: &UnsafeCell<Shared>) -> Event {
     .await
 }
 
-async fn read_sdio(shared: &UnsafeCell<Shared>, phys: u32, block: u32) {
-    let task = sdio::Task::Read { page: block, phys };
-    unsafe { &mut *shared.get() }.sdio_task = Some(task);
-    let _done = future::poll_fn(move |_| {
-        if let Some(done) = unsafe { &mut *shared.get() }.sdio_done.take() {
-            Poll::Ready(done)
+async fn wait_sdio_init(shared: &UnsafeCell<Shared>) {
+    future::poll_fn(move |_| {
+        if unsafe { &mut *shared.get() }.sdio_done {
+            unsafe { &mut *shared.get() }.sdio_done = false;
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+async fn read_sdio(shared: &UnsafeCell<Shared>, slot: u16, phys: u32, block: u32) {
+    let [done, _] = tau::Ubi::invoke(slot, 0, [1, block as usize, phys as usize]).unwrap();
+    if done != 0 {
+        unsafe { &mut *shared.get() }.sdio_done = true;
+    }
+    future::poll_fn(move |_| {
+        if unsafe { &mut *shared.get() }.sdio_done {
+            unsafe { &mut *shared.get() }.sdio_done = false;
+            Poll::Ready(())
         } else {
             Poll::Pending
         }
@@ -289,12 +311,15 @@ async fn read_sdio(shared: &UnsafeCell<Shared>, phys: u32, block: u32) {
 }
 
 #[allow(dead_code)]
-async fn write(shared: &UnsafeCell<Shared>, phys: u32, block: u32) {
-    let task = sdio::Task::Write { page: block, phys };
-    unsafe { &mut *shared.get() }.sdio_task = Some(task);
-    let _done = future::poll_fn(move |_| {
-        if let Some(done) = unsafe { &mut *shared.get() }.sdio_done.take() {
-            Poll::Ready(done)
+async fn write(shared: &UnsafeCell<Shared>, slot: u16, phys: u32, block: u32) {
+    let [done, _] = tau::Ubi::invoke(slot, 0, [2, block as usize, phys as usize]).unwrap();
+    if done != 0 {
+        unsafe { &mut *shared.get() }.sdio_done = true;
+    }
+    future::poll_fn(move |_| {
+        if unsafe { &mut *shared.get() }.sdio_done {
+            unsafe { &mut *shared.get() }.sdio_done = false;
+            Poll::Ready(())
         } else {
             Poll::Pending
         }

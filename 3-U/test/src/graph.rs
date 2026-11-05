@@ -125,7 +125,7 @@ pub(super) fn run(case: usize, info: usize, pages: usize) -> ! {
     }
     assert_eq!(Ubi::bind_dependency(b, service), Err(ModuleError::NoSlots));
     assert_eq!(
-        Ubi::create_module(0x1001, 1, 0, 0),
+        Ubi::create_module(0x1001, 1, 0, 0, tau::ModuleCapabilities::empty()),
         Err(ModuleError::InvalidImage)
     );
     tau_test_passed(case, 128)
