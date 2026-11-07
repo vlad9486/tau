@@ -248,7 +248,7 @@ impl State {
         let hart_id = thread.hart;
         let wait = unsafe { thread.wait.take().unwrap_unchecked() };
         unsafe { module.write_wait(wait.slot, slot) };
-        let enqueue = thread.complete([0, event.encode(), 0, 0, 0, 0]);
+        let enqueue = thread.complete([0, event.0 as usize, 0, 0, 0, 0]);
         self.set_thread(thread_id, thread);
         unsafe { self.set_deadline(thread_id - 1, 0) };
         if enqueue {
@@ -283,11 +283,11 @@ impl State {
         let slot = unsafe { target_module.read_wait(wait.slot) };
         if slot.thread_id == thread_id && slot.sequence == wait.sequence {
             self.complete(target_module, thread_id, thread, slot, event, high_priority);
+            true
         } else {
             self.set_thread(thread_id, thread);
+            false
         }
-
-        true
     }
 
     fn expire(&mut self, window: &mut WindowAccess, module: &Module, hart_id: usize) {
@@ -302,7 +302,7 @@ impl State {
                     .and_then(Option::as_ref)
                     .is_some_and(|t| t.hart == hart_id)
             {
-                self.complete_wait(window, module, index + 1, Event::Timeout, false);
+                self.complete_wait(window, module, index + 1, Event::TIMEOUT, false);
             }
         }
     }
@@ -412,21 +412,24 @@ pub struct Dispatch {
     pub message: [usize; 6],
 }
 
-pub fn notify_hardware_interrupt(
+pub fn notify_interrupt(
     window: &mut WindowAccess,
     module: &Module,
     scheduler: &Scheduler,
-    hart_id: usize,
+    current_hart: usize,
+    target_hart: usize,
+    bit: u8,
 ) {
     let mut scheduler = scheduler.lock();
-    let Some(target) = &scheduler.hart(hart_id).interrupt_target else {
+    let Some(target) = &scheduler.hart(target_hart).interrupt_target else {
         return;
     };
     let target_module_addr = target.module;
     let target_slot = target.slot;
     let thread_id = target.thread_id;
 
-    let event = Event::Notified { arg: 0 };
+    let mask = 1u64 << bit;
+    let event = Event(mask);
     if !scheduler.complete_wait(window, module, thread_id, event, true) {
         let target_module = if target_module_addr == module.header.descriptor.physical {
             module
@@ -434,12 +437,25 @@ pub fn notify_hardware_interrupt(
             &*window.map_module(target_module_addr)
         };
         let mut slot = unsafe { target_module.read_wait(target_slot) };
-        slot.pending = true;
+        slot.pending |= mask;
         unsafe { target_module.write_wait(target_slot, slot) };
     }
-    if scheduler.hart(hart_id).active {
-        scheduler.program(hart_id);
+    if target_hart == current_hart {
+        if scheduler.hart(current_hart).active {
+            scheduler.program(current_hart);
+        }
+    } else if scheduler.hart(target_hart).active {
+        let _ = sbi::wake_hart(target_hart);
     }
+}
+
+pub fn notify_hardware_interrupt(
+    window: &mut WindowAccess,
+    module: &Module,
+    scheduler: &Scheduler,
+    hart_id: usize,
+) {
+    notify_interrupt(window, module, scheduler, hart_id, hart_id, 0);
 }
 
 pub fn preempt(window: &mut WindowAccess, module: &Module, scheduler: &Scheduler) -> Dispatch {

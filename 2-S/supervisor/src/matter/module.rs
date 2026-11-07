@@ -4,7 +4,9 @@
 
 use core::{
     cell::UnsafeCell,
-    hint, ptr,
+    hint,
+    num::NonZero,
+    ptr,
     sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 
@@ -34,6 +36,8 @@ pub struct Capabilities {
     pub pure: bool,
     // can allocate physical memory and know the physical address, including DMA zone
     pub frame_alloc: bool,
+    // can raise software irq
+    pub raise: bool,
 }
 
 impl Capabilities {
@@ -41,7 +45,15 @@ impl Capabilities {
         loader: true,
         pure: false,
         frame_alloc: true,
+        raise: true,
     };
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IrqTarget {
+    pub bit: NonZero<u8>,
+    pub hart: u8,
 }
 
 #[repr(C, align(4096))]
@@ -51,12 +63,13 @@ pub struct ModuleHeader {
     pub poisoned: AtomicBool,
     dependency_lock: AtomicBool,
     pub wait_table: WaitTable,
+    pub irqs: [Option<IrqTarget>; Module::MAX_IRQS],
 }
 
 #[derive(Clone, Copy, Default)]
 #[repr(C, align(32))]
 pub struct WaitRecord {
-    pub pending: bool,
+    pub pending: u64,
     pub thread_id: usize,
     pub sequence: usize,
 }
@@ -76,6 +89,7 @@ pub struct Module {
 
 impl Module {
     pub const MAX_DEPS: usize = 0x800;
+    pub const MAX_IRQS: usize = 16;
     const OCCUPIED: usize = 1 << (usize::BITS - 1);
 
     pub const WAIT_SIZE: usize = 0x80;
@@ -100,6 +114,7 @@ impl Module {
         unsafe { ptr::addr_of_mut!((*this).header.caps).write(caps) };
         unsafe { ptr::addr_of_mut!((*this).header.poisoned).write(AtomicBool::new(false)) };
         unsafe { ptr::addr_of_mut!((*this).header.dependency_lock).write(AtomicBool::new(false)) };
+        unsafe { ptr::addr_of_mut!((*this).header.irqs).write([None; Self::MAX_IRQS]) };
         let dependencies = unsafe { ptr::addr_of_mut!((*this).dependencies).cast::<AtomicUsize>() };
         for index in 0..Self::MAX_DEPS {
             unsafe { dependencies.add(index).write(AtomicUsize::new(index + 1)) };
@@ -184,6 +199,10 @@ impl Module {
     pub unsafe fn write_wait(&self, index: usize, record: WaitRecord) {
         debug_assert!(index < self.header.wait_table.count);
         unsafe { *self.wait_records.get_unchecked(index).get() = record };
+    }
+
+    pub fn get_irq_target(&self, index: usize) -> Option<IrqTarget> {
+        self.header.irqs.get(index).copied().flatten()
     }
 }
 
@@ -326,6 +345,7 @@ pub fn create_module(
         loader: false,
         pure: caps.contains(tau::ModuleCapabilities::PURE),
         frame_alloc: caps.contains(tau::ModuleCapabilities::FRAME_ALLOC),
+        raise: caps.contains(tau::ModuleCapabilities::RAISE),
     };
     unsafe {
         Module::init_at(ptr::from_mut(module), descriptor, spec.wait_table, caps);
@@ -357,4 +377,33 @@ pub fn bind_dependency(
     module
         .insert_dependency(physical)
         .ok_or(tau::ModuleError::NoSlots)
+}
+
+pub fn bind_irq(
+    window: &mut WindowAccess,
+    context: &Context,
+    target: usize,
+    region_index: usize,
+    hart_id: usize,
+    bit: usize,
+) -> Result<(), tau::ModuleError> {
+    let Some(bit) = u8::try_from(bit).ok().and_then(NonZero::new) else {
+        return Err(tau::ModuleError::BadIrqBit);
+    };
+    if bit.get() >= 64 {
+        return Err(tau::ModuleError::BadIrqBit);
+    }
+    if region_index >= Module::MAX_IRQS || hart_id >= 64 || target == 0 {
+        return Err(tau::ModuleError::InvalidDependency);
+    }
+    let target_module = {
+        let physical = space::validate_module_handle(context, target)?;
+        window.map_module(physical)
+    };
+    let target = IrqTarget {
+        bit,
+        hart: hart_id as u8,
+    };
+    unsafe { *target_module.header.irqs.get_unchecked_mut(region_index) = Some(target) };
+    Ok(())
 }

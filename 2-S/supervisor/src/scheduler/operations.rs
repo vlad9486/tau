@@ -95,13 +95,14 @@ pub fn wait(
     if wait_slot.thread_id != 0 {
         return Err(WaitError::Busy);
     }
-    if wait_slot.pending {
-        wait_slot.pending = false;
+    if wait_slot.pending != 0 {
+        let pending = wait_slot.pending;
+        wait_slot.pending = 0;
         unsafe { module.write_wait(index, wait_slot) };
-        return Ok(Some(Event::Notified { arg: 0 }));
+        return Ok(Some(Event(pending)));
     }
     if deadline != 0 && deadline <= runtime::now() {
-        return Ok(Some(Event::Timeout));
+        return Ok(Some(Event::TIMEOUT));
     }
     let module_addr = module.header.descriptor.physical;
     let hart = window.hart().hart_id;
@@ -150,7 +151,7 @@ pub fn notify(
     let mut slot = unsafe { module.read_wait(index) };
     let mut target_hart = hart;
     if slot.thread_id == 0 {
-        slot.pending = true;
+        slot.pending |= 1;
         unsafe { module.write_wait(index, slot) };
     } else {
         let module_addr = module.header.descriptor.physical;
@@ -163,7 +164,7 @@ pub fn notify(
             && wait.sequence == slot.sequence
         {
             target_hart = thread.hart;
-            let event = Event::Notified { arg: 0 };
+            let event = Event::NOTIFIED;
             scheduler.complete(module, slot.thread_id, thread, slot, event, false);
         } else {
             scheduler.set_thread(slot.thread_id, thread);

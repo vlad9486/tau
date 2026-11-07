@@ -537,7 +537,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             match scheduler::wait(window, local.module, scheduler, msg[1], msg[2]) {
                 Ok(Some(event)) => {
                     msg = [0; 6];
-                    msg[1] = event.encode();
+                    msg[1] = event.0 as usize;
                 }
                 Ok(None) => {
                     let selected = scheduler::dispatch(window, local.module, scheduler, hart_id);
@@ -554,6 +554,23 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             msg = [0; 6];
             if let Err(error) = res {
                 msg[0] = error as usize;
+            }
+        }
+        Ok(tau::Call::RaiseIrq) => {
+            msg = [0; 6];
+            if !local.module.header.caps.raise {
+                msg[0] = tau::WaitError::AccessDenied as usize;
+            } else if let Some(target) = local.module.get_irq_target(msg[1]) {
+                scheduler::notify_interrupt(
+                    window,
+                    local.module,
+                    scheduler,
+                    hart_id,
+                    usize::from(target.hart),
+                    target.bit.get(),
+                );
+            } else {
+                msg[0] = tau::WaitError::InvalidWaiter as usize;
             }
         }
         Ok(tau::Call::Spawn { entry }) => {
@@ -692,6 +709,18 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                     msg[0] = error.encode();
                     msg[1] = 0;
                 }
+            }
+        }
+        Ok(tau::Call::BindIrq) => {
+            let res = (|| {
+                if !local.module.header.caps.loader {
+                    return Err(tau::ModuleError::AccessDenied);
+                }
+                matter::bind_irq(window, context, msg[1], msg[2], msg[3], msg[4])
+            })();
+            msg = [0; 6];
+            if let Err(error) = res {
+                msg[0] = error.encode();
             }
         }
         Ok(tau::Call::StartHart) => {

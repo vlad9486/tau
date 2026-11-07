@@ -182,7 +182,7 @@ extern "C" fn dummy_main(
             while WAIT_READY.load(Ordering::SeqCst) == 0 {
                 assert_eq!(
                     tau::Ubi::wait(&WAIT_SLOTS[0], None).unwrap(),
-                    tau::Event::Notified { arg: 0 }
+                    tau::Event::NOTIFIED
                 );
             }
             WAIT_SLOTS[0].occupied.store(false, Ordering::SeqCst);
@@ -196,7 +196,7 @@ extern "C" fn dummy_main(
         11 => {
             WAIT_SLOTS[1].occupied.store(true, Ordering::SeqCst);
             let event = tau::Ubi::wait(&WAIT_SLOTS[1], NonZeroUsize::new(1)).unwrap();
-            tau::Ubi::respond(0, [event.encode()])
+            tau::Ubi::respond(0, [event.0 as usize])
         }
         12 => {
             let ptr = 0x20_0000_0000 as *const usize;

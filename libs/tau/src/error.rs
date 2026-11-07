@@ -81,6 +81,7 @@ pub enum ModuleError {
     InvalidImage,
     NoSlots,
     InvalidDependency,
+    BadIrqBit,
     Poisoned,
     Excpetion(u16),
 }
@@ -94,6 +95,7 @@ impl ModuleError {
             Self::InvalidImage => 0x100,
             Self::NoSlots => 0x101,
             Self::InvalidDependency => 0x102,
+            Self::BadIrqBit => 0x103,
             Self::Poisoned => 0x8040,
             Self::Excpetion(e) => 0x8000 | (e as usize),
         }
@@ -115,6 +117,7 @@ impl ModuleError {
             0x100 => Self::InvalidImage,
             0x101 => Self::NoSlots,
             0x102 => Self::InvalidDependency,
+            0x103 => Self::BadIrqBit,
             _ => unsafe { hint::unreachable_unchecked() },
         }
     }

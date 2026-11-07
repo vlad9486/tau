@@ -251,9 +251,9 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             scheduling::SLOTS[0].occupied.store(true, Ordering::SeqCst);
             let event = tau::Ubi::wait(&scheduling::SLOTS[0], NonZeroUsize::new(deadline));
             scheduling::SLOTS[0].occupied.store(false, Ordering::SeqCst);
-            if !matches!(event, Ok(tau::Event::Timeout)) {
+            if !matches!(event, Ok(tau::Event::TIMEOUT)) {
                 let code = match event {
-                    Ok(e) => e.encode(),
+                    Ok(e) => e.0 as usize,
                     Err(err) => err as usize,
                 };
                 tau_test_failed(case, 5, code);

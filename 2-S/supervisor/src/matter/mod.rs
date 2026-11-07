@@ -6,8 +6,8 @@ use super::{space, state::Context};
 
 mod module;
 pub use self::module::{
-    Module, ModuleDescriptor, ModuleSpec, WaitTable, WaitRecord, Capabilities, create_module,
-    bind_dependency,
+    Module, ModuleDescriptor, ModuleSpec, WaitTable, WaitRecord, Capabilities, IrqTarget,
+    create_module, bind_dependency, bind_irq,
 };
 
 mod context;

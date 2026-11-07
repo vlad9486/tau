@@ -107,8 +107,7 @@ fn handle<'a, S>(
     for driver in driver {
         let num = id.as_ref().get();
         if driver.int.contains(&num) {
-            let arg = num as u16;
-            driver.state.handle(shared, tau::Event::Notified { arg })
+            driver.state.handle(shared, tau::Event::NOTIFIED)
         }
     }
 }
@@ -180,7 +179,7 @@ impl Tasks {
                         tau::ModuleHandle::ROOT,
                         sdio_bytes,
                         dtb,
-                        tau::ModuleCapabilities::FRAME_ALLOC,
+                        tau::ModuleCapabilities::FRAME_ALLOC.union(tau::ModuleCapabilities::RAISE),
                     )
                     .expect("prepare sdio");
 
@@ -242,13 +241,13 @@ impl Tasks {
         shared.write(format_args!("here\n"));
 
         if let Some(driver) = self.uart.as_mut() {
-            driver.state.handle(shared, tau::Event::Timeout);
+            driver.state.handle(shared, tau::Event::TIMEOUT);
         }
         user.step();
         if !shared.uart_out.is_empty()
             && let Some(driver) = self.uart.as_mut()
         {
-            driver.state.handle(shared, tau::Event::Timeout);
+            driver.state.handle(shared, tau::Event::TIMEOUT);
         }
         if let Some(driver) = self.sdio.as_mut() {
             let msg = [driver.state.fifo_depth as usize, self.freq as usize];
@@ -261,10 +260,10 @@ impl Tasks {
             }
         }
         for driver in self.ethernet.as_mut() {
-            driver.state.handle(shared, tau::Event::Timeout);
+            driver.state.handle(shared, tau::Event::TIMEOUT);
         }
         if let Some(driver) = self.display.as_mut() {
-            driver.handle(shared, tau::Event::Timeout);
+            driver.handle(shared, tau::Event::TIMEOUT);
         } else {
             shared.write(format_args!("no display found\n"));
         }
@@ -274,7 +273,7 @@ impl Tasks {
         if !shared.uart_out.is_empty()
             && let Some(driver) = self.uart.as_mut()
         {
-            driver.state.handle(shared, tau::Event::Timeout);
+            driver.state.handle(shared, tau::Event::TIMEOUT);
         }
 
         while !(shared.terminate && shared.uart_out.is_empty()) {
@@ -286,20 +285,7 @@ impl Tasks {
                 .min();
 
             match tau::Ubi::wait(&super::WAIT_SLOTS[hart_id], deadline) {
-                Ok(tau::Event::Notified { .. }) => {
-                    while let Some(id) = plic.next() {
-                        handle(self.uart.as_mut(), shared, &id);
-                        handle(self.sdio.as_mut(), shared, &id);
-                        handle(self.ethernet.iter_mut(), shared, &id);
-
-                        if shared.sdio_done || !shared.uart_in.is_empty() {
-                            user.step();
-                        }
-
-                        plic.complete(id);
-                    }
-                }
-                Ok(tau::Event::Timeout) => {
+                Ok(tau::Event::TIMEOUT) => {
                     let now = tau::asm::read_time();
                     let mut issuers = [0; 8];
                     let mut it = issuers.iter_mut();
@@ -315,7 +301,7 @@ impl Tasks {
                         match issuer {
                             1 => {
                                 if let Some(driver) = self.sdio.as_mut() {
-                                    driver.state.handle(shared, tau::Event::Timeout);
+                                    driver.state.handle(shared, tau::Event::TIMEOUT);
                                 }
                                 if shared.sdio_done {
                                     user.step();
@@ -325,16 +311,31 @@ impl Tasks {
                             3 | 4 => {
                                 for driver in self.ethernet.as_mut() {
                                     if driver.state.timer_issuer() == issuer {
-                                        driver.state.handle(shared, tau::Event::Timeout);
+                                        driver.state.handle(shared, tau::Event::TIMEOUT);
                                     }
                                 }
                             }
                             5 => {
                                 if let Some(driver) = self.display.as_mut() {
-                                    driver.handle(shared, tau::Event::Timeout);
+                                    driver.handle(shared, tau::Event::TIMEOUT);
                                 }
                             }
                             _ => (),
+                        }
+                    }
+                }
+                Ok(event) => {
+                    if event.0 & 1 != 0 {
+                        while let Some(id) = plic.next() {
+                            handle(self.uart.as_mut(), shared, &id);
+                            handle(self.sdio.as_mut(), shared, &id);
+                            handle(self.ethernet.iter_mut(), shared, &id);
+
+                            if shared.sdio_done || !shared.uart_in.is_empty() {
+                                user.step();
+                            }
+
+                            plic.complete(id);
                         }
                     }
                 }
@@ -384,7 +385,7 @@ impl Tasks {
             if !shared.uart_out.is_empty()
                 && let Some(driver) = self.uart.as_mut()
             {
-                driver.state.handle(shared, tau::Event::Timeout);
+                driver.state.handle(shared, tau::Event::TIMEOUT);
             }
         }
     }

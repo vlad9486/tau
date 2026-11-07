@@ -110,6 +110,26 @@ impl Ubi {
         }
     }
 
+    /// Bind a software IRQ target `(hart_id, bit)` to `region_index` on `module`.
+    /// `bit` must be in `1..64` (bit 0 is reserved for hardware interrupts).
+    /// Requires `loader_authority`.
+    pub fn bind_irq(
+        module: ModuleHandle,
+        region_index: usize,
+        hart_id: usize,
+        bit: u8,
+    ) -> Result<(), ModuleError> {
+        let (r0, []) = ubi(
+            Call::BindIrq,
+            [module.as_raw(), region_index, hart_id, usize::from(bit)],
+        );
+        if let Some(code) = NonZero::new(r0) {
+            Err(unsafe { ModuleError::decode(code) })
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn invoke<const I: usize, const O: usize>(
         slot: u16,
         arg: u16,
@@ -228,7 +248,7 @@ impl Ubi {
         if let Some(code) = NonZero::new(r0) {
             Err(unsafe { WaitError::decode(code) })
         } else {
-            Event::decode(event).map_err(|_| WaitError::Unsupported)
+            Ok(Event(event as u64))
         }
     }
 
@@ -236,6 +256,16 @@ impl Ubi {
     /// this thread or execute code in the receiver's context.
     pub fn notify(slot: &WaitSlot) -> Result<(), WaitError> {
         let (r0, []) = ubi(Call::Notify, [ptr::from_ref(slot).addr()]);
+        if let Some(code) = NonZero::new(r0) {
+            Err(unsafe { WaitError::decode(code) })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Record coalesced software irq for `region_index`.
+    pub fn raise_irq(region_index: usize) -> Result<(), WaitError> {
+        let (r0, []) = ubi(Call::RaiseIrq, [region_index]);
         if let Some(code) = NonZero::new(r0) {
             Err(unsafe { WaitError::decode(code) })
         } else {

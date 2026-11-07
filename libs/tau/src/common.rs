@@ -122,39 +122,23 @@ impl ModuleHandle {
     }
 }
 
+/// A coalesced readiness notification or timeout (`0`); inspect shared state after waking.
 #[must_use]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Event {
-    Timeout,
-    /// A coalesced readiness notification; inspect shared state after waking.
-    Notified {
-        arg: u16,
-    },
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Event(pub u64);
+
+impl Event {
+    pub const TIMEOUT: Self = Self(0);
+    pub const NOTIFIED: Self = Self(1);
 }
 
 impl fmt::Display for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Timeout => write!(f, "timeout"),
-            Self::Notified { arg } => write!(f, "notification arg={arg}"),
-        }
-    }
-}
-
-impl Event {
-    pub const fn encode(self) -> usize {
-        match self {
-            Self::Timeout => 0,
-            Self::Notified { arg } => ((arg as usize) << 16) + 1,
-        }
-    }
-
-    pub const fn decode(a0: usize) -> Result<Self, usize> {
-        let arg = ((a0 & 0xffff0000) >> 16) as u16;
-        match a0 & 0b111 {
-            0 => Ok(Self::Timeout),
-            1 if a0 == ((arg as usize) << 16) + 1 => Ok(Self::Notified { arg }),
-            _ => Err(a0),
+        if self.0 == 0 {
+            write!(f, "timeout")
+        } else {
+            write!(f, "notification {:016x}", self.0)
         }
     }
 }
@@ -205,6 +189,7 @@ pub struct ModuleCapabilities(u8);
 impl ModuleCapabilities {
     pub const PURE: Self = Self(1 << 0);
     pub const FRAME_ALLOC: Self = Self(1 << 1);
+    pub const RAISE: Self = Self(1 << 2);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -250,6 +235,10 @@ pub enum Call {
     /// Notify a slot in the current module (a1 = slot address). Coalesces
     /// readiness and schedules a parked client; the notifying thread continues.
     Notify,
+    /// Generate software interrupt for mapped region `a1` that will be delivered
+    /// to the hart bound to that region.
+    /// Does nothing if `Wait` was not called yet.
+    RaiseIrq,
     /// Spawns a thread with its own context in the same ELF module.
     /// The new thread will run in the specified entry point with the given message.
     ///
@@ -275,6 +264,9 @@ pub enum Call {
     /// Loader-only: bind dependency handle a2 under parent handle a1.
     /// Return status in a0 and a fresh parent-local slot in a1.
     BindDependency,
+    /// Loader-only: bind software interrupt for module handle a1, region index a2,
+    /// target hart a3, and event bit a4 (1..64).
+    BindIrq,
     /// Loader-only: start secondary hart a1 in the current module.
     StartHart,
     /// Emit a diagnostic checkpoint through the supervisor console.
@@ -296,6 +288,7 @@ impl Call {
             }
             Self::Wait => (6 << 4) + 0b1001,
             Self::Notify => (7 << 4) + 0b1001,
+            Self::RaiseIrq => (11 << 4) + 0b1001,
             Self::Spawn { entry } => entry,
             Self::AllocPhysical { order, zone } => {
                 (((order as usize) | ((zone as usize) << 8)) << 16) + (1 << 4) + 0b1001
@@ -308,6 +301,7 @@ impl Call {
             Self::CreateModule => (8 << 4) + 0b1001,
             Self::BindDependency => (9 << 4) + 0b1001,
             Self::StartHart => (10 << 4) + 0b1001,
+            Self::BindIrq => (12 << 4) + 0b1001,
             Self::Debug => (5 << 4) + 0b1001,
         }
     }
@@ -330,6 +324,7 @@ impl Call {
                 0b10 => match id {
                     6 => Ok(Self::Wait),
                     7 => Ok(Self::Notify),
+                    11 => Ok(Self::RaiseIrq),
                     1 => {
                         let order = (arg & 0xff) as u8;
                         let zone = match arg >> 8 {
@@ -353,6 +348,7 @@ impl Call {
                     8 => Ok(Self::CreateModule),
                     9 => Ok(Self::BindDependency),
                     10 => Ok(Self::StartHart),
+                    12 => Ok(Self::BindIrq),
                     5 => Ok(Self::Debug),
                     _ => Err(a0),
                 },

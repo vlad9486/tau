@@ -517,11 +517,10 @@ impl DriverState for State {
         if matches!(self.phase, Phase::Failed) {
             return;
         }
-        let timer = matches!(event, tau::Event::Timeout);
+        let timer = event == tau::Event::TIMEOUT;
         if timer {
             self.ticks = self.ticks.wrapping_add(1);
-        }
-        if matches!(event, tau::Event::Notified { .. }) {
+        } else {
             self.irq_count = self.irq_count.wrapping_add(1);
         }
         if let Err(error) = self.step(shared, timer) {

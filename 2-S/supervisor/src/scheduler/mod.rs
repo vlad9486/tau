@@ -12,5 +12,7 @@ mod runtime;
 mod operations;
 
 pub use self::thread::{ThreadState, Resume as ReturnKind};
-pub use self::runtime::{Scheduler, Dispatch, preempt, dispatch, notify_hardware_interrupt};
+pub use self::runtime::{
+    Scheduler, Dispatch, preempt, dispatch, notify_interrupt, notify_hardware_interrupt,
+};
 pub use self::operations::{spawn, start_hart, wait, notify, exit};

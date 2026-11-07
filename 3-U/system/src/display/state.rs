@@ -281,7 +281,7 @@ impl State {
 
 impl DriverState for State {
     fn handle(&mut self, shared: &mut Shared, event: tau::Event) {
-        if event != tau::Event::Timeout {
+        if event != tau::Event::TIMEOUT {
             return;
         }
         self.timer_armed = false;

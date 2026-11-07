@@ -43,10 +43,7 @@ fn release(index: usize) {
     SLOTS[index].occupied.store(false, SeqCst);
 }
 fn notified(index: usize) {
-    assert_eq!(
-        Ubi::wait(pointer(index), None),
-        Ok(Event::Notified { arg: 0 })
-    );
+    assert_eq!(Ubi::wait(pointer(index), None), Ok(Event::NOTIFIED));
 }
 fn expired() -> Option<NonZeroUsize> {
     NonZeroUsize::new(1)
@@ -219,15 +216,12 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
         );
     }
     reserve(0);
-    assert_eq!(Ubi::wait(pointer(0), expired()), Ok(Event::Timeout));
+    assert_eq!(Ubi::wait(pointer(0), expired()), Ok(Event::TIMEOUT));
     for _ in 0..3 {
         Ubi::notify(pointer(0)).unwrap();
     }
-    assert_eq!(
-        Ubi::wait(pointer(0), expired()),
-        Ok(Event::Notified { arg: 0 })
-    );
-    assert_eq!(Ubi::wait(pointer(0), expired()), Ok(Event::Timeout));
+    assert_eq!(Ubi::wait(pointer(0), expired()), Ok(Event::NOTIFIED));
+    assert_eq!(Ubi::wait(pointer(0), expired()), Ok(Event::TIMEOUT));
     Ubi::notify(pointer(0)).unwrap();
     release(0);
     reserve(0);
@@ -252,11 +246,11 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
     let address = Ubi::invoke::<0, 1>(a, 10, []).unwrap()[0];
     assert_eq!(
         Ubi::invoke::<0, 1>(b, 11, []).unwrap(),
-        [Event::Timeout.encode()]
+        [Event::TIMEOUT.0 as usize]
     );
     assert_eq!(
         Ubi::invoke::<0, 1>(a, 11, []).unwrap(),
-        [Event::Notified { arg: 0 }.encode()]
+        [Event::NOTIFIED.0 as usize]
     );
     assert_eq!(
         Ubi::wait(unsafe { &*(address as *const WaitSlot) }, expired()),
@@ -266,7 +260,7 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
     // Single-thread timeout exercises idle entry and return without another
     // runnable thread. This also enables scheduled mode.
     let until = deadline(20_000).unwrap();
-    assert_eq!(Ubi::wait(pointer(0), Some(until)), Ok(Event::Timeout));
+    assert_eq!(Ubi::wait(pointer(0), Some(until)), Ok(Event::TIMEOUT));
     assert!(tau::asm::read_time() >= until.get());
 
     reserve(1);
@@ -286,7 +280,7 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
     loop {
         match Ubi::wait(pointer(2), expired()) {
             Err(WaitError::Busy) => break,
-            Ok(Event::Timeout) => core::hint::spin_loop(),
+            Ok(Event::TIMEOUT) => core::hint::spin_loop(),
             other => panic!("competing wait: {other:?}"),
         }
     }
@@ -307,7 +301,7 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
         core::hint::spin_loop();
     }
     // The worker performs no syscalls while the parent's deadline expires.
-    assert_eq!(Ubi::wait(pointer(6), deadline(20_000)), Ok(Event::Timeout));
+    assert_eq!(Ubi::wait(pointer(6), deadline(20_000)), Ok(Event::TIMEOUT));
     assert_eq!(COMPUTED.load(SeqCst), 0);
     RUN_WORKER.store(0, SeqCst);
     while COMPUTED.load(SeqCst) == 0 {
@@ -320,11 +314,11 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
     Ubi::spawn(worker, [5]).unwrap();
     assert_eq!(
         Ubi::wait(pointer(4), deadline(500_000)),
-        Ok(Event::Notified { arg: 0 })
+        Ok(Event::NOTIFIED)
     );
     wait_done(5);
     let until = deadline(1_000_000).unwrap();
-    assert_eq!(Ubi::wait(pointer(4), Some(until)), Ok(Event::Timeout));
+    assert_eq!(Ubi::wait(pointer(4), Some(until)), Ok(Event::TIMEOUT));
     assert!(tau::asm::read_time() >= until.get()); // old timer cannot finish a new wait
     release(4);
 
@@ -342,13 +336,13 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
         Ubi::notify(pointer(1)).unwrap();
         assert!(matches!(
             Ubi::wait(pointer(5), Some(until)),
-            Ok(Event::Notified { arg: 0 } | Event::Timeout)
+            Ok(Event::NOTIFIED | Event::TIMEOUT)
         ));
         while ACK.load(SeqCst) != count {
             notified(0);
         }
         assert!(Ubi::wait(pointer(5), expired()).is_ok());
-        assert_eq!(Ubi::wait(pointer(5), expired()), Ok(Event::Timeout));
+        assert_eq!(Ubi::wait(pointer(5), expired()), Ok(Event::TIMEOUT));
     }
     wait_done(6);
     release(1);
