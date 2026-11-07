@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
+#![allow(dead_code)]
+
 use core::{
     cell::UnsafeCell,
     future,
@@ -85,24 +87,7 @@ async fn run(
     dummy_slot: u16,
 ) {
     if let Some(sdio_slot) = sdio_slot {
-        wait_sdio_init(shared).await;
-        let base = tau::Ubi::alloc_physical(0, tau::MemoryZone::Dma).expect("alloc sdio dma");
-        let phys = u32::try_from(base).expect("sdio dma 32-bit");
-        let page = tau::Area::new(base, 0x1000).r::<MaybeUninit<[[u8; 0x10]; 0x100]>>();
-
-        read_sdio(shared, sdio_slot, phys, 0x600).await;
-
-        unsafe { &mut *shared.get() }.write(format_args!("___page: 0x600"));
-        let dma_data = unsafe { page.assume_init() };
-        for chunk in dma_data.iter() {
-            let [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] =
-                unsafe { (ptr::from_ref(chunk)).read_volatile() };
-            unsafe { &mut *shared.get() }.write(format_args!(
-                "\
-                {a:02x} {b:02x} {c:02x} {d:02x} {e:02x} {f:02x} {g:02x} {h:02x} \
-                {i:02x} {j:02x} {k:02x} {l:02x} {m:02x} {n:02x} {o:02x} {p:02x}"
-            ));
-        }
+        tau::Ubi::spawn(sdio_worker, [sdio_slot as usize]).unwrap();
     }
 
     measure_roundtrips(shared, dummy_slot);
@@ -282,49 +267,19 @@ async fn wait_event(shared: &UnsafeCell<Shared>) -> Event {
     .await
 }
 
-async fn wait_sdio_init(shared: &UnsafeCell<Shared>) {
-    future::poll_fn(move |_| {
-        if unsafe { &mut *shared.get() }.sdio_done {
-            unsafe { &mut *shared.get() }.sdio_done = false;
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    })
-    .await;
-}
+extern "C" fn sdio_worker(_: usize, slot: usize, _: usize, _: usize, _: usize, _: usize) -> ! {
+    let base = tau::Ubi::alloc_physical(0, tau::MemoryZone::Dma).expect("alloc sdio dma");
+    let phys = u32::try_from(base).expect("sdio dma 32-bit");
+    let page = tau::Area::new(base, 0x1000).r::<MaybeUninit<[usize; 0x200]>>();
 
-async fn read_sdio(shared: &UnsafeCell<Shared>, slot: u16, phys: u32, block: u32) {
-    let [done, _] = tau::Ubi::invoke(slot, 0, [1, block as usize, phys as usize]).unwrap();
-    if done != 0 {
-        unsafe { &mut *shared.get() }.sdio_done = true;
-    }
-    future::poll_fn(move |_| {
-        if unsafe { &mut *shared.get() }.sdio_done {
-            unsafe { &mut *shared.get() }.sdio_done = false;
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    })
-    .await;
-}
+    tau::Ubi::invoke::<2, 0>(slot as u16, 1, [0x600, phys as usize]).unwrap();
 
-#[allow(dead_code)]
-async fn write(shared: &UnsafeCell<Shared>, slot: u16, phys: u32, block: u32) {
-    let [done, _] = tau::Ubi::invoke(slot, 0, [2, block as usize, phys as usize]).unwrap();
-    if done != 0 {
-        unsafe { &mut *shared.get() }.sdio_done = true;
+    let dma_data = unsafe { page.assume_init_ref() };
+    for (i, word) in dma_data.iter().take(8).enumerate() {
+        let val = unsafe { ptr::from_ref(word).read_volatile() };
+        tau::Ubi::debug(0x600 + i, val);
     }
-    future::poll_fn(move |_| {
-        if unsafe { &mut *shared.get() }.sdio_done {
-            unsafe { &mut *shared.get() }.sdio_done = false;
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    })
-    .await;
+    tau::Ubi::respond(0, [])
 }
 
 #[allow(dead_code)]

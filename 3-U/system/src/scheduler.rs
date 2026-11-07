@@ -20,7 +20,6 @@ where
 pub struct Shared {
     pub uart_out: uart::Buffer,
     pub uart_in: uart::Buffer,
-    pub sdio_done: bool,
     // One producer and one outstanding TX per port. Consume done before reuse.
     pub ethernet_tx_task: [Option<ethernet::TxTask>; 2],
     pub ethernet_tx_done: [Option<ethernet::TxDone>; 2],
@@ -112,6 +111,8 @@ fn handle<'a, S>(
     }
 }
 
+const SDIO_IRQ_BIT: u8 = 1;
+
 struct SdioNew {
     slot: u16,
     fifo_depth: u32,
@@ -119,12 +120,9 @@ struct SdioNew {
 
 impl DriverState for SdioNew {
     fn handle(&mut self, shared: &mut Shared, _event: tau::Event) {
-        let [done, deadline] = tau::Ubi::invoke(self.slot, 0, []).unwrap();
+        let [_status, deadline] = tau::Ubi::invoke(self.slot, 0, []).unwrap();
         if let Some(val) = NonZero::new(deadline) {
             shared.sleep_until(1, val);
-        }
-        if done != 0 {
-            shared.sdio_done = true;
         }
     }
 }
@@ -144,6 +142,7 @@ impl Tasks {
         plic: &PlicPriority,
         plic_e: &PlicEnable,
         context_id: usize,
+        hart_id: usize,
     ) -> Tasks {
         let freq = dtb
             .iter()
@@ -175,13 +174,14 @@ impl Tasks {
                 Driver::parse_dtb(config, plic, plic_e, context_id, |config| {
                     let sdio_image = dtb.boot_module("storage")?;
                     let sdio_bytes = sdio_image.sl::<u8>();
-                    let (slot, _module) = elf::prepare_module(
+                    let (slot, module) = elf::prepare_module(
                         tau::ModuleHandle::ROOT,
                         sdio_bytes,
                         dtb,
                         tau::ModuleCapabilities::FRAME_ALLOC.union(tau::ModuleCapabilities::RAISE),
                     )
                     .expect("prepare sdio");
+                    tau::Ubi::bind_irq(module, 0, hart_id, SDIO_IRQ_BIT).expect("bind sdio irq");
 
                     let Some(&[fifo_depth]) = config.find_int(|name| name == "fifo-depth") else {
                         return None;
@@ -217,7 +217,6 @@ impl Tasks {
         let shared = UnsafeCell::new(Shared {
             uart_out: uart::Buffer::default(),
             uart_in: uart::Buffer::default(),
-            sdio_done: false,
             ethernet_tx_task: [None; 2],
             ethernet_tx_done: [None; 2],
             ethernet_rx_task: [None; 2],
@@ -251,12 +250,9 @@ impl Tasks {
         }
         if let Some(driver) = self.sdio.as_mut() {
             let msg = [driver.state.fifo_depth as usize, self.freq as usize];
-            let [done, deadline] = tau::Ubi::invoke(driver.state.slot, 0, msg).unwrap();
+            let [_status, deadline] = tau::Ubi::invoke(driver.state.slot, 0, msg).unwrap();
             if let Some(val) = NonZero::new(deadline) {
                 shared.sleep_until(1, val);
-            }
-            if done != 0 {
-                shared.sdio_done = true;
             }
         }
         for driver in self.ethernet.as_mut() {
@@ -303,9 +299,6 @@ impl Tasks {
                                 if let Some(driver) = self.sdio.as_mut() {
                                     driver.state.handle(shared, tau::Event::TIMEOUT);
                                 }
-                                if shared.sdio_done {
-                                    user.step();
-                                }
                             }
                             2 => user.step(),
                             3 | 4 => {
@@ -331,12 +324,17 @@ impl Tasks {
                             handle(self.sdio.as_mut(), shared, &id);
                             handle(self.ethernet.iter_mut(), shared, &id);
 
-                            if shared.sdio_done || !shared.uart_in.is_empty() {
+                            if !shared.uart_in.is_empty() {
                                 user.step();
                             }
 
                             plic.complete(id);
                         }
+                    }
+                    if event.0 & (1 << SDIO_IRQ_BIT) != 0
+                        && let Some(driver) = self.sdio.as_mut()
+                    {
+                        driver.state.handle(shared, tau::Event(1 << SDIO_IRQ_BIT));
                     }
                 }
                 Err(_) => (),

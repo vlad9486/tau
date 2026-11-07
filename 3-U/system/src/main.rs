@@ -139,7 +139,7 @@ extern "C" fn main(
         slot.occupied.store(true, Ordering::SeqCst);
     }
 
-    scheduler::Tasks::new(&dtb, reservations, plic, plic_e, context_id)
+    scheduler::Tasks::new(&dtb, reservations, plic, plic_e, context_id, hart_id)
         .run(plic_ctx, slot, hart_id);
 
     tau::Ubi::respond(0, [])

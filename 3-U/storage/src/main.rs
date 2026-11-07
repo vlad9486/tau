@@ -19,7 +19,7 @@ mod sys;
 mod sdio;
 mod queue;
 
-use core::mem::MaybeUninit;
+use core::{mem::MaybeUninit, sync::atomic::Ordering};
 
 use self::queue::Queue;
 
@@ -81,9 +81,11 @@ extern "C" fn main(a0: usize, a1: usize, a2: usize, _: usize, _: usize, _: usize
             } else {
                 Request::Write { page, phys }
             };
+            WAIT_SLOTS[0].occupied.store(true, Ordering::SeqCst);
             match QUEUE.enqueue(req) {
                 Ok(()) => {
-                    // TODO: raise software irq that will trigger `op = 3`
+                    tau::Ubi::raise_irq(0).unwrap();
+                    let _ = tau::Ubi::wait(&WAIT_SLOTS[0], None).unwrap();
                     tau::Ubi::respond(0, [])
                 }
                 Err(_) => tau::Ubi::respond(1, []),
@@ -96,35 +98,21 @@ extern "C" fn main(a0: usize, a1: usize, a2: usize, _: usize, _: usize, _: usize
 fn run(regs: &sdio::Registers, fifo_depth: u32, freq: u64) -> Result<(), sdio::DriverError> {
     let mut state = sdio::State::new(freq).ok_or(sdio::DriverError::Dma)?;
     state.init(regs, fifo_depth)?;
+    WAIT_SLOTS[0].occupied.store(true, Ordering::SeqCst);
 
-    let mut done = 1;
     loop {
-        // [1, 0] signals to system that init / the previous request is complete
-        let Ok([op, page, phys]) = tau::Ubi::respond_keep(0, [done, 0]) else {
-            done = 0;
+        while let Some(req) = QUEUE.dequeue() {
+            match req {
+                Request::Read { page, phys } => state.read(regs, page, phys)?,
+                Request::Write { page, phys } => state.write(regs, page, phys)?,
+            }
+            tau::Ubi::notify(&WAIT_SLOTS[0]).unwrap();
+        }
+        let Ok([]) = tau::Ubi::respond_keep(0, [0, 0]) else {
             continue;
         };
-        match op {
-            1 => {
-                state.read(regs, page as u32, phys as u32)?;
-                done = 1;
-            }
-            2 => {
-                state.write(regs, page as u32, phys as u32)?;
-                done = 1;
-            }
-            3 => {
-                while let Some(req) = QUEUE.dequeue() {
-                    match req {
-                        Request::Read { page, phys } => state.read(regs, page, phys)?,
-                        Request::Write { page, phys } => state.write(regs, page, phys)?,
-                    }
-                }
-            }
-            _ => {
-                regs.clear_interrupts();
-                done = 0;
-            }
+        if QUEUE.is_empty() {
+            regs.clear_interrupts();
         }
     }
 }

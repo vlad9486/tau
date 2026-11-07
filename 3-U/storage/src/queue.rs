@@ -46,6 +46,12 @@ impl<T, const N: usize> Queue<T, N> {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        let tail = self.tail.load(Ordering::Relaxed);
+        let slot = &self.slots[tail & Self::MASK];
+        !slot.ready.load(Ordering::Acquire)
+    }
+
     /// Enqueues `value` into the queue. Can be called concurrently by multiple producers.
     ///
     /// Returns `Err(value)` if the queue is full.

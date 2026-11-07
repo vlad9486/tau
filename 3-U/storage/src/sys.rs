@@ -27,5 +27,6 @@ pub fn write(_args: fmt::Arguments<'_>, freq: u64) {
 
 // TODO: handle error
 pub fn wait_interrupt() {
+    // TODO: handle timeout
     let _ = tau::Ubi::respond_keep::<_, 0>(0, [0, 0]);
 }
