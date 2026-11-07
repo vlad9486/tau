@@ -20,6 +20,7 @@ pub enum Resume {
     Interrupt,
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct ActiveWait {
     pub module: usize,
     pub slot: usize,

@@ -155,19 +155,13 @@ pub fn notify(
         unsafe { module.write_wait(index, slot) };
     } else {
         let module_addr = module.header.descriptor.physical;
-        let Some(thread) = scheduler.take_thread(slot.thread_id) else {
-            return Err(WaitError::InvalidWaiter);
-        };
+        let thread = scheduler.thread_state_mut(slot.thread_id);
         if let Some(wait) = &thread.wait
             && wait.module == module_addr
             && wait.slot == index
             && wait.sequence == slot.sequence
         {
-            target_hart = thread.hart;
-            let event = Event::NOTIFIED;
-            scheduler.complete(module, slot.thread_id, thread, slot, event, false);
-        } else {
-            scheduler.set_thread(slot.thread_id, thread);
+            target_hart = scheduler.complete(module, slot.thread_id, slot, Event::NOTIFIED, false);
         }
     }
     if target_hart == hart {

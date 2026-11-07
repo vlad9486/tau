@@ -129,13 +129,6 @@ pub(super) fn invariant_failed() -> ! {
 }
 
 impl State {
-    pub(super) fn take_thread(&mut self, id: usize) -> Option<ThreadState> {
-        id.checked_sub(1)
-            .filter(|&i| i < self.count)
-            .and_then(|i| self.threads.get_mut(i))
-            .and_then(Option::take)
-    }
-
     pub(super) fn thread_state_mut(&mut self, id: usize) -> &mut ThreadState {
         id.checked_sub(1)
             .and_then(|i| self.threads.get_mut(i))
@@ -238,18 +231,17 @@ impl State {
         &mut self,
         module: &Module,
         thread_id: usize,
-        mut thread: ThreadState,
         mut slot: WaitRecord,
         event: Event,
         high_priority: bool,
-    ) {
+    ) -> usize {
         slot.thread_id = 0;
         slot.sequence = 0;
+        let thread = self.thread_state_mut(thread_id);
         let hart_id = thread.hart;
         let wait = unsafe { thread.wait.take().unwrap_unchecked() };
         unsafe { module.write_wait(wait.slot, slot) };
         let enqueue = thread.complete([0, event.0 as usize, 0, 0, 0, 0]);
-        self.set_thread(thread_id, thread);
         unsafe { self.set_deadline(thread_id - 1, 0) };
         if enqueue {
             if high_priority {
@@ -258,6 +250,7 @@ impl State {
                 self.enqueue(hart_id, thread_id);
             }
         }
+        hart_id
     }
 
     fn complete_wait(
@@ -268,11 +261,7 @@ impl State {
         event: Event,
         high_priority: bool,
     ) -> bool {
-        let Some(thread) = self.take_thread(thread_id) else {
-            return false;
-        };
-        let Some(wait) = &thread.wait else {
-            self.set_thread(thread_id, thread);
+        let Some(&wait) = self.thread_state_mut(thread_id).wait.as_ref() else {
             return false;
         };
         let target_module = if wait.module == module.header.descriptor.physical {
@@ -282,10 +271,9 @@ impl State {
         };
         let slot = unsafe { target_module.read_wait(wait.slot) };
         if slot.thread_id == thread_id && slot.sequence == wait.sequence {
-            self.complete(target_module, thread_id, thread, slot, event, high_priority);
+            self.complete(target_module, thread_id, slot, event, high_priority);
             true
         } else {
-            self.set_thread(thread_id, thread);
             false
         }
     }
