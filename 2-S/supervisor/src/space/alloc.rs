@@ -5,7 +5,7 @@
 use core::{num::NonZero, arch};
 
 use super::{
-    llfree, Context,
+    llfree, Context, Module,
     vmem::{self, Mapping, Window, WindowAccess},
 };
 
@@ -43,7 +43,13 @@ pub fn validate_module_handle(context: &Context, handle: usize) -> Result<usize,
         .checked_sub(context.base_addr)
         .ok_or(tau::ModuleError::InvalidDependency)?
         / vmem::PAGE;
-    if handle == 0 || page & (1 << (usize::BITS - 1)) != 0 || frame >= context.allocator.frames() {
+    let module_pages = size_of::<Module>().div_ceil(vmem::PAGE);
+    if handle == 0
+        || page & (1 << (usize::BITS - 1)) != 0
+        || frame
+            .checked_add(module_pages)
+            .is_none_or(|end| end > context.allocator.frames())
+    {
         return Err(tau::ModuleError::InvalidDependency);
     }
     Ok(page)
@@ -59,7 +65,7 @@ fn validate_target(
 ) -> Result<usize, ()> {
     let physical = validate_module_handle(context, target.get()).map_err(|_| ())?;
     let dep = window.read_module_descriptor(physical);
-    let last = addr_virtual + virtual_pages * vmem::PAGE - 1;
+    let last = addr_virtual + (virtual_pages * vmem::PAGE - 1);
     if vmem::addr_to_index(addr_virtual) != dep.root_index
         || vmem::addr_to_index(last) != dep.root_index
     {
@@ -83,7 +89,7 @@ pub fn validate_map(
                 || virtual_pages
                     .checked_mul(vmem::PAGE)
                     .and_then(|n| p.get().checked_add(n))
-                    .is_none()
+                    .is_none_or(|end| end > (1usize << 56))
         })
     {
         return Err(tau::AllocError::InvalidAddress);

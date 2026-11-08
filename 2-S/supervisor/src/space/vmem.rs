@@ -242,9 +242,9 @@ impl WindowAccess {
         let hart = self.hart_mut();
         if hart.mask == 0 {
             Some(0)
-        } else if hart.next_asid <= hart.mask {
+        } else if hart.next_asid != 0 && hart.next_asid <= hart.mask {
             let tag = hart.next_asid;
-            hart.next_asid += 1;
+            hart.next_asid = tag.wrapping_add(1);
             Some(tag)
         } else {
             None
@@ -255,7 +255,7 @@ impl WindowAccess {
     pub fn release_tag(&mut self, tag: u16) {
         if tag != 0 {
             let hart = self.hart_mut();
-            debug_assert_eq!(hart.next_asid, tag + 1);
+            debug_assert_eq!(hart.next_asid, tag.wrapping_add(1));
             hart.next_asid = tag;
         }
     }
@@ -538,9 +538,12 @@ impl WindowAccess {
             || mapping.addr_virtual & 0xfff != 0
             || mapping.addr_virtual.checked_add(bytes - 1).is_none()
             || mapping.physical_pages > mapping.virtual_pages
-            || mapping
-                .addr_physical
-                .is_some_and(|p| p.get() & 0xfff != 0 || p.get().checked_add(bytes).is_none())
+            || mapping.addr_physical.is_some_and(|p| {
+                p.get() & 0xfff != 0
+                    || p.get()
+                        .checked_add(bytes)
+                        .is_none_or(|end| end > (1usize << 56))
+            })
         {
             return Err(llfree::Error::Address);
         }
@@ -581,9 +584,12 @@ impl WindowAccess {
             || mapping.addr_virtual & 0xfff != 0
             || mapping.addr_virtual.checked_add(bytes - 1).is_none()
             || mapping.physical_pages > mapping.virtual_pages
-            || mapping
-                .addr_physical
-                .is_some_and(|p| p.get() & 0xfff != 0 || p.get().checked_add(bytes).is_none())
+            || mapping.addr_physical.is_some_and(|p| {
+                p.get() & 0xfff != 0
+                    || p.get()
+                        .checked_add(bytes)
+                        .is_none_or(|end| end > (1usize << 56))
+            })
         {
             return Err(llfree::Error::Address);
         }
@@ -813,13 +819,18 @@ fn sfence_vma(addr: Option<usize>, asid: Option<u16>) {
                 arch::asm!("sfence.vma zero, zero", options(nostack))
             }
             (None, Some(asid)) => {
-                arch::asm!("sfence.vma zero, a1", in("a1") asid, options(nostack))
+                arch::asm!("sfence.vma zero, a1", in("a1") usize::from(asid), options(nostack))
             }
             (Some(addr), None) => {
                 arch::asm!("sfence.vma a0, zero", in("a0") addr, options(nostack))
             }
             (Some(addr), Some(asid)) => {
-                arch::asm!("sfence.vma a0, a1", in("a0") addr, in("a1") asid, options(nostack))
+                arch::asm!(
+                    "sfence.vma a0, a1",
+                    in("a0") addr,
+                    in("a1") usize::from(asid),
+                    options(nostack),
+                )
             }
         }
     }

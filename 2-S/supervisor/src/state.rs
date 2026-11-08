@@ -60,10 +60,11 @@ impl Context {
                 self.dma_base_addr,
             ),
         };
-        if order > llfree::MAX_ORDER as u32 || page & ((1usize << (12 + order)) - 1) != 0 {
+        let offset = page.checked_sub(base_addr).ok_or(llfree::Error::Address)?;
+        if order > llfree::MAX_ORDER as u32 || offset & ((1usize << (12 + order)) - 1) != 0 {
             return Err(llfree::Error::Address);
         }
-        let frame = page.checked_sub(base_addr).ok_or(llfree::Error::Address)? >> 12;
+        let frame = offset >> 12;
         let count = 1usize << order;
         if frame
             .checked_add(count)
