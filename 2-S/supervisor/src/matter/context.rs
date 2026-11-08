@@ -78,11 +78,11 @@ impl ModuleContext {
     }
 
     pub fn dependency(&self, slot: u16) -> Option<space::Root> {
-        self.dependencies.get(slot as usize).copied().flatten()
+        self.dependencies.get(usize::from(slot)).copied().flatten()
     }
 
     pub fn retain_dependency(&mut self, slot: u16, root: space::Root) {
-        self.dependencies[slot as usize] = Some(root);
+        self.dependencies[usize::from(slot)] = Some(root);
     }
 }
 
@@ -111,14 +111,14 @@ pub fn spawn(
 ) -> Result<space::Root, tau::SpawnError> {
     let caller = Window::current_root();
     let hart = window.hart().hart_id;
-    let index = desc.root_index as usize;
+    let index = desc.root_index;
     let tag = window.allocate_tag().ok_or(tau::SpawnError::OutOfMemory)?;
     let Ok(root) = window.create(tag, || context.page(hart)) else {
         window.release_tag(tag);
         return Err(tau::SpawnError::OutOfMemory);
     };
     let result = (|| {
-        window.attach(root, index, desc.stem);
+        window.attach(root, index, desc.stem_phys);
         window
             .supervisor_mappings(caller, root, || context.page(hart))
             .map_err(|_| tau::SpawnError::OutOfMemory)?;
@@ -165,8 +165,8 @@ pub fn spawn_hart(
 ) -> Result<space::Root, tau::SpawnError> {
     let caller = Window::current_root();
     let hart = window.hart().hart_id;
-    let index = desc.root_index as usize;
-    let loader_index = (context.base_addr >> 30) & 511;
+    let index = desc.root_index;
+    let loader_index = space::addr_to_index(context.base_addr);
     let loader_stem = window
         .root_branch(context.bootstrap_root, loader_index)
         .ok_or(tau::SpawnError::InvalidEntry)?;
@@ -174,7 +174,7 @@ pub fn spawn_hart(
         .create(0, || context.page(hart))
         .map_err(|_| tau::SpawnError::OutOfMemory)?;
     let result = (|| {
-        window.attach(root, index, desc.stem);
+        window.attach(root, index, desc.stem_phys);
         if loader_index != index {
             window.attach(root, loader_index, loader_stem);
         }

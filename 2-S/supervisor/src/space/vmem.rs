@@ -26,7 +26,7 @@ pub const MAX_RAM_FRAMES: usize = 1 << 26;
 pub const MAX_DMA_FRAMES: usize = 1 << 19;
 pub const MODULE_CONTEXT: usize = 0xffff_ffc0_0021_0000;
 pub const MODULE: usize = 0xffff_ffc0_0022_0000;
-const SUPERVISOR_INDEX: usize = 256;
+const SUPERVISOR_INDEX: u16 = 256;
 // Sv39 RSW: this entry owns an allocator page (data or a child table).
 // Borrowed entries stop reclamation, including whole shared branches.
 pub const OWNED: usize = 1 << 8;
@@ -65,13 +65,13 @@ pub struct Root(pub NonZeroUsize);
 
 impl Root {
     pub fn sv39(ptr: usize, asid: u16) -> Self {
-        let v = (SV39 << 60) | ((asid as usize) << 44) | (ptr >> 12);
+        let v = (SV39 << 60) | (usize::from(asid) << 44) | (ptr >> 12);
         // Safety: `v` is never zero by construction
         Self(unsafe { NonZeroUsize::new_unchecked(v) })
     }
 
     pub fn asid(self) -> u16 {
-        ((self.0.get() >> 44) & 0xffff) as u16
+        unsafe { u16::try_from((self.0.get() >> 44) & 0xffff).unwrap_unchecked() }
     }
 
     pub fn page(self) -> usize {
@@ -101,6 +101,10 @@ pub fn user_range(address: usize, bytes: usize) -> bool {
         || (address >= 0xffff_ffc0_4000_0000 && last >= address)
 }
 
+pub fn addr_to_index(addr: usize) -> u16 {
+    unsafe { u16::try_from((addr >> 30) & 511).unwrap_unchecked() }
+}
+
 fn pte_page(pte: usize) -> usize {
     ((pte >> 10) & ((1 << 44) - 1)) << 12
 }
@@ -121,7 +125,7 @@ pub struct Padded<T> {
 pub struct Hart {
     mask: u16,
     flush: bool,
-    next_asid: usize,
+    next_asid: u16,
     pub hart_id: usize,
 }
 
@@ -238,8 +242,8 @@ impl WindowAccess {
         let hart = self.hart_mut();
         if hart.mask == 0 {
             Some(0)
-        } else if hart.next_asid <= hart.mask as usize {
-            let tag = hart.next_asid as u16;
+        } else if hart.next_asid <= hart.mask {
+            let tag = hart.next_asid;
             hart.next_asid += 1;
             Some(tag)
         } else {
@@ -251,8 +255,8 @@ impl WindowAccess {
     pub fn release_tag(&mut self, tag: u16) {
         if tag != 0 {
             let hart = self.hart_mut();
-            debug_assert_eq!(hart.next_asid, usize::from(tag) + 1);
-            hart.next_asid = usize::from(tag);
+            debug_assert_eq!(hart.next_asid, tag + 1);
+            hart.next_asid = tag;
         }
     }
 
@@ -347,14 +351,14 @@ impl WindowAccess {
         unsafe { (&mut *ptr).assume_init_mut() }
     }
 
-    pub fn root_branch(&mut self, root: Root, index: usize) -> Option<usize> {
-        let pte = self.read_pte(PTE_L0_SLOT, root.page(), index);
+    pub fn root_branch(&mut self, root: Root, index: u16) -> Option<usize> {
+        let pte = self.read_pte(PTE_L0_SLOT, root.page(), usize::from(index));
         (pte & 1 != 0 && pte & 14 == 0).then(|| pte_page(pte))
     }
 
-    pub fn attach(&mut self, root: Root, index: usize, stem: usize) {
-        debug_assert!(self.read_pte(PTE_L0_SLOT, root.page(), index) == 0);
-        self.write_pte(PTE_L0_SLOT, root.page(), index, branch(stem));
+    pub fn attach(&mut self, root: Root, index: u16, stem: usize) {
+        debug_assert!(self.read_pte(PTE_L0_SLOT, root.page(), usize::from(index)) == 0);
+        self.write_pte(PTE_L0_SLOT, root.page(), usize::from(index), branch(stem));
     }
 
     fn leaf_stem(
@@ -490,7 +494,7 @@ impl WindowAccess {
 
     pub fn range_owned(&mut self, root: Root, mut address: usize, mut pages: usize) -> bool {
         while pages != 0 {
-            let ri = (address >> 30) & 511;
+            let ri = addr_to_index(address);
             let stem_offset = (address >> 12) & ((1 << 18) - 1);
             let stem_chunk = pages.min((1 << 18) - stem_offset);
             if let Some(stem) = self.root_branch(root, ri) {
@@ -658,7 +662,7 @@ impl WindowAccess {
         self.write_pte(
             PTE_L0_SLOT,
             root.page(),
-            SUPERVISOR_INDEX,
+            usize::from(SUPERVISOR_INDEX),
             branch(new) | OWNED,
         );
         self.alias(PTE_L1_SLOT, old);
@@ -690,7 +694,7 @@ impl WindowAccess {
         self.write_pte(
             PTE_L0_SLOT,
             root.page(),
-            SUPERVISOR_INDEX,
+            usize::from(SUPERVISOR_INDEX),
             branch(l1) | OWNED,
         );
         let window_l2 = self.new_page(&page)?;
@@ -781,7 +785,7 @@ impl WindowAccess {
         address: usize,
         free: impl Fn(usize) -> Result<(), llfree::Error>,
     ) -> Result<(), llfree::Error> {
-        let ri = (address >> 30) & 511;
+        let ri = addr_to_index(address);
         let Some(stem) = self.root_branch(root, ri) else {
             return Ok(());
         };
@@ -789,7 +793,7 @@ impl WindowAccess {
         if self.unmap_stem_leaf(stem, Some(root.asid()), address, &free)?
             && self.empty_table(PTE_L1_SLOT, stem)
         {
-            self.write_pte(PTE_L0_SLOT, root.page(), ri, 0);
+            self.write_pte(PTE_L0_SLOT, root.page(), usize::from(ri), 0);
             sfence_vma(None, Some(root.asid()));
             free(stem)?;
         }

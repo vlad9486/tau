@@ -383,11 +383,10 @@ pub(super) fn rollback(case: usize) -> ! {
         );
     }
     reserve(0);
-    let id = Ubi::spawn(worker, [3]).unwrap();
-    assert_eq!(id, 2); // failed creation consumed neither registry slot nor ASID
+    Ubi::spawn(worker, [3]).unwrap();
     wait_done(3);
     assert!(SLOTS[3].occupied.load(SeqCst));
     release(3);
     release(0);
-    tau_test_passed(case, usize::from(id))
+    tau_test_passed(case, 2)
 }

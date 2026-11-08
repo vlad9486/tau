@@ -11,7 +11,7 @@ use super::{
     thread::{ActiveWait, Phase, Resume, ThreadState},
     runtime, Context, Scheduler,
     matter::{self, Module},
-    space::{Window, WindowAccess},
+    space::{self, Window, WindowAccess},
 };
 
 pub fn spawn(
@@ -21,7 +21,7 @@ pub fn spawn(
     scheduler: &Scheduler,
     entry: usize,
     message: [usize; 6],
-) -> Result<u16, SpawnError> {
+) -> Result<(), SpawnError> {
     let mut scheduler = scheduler.lock();
     if scheduler.count == scheduler.threads.len() {
         return Err(SpawnError::NoSlots);
@@ -30,9 +30,9 @@ pub fn spawn(
     let hart = window.hart().hart_id;
     let mut desc = module.header.descriptor;
     if entry & 1 != 0
-        || (entry >> 30) & 511 != usize::from(desc.root_index)
+        || space::addr_to_index(entry) != desc.root_index
         || !window
-            .resolve_stem(desc.stem, entry)
+            .resolve_stem(desc.stem_phys, entry)
             .is_some_and(|(_, flags)| flags & 26 == 26)
     {
         return Err(SpawnError::InvalidEntry);
@@ -51,7 +51,7 @@ pub fn spawn(
     scheduler.enqueue(hart, id);
     scheduler.enable(hart);
     scheduler.program(hart);
-    Ok(id as u16)
+    Ok(())
 }
 
 pub fn start_hart(

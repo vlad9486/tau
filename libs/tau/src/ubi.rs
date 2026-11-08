@@ -160,13 +160,13 @@ impl Ubi {
         }
     }
 
-    pub fn spawn<const I: usize>(entry: Entry, msg: [usize; I]) -> Result<u16, SpawnError> {
+    pub fn spawn<const I: usize>(entry: Entry, msg: [usize; I]) -> Result<(), SpawnError> {
         let entry = entry as usize;
-        let (r0, [id]) = ubi(Call::Spawn { entry }, msg);
+        let (r0, []) = ubi(Call::Spawn { entry }, msg);
         if let Some(code) = NonZero::new(r0) {
             Err(unsafe { SpawnError::decode(code) })
         } else {
-            Ok(id as u16)
+            Ok(())
         }
     }
 

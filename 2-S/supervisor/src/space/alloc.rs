@@ -59,13 +59,14 @@ fn validate_target(
 ) -> Result<usize, ()> {
     let physical = validate_module_handle(context, target.get()).map_err(|_| ())?;
     let dep = window.read_module_descriptor(physical);
-    let root_index = dep.root_index as usize;
     let last = addr_virtual + virtual_pages * vmem::PAGE - 1;
-    if (addr_virtual >> 30) & 511 != root_index || (last >> 30) & 511 != root_index {
+    if vmem::addr_to_index(addr_virtual) != dep.root_index
+        || vmem::addr_to_index(last) != dep.root_index
+    {
         return Err(());
     }
 
-    Ok(dep.stem)
+    Ok(dep.stem_phys)
 }
 
 /// Validate memory mapping request.

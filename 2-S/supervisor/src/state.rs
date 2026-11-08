@@ -101,7 +101,7 @@ pub unsafe fn init(
     module: *mut Module,
     context: &Context,
 ) -> Result<(Root, usize), InitError> {
-    let (boot, stem) = context.boot.validate().map_err(|_| InitError::Manifest)?;
+    let (boot, root_index) = context.boot.validate().map_err(|_| InitError::Manifest)?;
     let root = Window::current_root();
 
     let mapping = Mapping {
@@ -136,10 +136,10 @@ pub unsafe fn init(
         .map_err(InitError::Alloc)?;
 
     // The boot ELF uses the same protected shared-stem rule as prepared ELFs.
-    let stem_phys = window.root_branch(root, stem).unwrap_or(0);
+    let stem_phys = window.root_branch(root, root_index).unwrap_or(0);
     let descriptor = ModuleDescriptor {
-        stem: stem_phys,
-        root_index: stem as u16,
+        stem_phys,
+        root_index,
         entry: boot.entry,
         stack_pages: boot.stack_pages,
         physical: module_physical,

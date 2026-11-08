@@ -20,7 +20,7 @@ use super::{
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ModuleDescriptor {
-    pub stem: usize,
+    pub stem_phys: usize,
     pub root_index: u16,
     pub entry: usize,
     pub stack_pages: usize,
@@ -160,7 +160,7 @@ impl Module {
     pub fn get_dependency(&self, slot: u16) -> Option<usize> {
         let value = self
             .dependencies
-            .get(slot as usize)?
+            .get(usize::from(slot))?
             .load(Ordering::Acquire);
         (slot != 0 && value & Self::OCCUPIED != 0).then_some(value & !Self::OCCUPIED)
     }
@@ -174,8 +174,8 @@ impl Module {
         else {
             return false;
         };
-        let first_index = ((address >> 30) & 511) as u16;
-        let last_index = ((last >> 30) & 511) as u16;
+        let first_index = space::addr_to_index(address);
+        let last_index = space::addr_to_index(last);
         first_index <= index && index <= last_index
     }
 
@@ -225,7 +225,7 @@ pub struct WaitTable {
 impl WaitTable {
     pub const EMPTY: Self = WaitTable { base: 0, count: 0 };
 
-    pub fn validate(self, stem: usize) -> Result<Self, tau::ModuleError> {
+    pub fn validate(self, stem: u16) -> Result<Self, tau::ModuleError> {
         if self.count == 0 {
             return Ok(Self::EMPTY);
         }
@@ -244,7 +244,8 @@ impl WaitTable {
             .base
             .checked_add(bytes)
             .ok_or(tau::ModuleError::InvalidImage)?;
-        if (self.base >> 30) & 511 != stem || ((end - 1) >> 30) & 511 != stem {
+
+        if space::addr_to_index(self.base) != stem || space::addr_to_index(end - 1) != stem {
             return Err(tau::ModuleError::InvalidImage);
         }
         Ok(self)
@@ -298,8 +299,8 @@ pub struct ModuleSpec {
 }
 
 impl ModuleSpec {
-    pub fn validate(mut self) -> Result<(Self, usize), tau::ModuleError> {
-        let root_index = (self.entry >> 30) & 511;
+    pub fn validate(mut self) -> Result<(Self, u16), tau::ModuleError> {
+        let root_index = space::addr_to_index(self.entry);
         if self.entry & 1 != 0
             || !space::user_range(self.entry, 2)
             || root_index == 511
@@ -320,21 +321,21 @@ pub fn create_module(
     caps: tau::ModuleCapabilities,
 ) -> Result<usize, tau::ModuleError> {
     let (spec, root_index) = spec.validate()?;
-    let stem = window
+    let stem_phys = window
         .new_page(|| context.page(hart_id))
         .map_err(|_| tau::ModuleError::OutOfMemory)?;
     let tables_pages = size_of::<Module>().div_ceil(space::PAGE);
     let physical = match context.block(hart_id, tables_pages.next_power_of_two().ilog2()) {
         Ok(block) => block,
         Err(_e) => {
-            let _ = context.free(hart_id, stem);
+            let _ = context.free(hart_id, stem_phys);
             return Err(tau::ModuleError::OutOfMemory);
         }
     };
     let module = window.map_module(physical);
     let descriptor = ModuleDescriptor {
-        stem,
-        root_index: root_index as u16,
+        stem_phys,
+        root_index,
         entry: spec.entry,
         stack_pages: spec.stack_pages,
         physical,

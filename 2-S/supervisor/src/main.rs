@@ -434,7 +434,7 @@ fn respond_code(code: u16, keep: bool, a1: usize, a2: usize, a3: usize, a4: usiz
     };
     let flush = window.switch_flush(local.module_context.header.root, caller);
     let _local = unsafe { mmu::switch(local, caller, flush) };
-    restore_syscall_hot(code as _, a1, a2, a3, a4, a5)
+    restore_syscall_hot(usize::from(code), a1, a2, a3, a4, a5)
 }
 
 #[cold]
@@ -470,9 +470,9 @@ extern "C" fn invoke(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: 
         invoke_poisoned(caller);
     }
     if local.module_context.enter(caller) {
-        restore_syscall_hot(arg as usize, a1, a2, a3, a4, a5)
+        restore_syscall_hot(usize::from(arg), a1, a2, a3, a4, a5)
     } else {
-        enter_invocation_hot(arg as usize, a1, a2, a3, a4, a5)
+        enter_invocation_hot(usize::from(arg), a1, a2, a3, a4, a5)
     }
 }
 
@@ -513,7 +513,7 @@ fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize,
         invoke_poisoned(caller);
     }
     local.module_context.enter(caller);
-    enter_invocation(arg as usize, a1, a2, a3, a4, a5)
+    enter_invocation(usize::from(arg), a1, a2, a3, a4, a5)
 }
 
 #[cold]
@@ -575,9 +575,8 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
         }
         Ok(tau::Call::Spawn { entry }) => {
             match scheduler::spawn(window, local.module, context, scheduler, entry, msg) {
-                Ok(id) => {
+                Ok(()) => {
                     msg = [0; 6];
-                    msg[1] = id as usize;
                 }
                 Err(error) => {
                     msg = [0; 6];
@@ -590,7 +589,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 msg[0] = tau::AllocError::AccessDenied as usize;
                 msg[1] = 0;
             } else {
-                match context.block_zone(hart_id, order as u32, zone) {
+                match context.block_zone(hart_id, u32::from(order), zone) {
                     Ok(phys) => {
                         msg[0] = 0;
                         msg[1] = phys;
@@ -606,7 +605,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             if !local.module.header.caps.frame_alloc {
                 msg[0] = tau::FreeError::AccessDenied as usize;
             } else {
-                msg[0] = match context.free_block_zone(hart_id, msg[1], order as u32, zone) {
+                msg[0] = match context.free_block_zone(hart_id, msg[1], u32::from(order), zone) {
                     Ok(()) => 0,
                     Err(llfree::Error::Address) => tau::FreeError::InvalidAddress as usize,
                     Err(_) => tau::FreeError::AlreadyFree as usize,
@@ -703,7 +702,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             match res {
                 Ok(slot) => {
                     msg[0] = 0;
-                    msg[1] = slot as usize;
+                    msg[1] = usize::from(slot);
                 }
                 Err(error) => {
                     msg[0] = error.encode();
