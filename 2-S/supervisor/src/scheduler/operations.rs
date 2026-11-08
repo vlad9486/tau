@@ -22,11 +22,6 @@ pub fn spawn(
     entry: usize,
     message: [usize; 6],
 ) -> Result<(), SpawnError> {
-    let mut scheduler = scheduler.lock();
-    if scheduler.count == scheduler.threads.len() {
-        return Err(SpawnError::NoSlots);
-    }
-    let id = scheduler.count + 1;
     let hart = window.hart().hart_id;
     let mut desc = module.header.descriptor;
     if entry & 1 != 0
@@ -42,6 +37,14 @@ pub fn spawn(
     let mut message = message;
     message[0] = 0;
     let thread = ThreadState::runnable(hart, root, message, Resume::Entry(entry));
+    let mut scheduler = scheduler.lock();
+    if scheduler.count == scheduler.threads.len() {
+        drop(scheduler);
+        let _ = window.destroy(root, |page| context.free(hart, page));
+        window.release_tag(root.asid());
+        return Err(SpawnError::NoSlots);
+    }
+    let id = scheduler.count + 1;
     *scheduler
         .threads
         .get_mut(id - 1)
