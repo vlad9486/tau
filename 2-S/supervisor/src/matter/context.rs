@@ -111,10 +111,7 @@ pub fn spawn(
 ) -> Result<space::Root, tau::SpawnError> {
     let caller = Window::current_root();
     let hart = window.hart().hart_id;
-    let Some(index) = desc.root_index else {
-        return Err(tau::SpawnError::InvalidEntry);
-    };
-    let index = index as usize;
+    let index = desc.root_index as usize;
     if desc.entry & 1 != 0
         || (desc.entry >> 30) & 511 != index
         || !window
@@ -175,10 +172,7 @@ pub fn spawn_hart(
 ) -> Result<space::Root, tau::SpawnError> {
     let caller = Window::current_root();
     let hart = window.hart().hart_id;
-    let Some(index) = desc.root_index else {
-        return Err(tau::SpawnError::InvalidEntry);
-    };
-    let index = index as usize;
+    let index = desc.root_index as usize;
     let loader_index = (context.base_addr >> 30) & 511;
     let loader_stem = window
         .root_branch(context.bootstrap_root, loader_index)

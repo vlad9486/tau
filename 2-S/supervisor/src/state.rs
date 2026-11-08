@@ -139,7 +139,7 @@ pub unsafe fn init(
     let stem_phys = window.root_branch(root, stem).unwrap_or(0);
     let descriptor = ModuleDescriptor {
         stem: stem_phys,
-        root_index: Some(stem as u16),
+        root_index: stem as u16,
         entry: boot.entry,
         stack_pages: boot.stack_pages,
         physical: module_physical,

@@ -21,7 +21,7 @@ use super::{
 #[derive(Clone, Copy)]
 pub struct ModuleDescriptor {
     pub stem: usize,
-    pub root_index: Option<u16>,
+    pub root_index: u16,
     pub entry: usize,
     pub stack_pages: usize,
     pub physical: usize,
@@ -166,9 +166,7 @@ impl Module {
     }
 
     pub fn overlaps_stem(&self, address: usize, pages: usize) -> bool {
-        let Some(index) = self.header.descriptor.root_index else {
-            return false;
-        };
+        let index = self.header.descriptor.root_index;
         let Some(last) = pages
             .checked_mul(space::PAGE)
             .and_then(|bytes| bytes.checked_sub(1))
@@ -336,7 +334,7 @@ pub fn create_module(
     let module = window.map_module(physical);
     let descriptor = ModuleDescriptor {
         stem,
-        root_index: Some(root_index as u16),
+        root_index: root_index as u16,
         entry: spec.entry,
         stack_pages: spec.stack_pages,
         physical,

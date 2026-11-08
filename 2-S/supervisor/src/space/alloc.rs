@@ -59,10 +59,7 @@ fn validate_target(
 ) -> Result<usize, ()> {
     let physical = validate_module_handle(context, target.get()).map_err(|_| ())?;
     let dep = window.read_module_descriptor(physical);
-    let Some(root_index) = dep.root_index else {
-        return Err(());
-    };
-    let root_index = root_index as usize;
+    let root_index = dep.root_index as usize;
     let last = addr_virtual + virtual_pages * vmem::PAGE - 1;
     if (addr_virtual >> 30) & 511 != root_index || (last >> 30) & 511 != root_index {
         return Err(());
