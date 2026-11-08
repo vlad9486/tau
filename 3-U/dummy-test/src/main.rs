@@ -177,7 +177,7 @@ extern "C" fn dummy_main(
         }
         9 => {
             WAIT_READY.store(0, Ordering::SeqCst);
-            WAIT_SLOTS[0].occupied.store(true, Ordering::SeqCst);
+            WAIT_SLOTS[0].occupy();
             tau::Ubi::spawn(notify_worker, []).unwrap();
             while WAIT_READY.load(Ordering::SeqCst) == 0 {
                 assert_eq!(
@@ -185,16 +185,16 @@ extern "C" fn dummy_main(
                     tau::Event::NOTIFIED
                 );
             }
-            WAIT_SLOTS[0].occupied.store(false, Ordering::SeqCst);
+            WAIT_SLOTS[0].release();
             tau::Ubi::respond(0, [value])
         }
         10 => {
-            WAIT_SLOTS[1].occupied.store(true, Ordering::SeqCst);
+            WAIT_SLOTS[1].occupy();
             tau::Ubi::notify(&WAIT_SLOTS[1]).unwrap();
             tau::Ubi::respond(0, [(&raw const WAIT_SLOTS[1]).addr()])
         }
         11 => {
-            WAIT_SLOTS[1].occupied.store(true, Ordering::SeqCst);
+            WAIT_SLOTS[1].occupy();
             let event = tau::Ubi::wait(&WAIT_SLOTS[1], NonZeroUsize::new(1)).unwrap();
             tau::Ubi::respond(0, [event.0 as usize])
         }

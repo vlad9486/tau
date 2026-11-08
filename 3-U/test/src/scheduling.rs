@@ -32,25 +32,25 @@ fn slot_addr(index: usize) -> usize {
 }
 
 fn reserve(index: usize) {
-    assert!(
-        SLOTS[index]
-            .occupied
-            .compare_exchange(false, true, SeqCst, SeqCst)
-            .is_ok()
-    );
+    assert!(SLOTS[index].reserve());
 }
+
 fn release(index: usize) {
-    SLOTS[index].occupied.store(false, SeqCst);
+    SLOTS[index].release();
 }
+
 fn notified(index: usize) {
     assert_eq!(Ubi::wait(pointer(index), None), Ok(Event::NOTIFIED));
 }
+
 fn expired() -> Option<NonZeroUsize> {
     NonZeroUsize::new(1)
 }
+
 fn deadline(ticks: usize) -> Option<NonZeroUsize> {
     NonZeroUsize::new(tau::asm::read_time() + ticks)
 }
+
 fn wait_done(value: usize) {
     while DONE.load(SeqCst) != value {
         notified(0);
@@ -290,7 +290,7 @@ pub(super) fn run(case: usize, hart: usize, info: usize, pages: usize) -> ! {
 
     Ubi::spawn(worker, [3]).unwrap();
     wait_done(3);
-    assert!(SLOTS[3].occupied.load(SeqCst)); // Exit must not release reservations
+    assert!(SLOTS[3].occupied().unwrap()); // Exit must not release reservations
     Ubi::notify(pointer(3)).unwrap();
     notified(3);
     release(3);
@@ -385,7 +385,7 @@ pub(super) fn rollback(case: usize) -> ! {
     reserve(0);
     Ubi::spawn(worker, [3]).unwrap();
     wait_done(3);
-    assert!(SLOTS[3].occupied.load(SeqCst));
+    assert!(SLOTS[3].occupied().unwrap());
     release(3);
     release(0);
     tau_test_passed(case, 2)

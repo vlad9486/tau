@@ -9,7 +9,7 @@ mod graph;
 mod scheduling;
 mod elf;
 
-use core::{arch::naked_asm, num::NonZeroUsize, ptr, sync::atomic::Ordering};
+use core::{arch::naked_asm, num::NonZeroUsize, ptr};
 
 use dtb::Dtb;
 
@@ -248,9 +248,9 @@ extern "C" fn main(arg: usize, hart: usize, info: usize, pages: usize, _: usize,
             // elapsed guest ticks, never debugger-sensitive wall-clock timing.
             let start = tau::asm::read_time();
             let deadline = start.checked_add(1_000_000).unwrap();
-            scheduling::SLOTS[0].occupied.store(true, Ordering::SeqCst);
+            scheduling::SLOTS[0].occupy();
             let event = tau::Ubi::wait(&scheduling::SLOTS[0], NonZeroUsize::new(deadline));
-            scheduling::SLOTS[0].occupied.store(false, Ordering::SeqCst);
+            scheduling::SLOTS[0].release();
             if !matches!(event, Ok(tau::Event::TIMEOUT)) {
                 let code = match event {
                     Ok(e) => e.0 as usize,

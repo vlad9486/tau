@@ -149,7 +149,7 @@ pub struct Window {
     pte_l2: UnsafeCell<[usize; 512]>,                               // 1 page  (slot 3: L2 leaf page-table walk)
     page: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 4: zeroing / segment copy)
     descriptor: UnsafeCell<MaybeUninit<Padded<ModuleDescriptor>>>,  // 1 page  (slot 5: foreign module tables page 0 / descriptor)
-    wait: UnsafeCell<MaybeUninit<Page>>,                            // 1 page  (slot 6: wait slots)
+    wait: MaybeUninit<[tau::WaitSlot; 64]>,                         // 1 page  (slot 6: wait slots)
     hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,                    // 1 page  (slot 7: permanent per-hart MMU)
     module: UnsafeCell<MaybeUninit<Module>>,                        // 6 pages (slots 8..14: foreign Module)
     _reserved: UnsafeCell<MaybeUninit<[Page; 497]>>,                // unused window slots
@@ -276,9 +276,10 @@ impl WindowAccess {
         }
     }
 
-    fn alias(&mut self, slot: usize, physical: usize) {
+    fn alias(&mut self, slot: usize, physical: usize, write: bool) {
         debug_assert!(slot > 0 && slot < 511 && slot != HART_SLOT && physical & 0xfff == 0);
-        let pte = (physical >> 2) | flags_new(b"rw---");
+        // TODO: proper flags abstraction
+        let pte = (physical >> 2) | flags_new(b"r----") | ((1 << 2) * usize::from(write));
         let target = self.base.addr() + slot * PAGE;
         let table = unsafe { UnsafeCell::raw_get(&raw const (*self.base).table) };
         let cell = unsafe { table.cast::<usize>().add(slot) };
@@ -290,7 +291,7 @@ impl WindowAccess {
 
     fn pte_cell(&mut self, slot: usize, table: usize, index: usize) -> *mut usize {
         debug_assert!(matches!(slot, PTE_L0_SLOT | PTE_L1_SLOT | PTE_L2_SLOT) && index < 512);
-        self.alias(slot, table);
+        self.alias(slot, table, true);
         let ptr = match slot {
             PTE_L0_SLOT => unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte_l0) },
             PTE_L1_SLOT => unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte_l1) },
@@ -325,27 +326,26 @@ impl WindowAccess {
     }
 
     pub fn page_mut(&mut self, physical: usize) -> &mut [u8; PAGE] {
-        self.alias(PAGE_SLOT, physical);
+        self.alias(PAGE_SLOT, physical, true);
         let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).page) };
         unsafe { &mut (*ptr).assume_init_mut().0 }
     }
 
     /// Read the prepared module header from page 0 of foreign module tables.
     pub fn read_module_descriptor(&mut self, physical: usize) -> ModuleDescriptor {
-        self.alias(DESCRIPTOR_SLOT, physical);
+        self.alias(DESCRIPTOR_SLOT, physical, false);
         let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).descriptor) };
         unsafe { (*ptr).assume_init_ref().inner }
     }
 
-    pub fn wait_mut(&mut self, physical: usize) -> &mut [u8; PAGE] {
-        self.alias(WAIT_SLOT, physical);
-        let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).wait) };
-        unsafe { &mut (*ptr).assume_init_mut().0 }
+    pub fn wait(&mut self, physical: usize) -> &[tau::WaitSlot; 64] {
+        self.alias(WAIT_SLOT, physical, false);
+        unsafe { (*self.base).wait.assume_init_ref() }
     }
 
     pub fn map_module(&mut self, physical: usize) -> &mut Module {
         for i in 0..size_of::<Module>().div_ceil(PAGE) {
-            self.alias(MODULE_SLOT + i, physical + i * PAGE);
+            self.alias(MODULE_SLOT + i, physical + i * PAGE, true);
         }
         let ptr = unsafe { UnsafeCell::raw_get(&raw const (*self.base).module) };
         unsafe { (&mut *ptr).assume_init_mut() }
@@ -671,8 +671,8 @@ impl WindowAccess {
             usize::from(SUPERVISOR_INDEX),
             branch(new) | OWNED,
         );
-        self.alias(PTE_L1_SLOT, old);
-        self.alias(PAGE_SLOT, new);
+        self.alias(PTE_L1_SLOT, old, true);
+        self.alias(PAGE_SLOT, new, true);
         let src = unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte_l1).cast::<usize>() };
         let dst = unsafe { UnsafeCell::raw_get(&raw const (*self.base).page).cast::<usize>() };
         for i in 0..512 {
@@ -724,8 +724,8 @@ impl WindowAccess {
             STACK_SLOT,
             (stack >> 2) | flags_new(b"rw---") | OWNED,
         );
-        self.alias(PTE_L1_SLOT, old);
-        self.alias(PAGE_SLOT, l1);
+        self.alias(PTE_L1_SLOT, old, true);
+        self.alias(PAGE_SLOT, l1, true);
         let src = unsafe { UnsafeCell::raw_get(&raw const (*self.base).pte_l1).cast::<usize>() };
         let dst = unsafe { UnsafeCell::raw_get(&raw const (*self.base).page).cast::<usize>() };
         for i in 0..512 {

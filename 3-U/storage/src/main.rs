@@ -19,7 +19,7 @@ mod sys;
 mod sdio;
 mod queue;
 
-use core::{mem::MaybeUninit, sync::atomic::Ordering};
+use core::mem::MaybeUninit;
 
 use self::queue::Queue;
 
@@ -81,7 +81,7 @@ extern "C" fn main(a0: usize, a1: usize, a2: usize, _: usize, _: usize, _: usize
             } else {
                 Request::Write { page, phys }
             };
-            WAIT_SLOTS[0].occupied.store(true, Ordering::SeqCst);
+            WAIT_SLOTS[0].occupy();
             match QUEUE.enqueue(req) {
                 Ok(()) => {
                     tau::Ubi::raise_irq(0).unwrap();
@@ -98,7 +98,7 @@ extern "C" fn main(a0: usize, a1: usize, a2: usize, _: usize, _: usize, _: usize
 fn run(regs: &sdio::Registers, fifo_depth: u32, freq: u64) -> Result<(), sdio::DriverError> {
     let mut state = sdio::State::new(freq).ok_or(sdio::DriverError::Dma)?;
     state.init(regs, fifo_depth)?;
-    WAIT_SLOTS[0].occupied.store(true, Ordering::SeqCst);
+    WAIT_SLOTS[0].occupy();
 
     loop {
         while let Some(req) = QUEUE.dequeue() {

@@ -2,7 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // See LICENSE for the full license text.
 
-use core::{fmt, sync::atomic::AtomicBool, mem};
+use core::{
+    cell::UnsafeCell,
+    fmt,
+    mem,
+    sync::atomic::{AtomicU8, Ordering},
+};
+
+use super::error::WaitError;
 
 #[repr(C)]
 pub struct Manifest {
@@ -67,16 +74,40 @@ pub struct MappedRegionRaw {
 /// One module-global reservation. Shared request data needs its own synchronization.
 #[repr(C, align(64))]
 pub struct WaitSlot {
-    pub user_data: [u8; 63],
-    pub occupied: AtomicBool,
+    pub user_data: UnsafeCell<[u8; 63]>,
+    occupied: AtomicU8,
 }
+
+unsafe impl Sync for WaitSlot {}
 
 impl WaitSlot {
     pub const fn new() -> Self {
         Self {
-            user_data: [0; 63],
-            occupied: AtomicBool::new(false),
+            user_data: UnsafeCell::new([0; 63]),
+            occupied: AtomicU8::new(0),
         }
+    }
+
+    pub fn occupy(&self) {
+        self.occupied.store(1, Ordering::SeqCst);
+    }
+
+    pub fn release(&self) {
+        self.occupied.store(0, Ordering::SeqCst);
+    }
+
+    pub fn occupied(&self) -> Result<bool, WaitError> {
+        match self.occupied.load(Ordering::SeqCst) {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(WaitError::InvalidWaiter),
+        }
+    }
+
+    pub fn reserve(&self) -> bool {
+        self.occupied
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
     }
 }
 

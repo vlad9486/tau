@@ -55,7 +55,6 @@ extern "C" fn main(
     _: usize,
     _: usize,
 ) -> ! {
-    use core::sync::atomic::Ordering;
     use dtb::Dtb;
 
     let len = info_pages << 12;
@@ -136,7 +135,7 @@ extern "C" fn main(
     )
     .expect("prepare dummy-test");
     if let Some(slot) = WAIT_SLOTS.get(hart_id) {
-        slot.occupied.store(true, Ordering::SeqCst);
+        slot.occupy();
     }
 
     scheduler::Tasks::new(&dtb, reservations, plic, plic_e, context_id, hart_id)

@@ -7,7 +7,7 @@ use core::{
     hint,
     num::NonZero,
     ptr,
-    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use super::{
@@ -231,11 +231,11 @@ impl WaitTable {
         }
         let bytes = self
             .count
-            .checked_mul(64)
+            .checked_mul(size_of::<tau::WaitSlot>())
             .ok_or(tau::ModuleError::InvalidImage)?;
         if self.base == 0
             || self.count > Module::WAIT_SIZE
-            || self.base & 63 != 0
+            || self.base & (align_of::<tau::WaitSlot>() - 1) != 0
             || !space::user_range(self.base, bytes)
         {
             return Err(tau::ModuleError::InvalidImage);
@@ -255,10 +255,14 @@ impl WaitTable {
         let offset = pointer
             .checked_sub(self.base)
             .ok_or(tau::WaitError::InvalidWaiter)?;
-        if self.count == 0 || offset & 63 != 0 || offset / 64 >= self.count {
+        let slot_size = size_of::<tau::WaitSlot>();
+        if self.count == 0
+            || offset & (align_of::<tau::WaitSlot>() - 1) != 0
+            || offset / slot_size >= self.count
+        {
             return Err(tau::WaitError::InvalidWaiter);
         }
-        Ok(offset / 64)
+        Ok(offset / slot_size)
     }
 
     pub fn occupied(
@@ -268,25 +272,14 @@ impl WaitTable {
         index: usize,
     ) -> Result<bool, tau::WaitError> {
         let (physical, flags) = window
-            .resolve(root, self.base + index * 64 + 63)
+            .resolve(root, self.base + index * size_of::<tau::WaitSlot>())
             .ok_or(tau::WaitError::InvalidWaiter)?;
         if flags & 30 != 22 {
             return Err(tau::WaitError::InvalidWaiter);
         }
-        let byte = {
-            let page = window.wait_mut(physical & !(space::PAGE - 1));
-            let cell = unsafe {
-                &*page[physical & (space::PAGE - 1)..]
-                    .as_ptr()
-                    .cast::<AtomicU8>()
-            };
-            cell.load(Ordering::SeqCst)
-        };
-        match byte {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(tau::WaitError::InvalidWaiter),
-        }
+        let wait_page = window.wait(physical & !(space::PAGE - 1));
+        let index = (physical & (space::PAGE - 1)) / size_of::<tau::WaitSlot>();
+        wait_page[index].occupied()
     }
 }
 
