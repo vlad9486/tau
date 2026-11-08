@@ -112,17 +112,11 @@ pub fn spawn(
     let caller = Window::current_root();
     let hart = window.hart().hart_id;
     let index = desc.root_index as usize;
-    if desc.entry & 1 != 0
-        || (desc.entry >> 30) & 511 != index
-        || !window
-            .resolve_stem(desc.stem, desc.entry)
-            .is_some_and(|(_, flags)| flags & 26 == 26)
-    {
-        return Err(tau::SpawnError::InvalidEntry);
-    }
-    let root = window
-        .create(0, || context.page(hart))
-        .map_err(|_| tau::SpawnError::OutOfMemory)?;
+    let tag = window.allocate_tag().ok_or(tau::SpawnError::OutOfMemory)?;
+    let Ok(root) = window.create(tag, || context.page(hart)) else {
+        window.release_tag(tag);
+        return Err(tau::SpawnError::OutOfMemory);
+    };
     let result = (|| {
         window.attach(root, index, desc.stem);
         window
@@ -153,13 +147,12 @@ pub fn spawn(
                 .map(root, mapping, || context.page(hart))
                 .map_err(|_| tau::SpawnError::OutOfMemory)?;
         }
-        let tag = window.allocate_tag().ok_or(tau::SpawnError::OutOfMemory)?;
-        let root = space::Root::sv39(root.page(), tag);
         unsafe { arch::asm!("fence.i", options(nostack)) };
         Ok(root)
     })();
     if result.is_err() {
         let _ = window.destroy(root, |page| context.free(hart, page));
+        window.release_tag(tag);
     }
     result
 }
@@ -177,14 +170,6 @@ pub fn spawn_hart(
     let loader_stem = window
         .root_branch(context.bootstrap_root, loader_index)
         .ok_or(tau::SpawnError::InvalidEntry)?;
-    if desc.entry & 1 != 0
-        || (desc.entry >> 30) & 511 != index
-        || !window
-            .resolve_stem(desc.stem, desc.entry)
-            .is_some_and(|(_, flags)| flags & 26 == 26)
-    {
-        return Err(tau::SpawnError::InvalidEntry);
-    }
     let root = window
         .create(0, || context.page(hart))
         .map_err(|_| tau::SpawnError::OutOfMemory)?;

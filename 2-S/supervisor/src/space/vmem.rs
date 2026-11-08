@@ -233,7 +233,7 @@ impl WindowAccess {
         }
     }
 
-    /// Allocate only after construction succeeds, so failed attempts consume no tag.
+    /// Allocate a hart-local ASID tag for a new context root.
     pub fn allocate_tag(&mut self) -> Option<u16> {
         let hart = self.hart_mut();
         if hart.mask == 0 {
@@ -244,6 +244,15 @@ impl WindowAccess {
             Some(tag)
         } else {
             None
+        }
+    }
+
+    /// Release the most recently allocated ASID tag after failed root construction.
+    pub fn release_tag(&mut self, tag: u16) {
+        if tag != 0 {
+            let hart = self.hart_mut();
+            debug_assert_eq!(hart.next_asid, usize::from(tag) + 1);
+            hart.next_asid = usize::from(tag);
         }
     }
 

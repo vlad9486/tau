@@ -29,6 +29,14 @@ pub fn spawn(
     let id = scheduler.count + 1;
     let hart = window.hart().hart_id;
     let mut desc = module.header.descriptor;
+    if entry & 1 != 0
+        || (entry >> 30) & 511 != usize::from(desc.root_index)
+        || !window
+            .resolve_stem(desc.stem, entry)
+            .is_some_and(|(_, flags)| flags & 26 == 26)
+    {
+        return Err(SpawnError::InvalidEntry);
+    }
     desc.entry = entry;
     let root = matter::spawn(window, context, desc)?;
     let mut message = message;
