@@ -181,7 +181,7 @@ pub struct Lower<'a> {
     children: &'a [Align<Table>],
 }
 
-const _: () = assert!(TREE_HUGE < (1 << (u16::BITS as usize - HUGE_ORDER)));
+const _: () = assert!(TREE_HUGE < (1 << (u16::BITS - HUGE_ORDER)));
 
 /// Size of the dynamic metadata
 #[derive(Clone, Copy)]
@@ -227,16 +227,14 @@ impl Metadata {
 }
 
 impl<'a> Lower<'a> {
-    fn allocation_size(order: usize) -> Result<usize, Error> {
+    fn allocation_size(order: u32) -> Result<usize, Error> {
         if order > MAX_ORDER {
             return Err(Error::OrderNotSuported);
         }
-        1usize
-            .checked_shl(order as u32)
-            .ok_or(Error::OrderNotSuported)
+        1usize.checked_shl(order).ok_or(Error::OrderNotSuported)
     }
 
-    fn validate_range(&self, frame: FrameId, order: usize) -> Result<usize, Error> {
+    fn validate_range(&self, frame: FrameId, order: u32) -> Result<usize, Error> {
         let size = Self::allocation_size(order)?;
         if !frame.is_aligned(order)
             || frame
@@ -273,7 +271,7 @@ impl<'a> Lower<'a> {
     /// Starts at `core_id % tree_count` and wraps around, without per-CPU
     /// reservations or additional metadata. Under concurrent updates, `Error::Memory` does
     /// not guarantee that the allocator is globally exhausted.
-    pub fn alloc(&self, core_id: usize, order: usize) -> Result<FrameId, Error> {
+    pub fn alloc(&self, core_id: usize, order: u32) -> Result<FrameId, Error> {
         Self::allocation_size(order)?;
         let count = self.children.len();
         let first = core_id.checked_rem(count).ok_or(Error::Memory)?;
@@ -290,7 +288,7 @@ impl<'a> Lower<'a> {
     /// Try allocating a new `frame` in the [`TREE_FRAMES`] sized chunk at `start`.
     ///
     /// Returns the allocated frame.
-    pub fn get(&self, start: RowId, order: usize) -> Result<FrameId, Error> {
+    pub fn get(&self, start: RowId, order: u32) -> Result<FrameId, Error> {
         let size = Self::allocation_size(order)?;
         if start.0 >= self.frames().div_ceil(super::BITFIELD_ROW) {
             return Err(Error::InvalidArgument);
@@ -347,7 +345,7 @@ impl<'a> Lower<'a> {
     }
 
     /// Try allocating a specific `frame`.
-    pub fn get_at(&self, frame: FrameId, order: usize) -> Result<(), Error> {
+    pub fn get_at(&self, frame: FrameId, order: u32) -> Result<(), Error> {
         let size = self.validate_range(frame, order)?;
 
         let i = (frame.as_huge().0) % TREE_HUGE;
@@ -395,7 +393,7 @@ impl<'a> Lower<'a> {
     /// The caller must own the entire range and relinquish it on success.
     /// Concurrent or repeated frees of overlapping ranges are invalid; errors
     /// are best-effort diagnostics, not a substitute for tracking ownership.
-    pub fn put(&self, _core_id: usize, frame: FrameId, order: usize) -> Result<(), Error> {
+    pub fn put(&self, _core_id: usize, frame: FrameId, order: u32) -> Result<(), Error> {
         let size = self.validate_range(frame, order)?;
 
         let i = frame.as_huge().child_idx();
@@ -443,9 +441,9 @@ impl<'a> Lower<'a> {
     }
 
     /// Returns if the frame is free. This might be racy!
-    pub fn is_free(&self, frame: FrameId, order: usize) -> bool {
-        const TREE_ORDER: usize = TREE_FRAMES.ilog2() as usize;
-        let Some(size) = 1usize.checked_shl(order as u32) else {
+    pub fn is_free(&self, frame: FrameId, order: u32) -> bool {
+        const TREE_ORDER: u32 = TREE_FRAMES.ilog2();
+        let Some(size) = 1usize.checked_shl(order) else {
             return false;
         };
         if order > TREE_ORDER
@@ -511,8 +509,8 @@ impl<'a> Lower<'a> {
     }
 
     /// Returns statistics at a specific frame, huge frame, or tree.
-    pub fn stats_at(&self, frame: FrameId, order: usize) -> Result<Stats, Error> {
-        const TREE_ORDER: usize = TREE_FRAMES.ilog2() as usize;
+    pub fn stats_at(&self, frame: FrameId, order: u32) -> Result<Stats, Error> {
+        const TREE_ORDER: u32 = TREE_FRAMES.ilog2();
         if frame.0 >= self.frames() {
             return Err(Error::Address);
         }
@@ -561,7 +559,7 @@ impl<'a> Lower<'a> {
         Ok(&self.children(tree)?.pairs)
     }
 
-    fn put_small(&self, frame: FrameId, order: usize) -> Result<(), Error> {
+    fn put_small(&self, frame: FrameId, order: u32) -> Result<(), Error> {
         if order >= HUGE_ORDER {
             return Err(Error::OrderNotSuported);
         }
@@ -585,7 +583,7 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn partial_put_huge(&self, old: HugeEntry, frame: FrameId, order: usize) -> Result<(), Error> {
+    fn partial_put_huge(&self, old: HugeEntry, frame: FrameId, order: u32) -> Result<(), Error> {
         // log::info!("partial free of huge frame {frame:?} o={order}");
         let i = frame.as_huge().child_idx();
         let children = self.children(frame.as_tree())?;

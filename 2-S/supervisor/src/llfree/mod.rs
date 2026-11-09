@@ -17,13 +17,13 @@ pub const TREE_HUGE: usize = 8;
 /// Number of small frames in tree
 pub const TREE_FRAMES: usize = TREE_HUGE << HUGE_ORDER;
 /// Order of an entire tree
-pub const TREE_ORDER: usize = TREE_FRAMES.ilog2() as usize;
+pub const TREE_ORDER: u32 = TREE_FRAMES.ilog2();
 /// Order for huge frames
-pub const HUGE_ORDER: usize = 9;
+pub const HUGE_ORDER: u32 = 9;
 /// Number of small frames in huge frame
 pub const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
 /// Maximum order the llfree supports
-pub const MAX_ORDER: usize = HUGE_ORDER + 1;
+pub const MAX_ORDER: u32 = HUGE_ORDER + 1;
 /// Bit size of the atomic ints that comprise the bitfields
 pub const BITFIELD_ROW: usize = 64;
 

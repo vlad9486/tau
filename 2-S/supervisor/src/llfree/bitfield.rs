@@ -44,7 +44,7 @@ impl fmt::Debug for Bitfield {
 impl Bitfield {
     const ROW_BITS: usize = BITFIELD_ROW;
     pub const LEN: usize = ROWS * Self::ROW_BITS;
-    pub const ORDER: usize = Self::LEN.ilog2() as _;
+    pub const ORDER: u32 = Self::LEN.ilog2();
 
     /// Overwrite the `range` of bits with `v`
     pub fn set(&self, range: Range<FrameId>, v: bool) {
@@ -93,14 +93,12 @@ impl Bitfield {
     ///
     /// Orders above 6 claim rows one at a time and roll back on contention.
     /// The caller must own every bit it frees; overlapping frees are invalid.
-    pub fn toggle(&self, i: FrameId, order: usize, expected: bool) -> Result<(), Error> {
+    pub fn toggle(&self, i: FrameId, order: u32, expected: bool) -> Result<(), Error> {
         if order > Self::ORDER || !i.is_aligned(order) {
             return Err(Error::InvalidArgument);
         }
         let i = FrameId(i.0 % Self::LEN);
-        let num_bits = 1usize
-            .checked_shl(order as u32)
-            .ok_or(Error::OrderNotSuported)?;
+        let num_bits = 1usize.checked_shl(order).ok_or(Error::OrderNotSuported)?;
         match order {
             0..=6 => {
                 // Updates within a single row
@@ -145,12 +143,12 @@ impl Bitfield {
         }
     }
 
-    pub fn is_zero(&self, i: FrameId, order: usize) -> bool {
+    pub fn is_zero(&self, i: FrameId, order: u32) -> bool {
         if order > Self::ORDER || !i.is_aligned(order) {
             return false;
         }
         let i = FrameId(i.0 % Self::LEN);
-        let Some(num_bits) = 1usize.checked_shl(order as u32) else {
+        let Some(num_bits) = 1usize.checked_shl(order) else {
             return false;
         };
 
@@ -169,7 +167,7 @@ impl Bitfield {
     ///
     /// Orders above 6 claim rows one at a time and roll back on contention.
     /// The caller must own every bit it frees; overlapping frees are invalid.
-    pub fn set_first_zeros(&self, start_row: RowId, order: usize) -> Result<FrameId, Error> {
+    pub fn set_first_zeros(&self, start_row: RowId, order: u32) -> Result<FrameId, Error> {
         if order > Self::ORDER {
             return Err(Error::OrderNotSuported);
         }
@@ -204,7 +202,7 @@ impl Bitfield {
     /// Allocate multiple rows with multiple CAS
     ///
     /// A candidate is returned only after every row has been claimed.
-    fn set_first_zero_rows(&self, order: usize) -> Result<RowId, Error> {
+    fn set_first_zero_rows(&self, order: u32) -> Result<RowId, Error> {
         let num_rows = match order {
             7 => 2,
             8 => 4,
@@ -244,7 +242,7 @@ enum SmallOrder {
 
 impl SmallOrder {
     #[inline]
-    fn new(v: usize) -> Result<Self, usize> {
+    fn new(v: u32) -> Result<Self, u32> {
         // Bitfield::ROW_BITS.ilog2() == 6
         match v {
             0 => Ok(Self::O0),

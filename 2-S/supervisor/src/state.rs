@@ -34,7 +34,7 @@ impl Context {
                 self.dma_base_addr,
             ),
         };
-        let frame = allocator.alloc(hart_id, order as _)?.0;
+        let frame = allocator.alloc(hart_id, order)?.0;
         Ok(base_addr + (frame << 12))
     }
 
@@ -61,7 +61,7 @@ impl Context {
             ),
         };
         let offset = page.checked_sub(base_addr).ok_or(llfree::Error::Address)?;
-        if order > llfree::MAX_ORDER as u32 || offset & ((1usize << (12 + order)) - 1) != 0 {
+        if order > llfree::MAX_ORDER || offset & ((1usize << (12 + order)) - 1) != 0 {
             return Err(llfree::Error::Address);
         }
         let frame = offset >> 12;
@@ -72,7 +72,7 @@ impl Context {
         {
             return Err(llfree::Error::Address);
         }
-        allocator.put(hart_id, llfree::FrameId(frame), order as _)
+        allocator.put(hart_id, llfree::FrameId(frame), order)
     }
 
     pub fn free_block(&self, hart_id: usize, page: usize, order: u32) -> Result<(), llfree::Error> {

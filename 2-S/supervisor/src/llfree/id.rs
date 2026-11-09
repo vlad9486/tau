@@ -137,11 +137,11 @@ impl FrameId {
         self.0 % BITFIELD_ROW
     }
 
-    pub const fn is_aligned(self, order: usize) -> bool {
-        if order >= usize::BITS as usize {
+    pub const fn is_aligned(self, order: u32) -> bool {
+        if order >= usize::BITS {
             return false;
         }
-        match 1usize.checked_shl(order as u32) {
+        match 1usize.checked_shl(order) {
             Some(size) => self.0 & (size - 1) == 0,
             None => false,
         }

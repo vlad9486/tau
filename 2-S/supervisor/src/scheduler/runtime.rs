@@ -191,7 +191,8 @@ impl State {
             .queue
             .get(hart.head)
             .copied()
-            .unwrap_or_else(|| invariant_failed()) as usize;
+            .unwrap_or_else(|| invariant_failed())
+            .into();
         hart.head = (hart.head + 1) % CAPACITY;
         hart.length -= 1;
         Some(id)
