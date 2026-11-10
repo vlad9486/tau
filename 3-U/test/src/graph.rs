@@ -118,6 +118,108 @@ pub(super) fn run(case: usize, info: usize, pages: usize) -> ! {
         );
     }
 
+    // Exercise per-edge binding stems (`L0[1]` at `BINDING_BASE`):
+    // `a -> service` and `b -> service` share `service`'s ELF stem (`L0[0]`),
+    // but have isolated binding stems (`L0[1]`).
+    let a_bind_phys = Ubi::alloc_physical(0, tau::MemoryZone::Normal).unwrap();
+    let b_bind_phys = Ubi::alloc_physical(0, tau::MemoryZone::Normal).unwrap();
+    const STAGE_A: usize = 0x10_0010_0000;
+    const STAGE_B: usize = 0x10_0011_0000;
+    Ubi::map(core::num::NonZeroUsize::new(a_bind_phys), STAGE_A, 1).unwrap();
+    Ubi::map(core::num::NonZeroUsize::new(b_bind_phys), STAGE_B, 1).unwrap();
+    unsafe {
+        (STAGE_A as *mut usize).write_volatile(0xaaaa_0000);
+        (STAGE_B as *mut usize).write_volatile(0xbbbb_0000);
+    }
+    assert_eq!(
+        Ubi::map_binding(
+            a,
+            a_service,
+            core::num::NonZeroUsize::new(a_bind_phys),
+            0x1000,
+            1,
+            tau::PageFlags::RW
+        ),
+        Err(tau::AllocError::InvalidAddress)
+    );
+    assert_eq!(
+        Ubi::map_binding(
+            a,
+            0x7ff,
+            core::num::NonZeroUsize::new(a_bind_phys),
+            tau::BINDING_BASE,
+            1,
+            tau::PageFlags::RW
+        ),
+        Err(tau::AllocError::InvalidAddress)
+    );
+    Ubi::map_binding(
+        a,
+        a_service,
+        core::num::NonZeroUsize::new(a_bind_phys),
+        tau::BINDING_BASE,
+        1,
+        tau::PageFlags::RW,
+    )
+    .unwrap();
+    Ubi::map_binding(
+        b,
+        b_service,
+        core::num::NonZeroUsize::new(b_bind_phys),
+        tau::BINDING_BASE,
+        1,
+        tau::PageFlags::RW,
+    )
+    .unwrap();
+
+    // Direct binding on ROOT (`system-test -> a` and `system-test -> b`)
+    Ubi::map_binding(
+        ModuleHandle::ROOT,
+        a_slot,
+        core::num::NonZeroUsize::new(a_bind_phys),
+        tau::BINDING_BASE,
+        1,
+        tau::PageFlags::RW,
+    )
+    .unwrap();
+    Ubi::map_binding(
+        ModuleHandle::ROOT,
+        b_slot,
+        core::num::NonZeroUsize::new(b_bind_phys),
+        tau::BINDING_BASE,
+        1,
+        tau::PageFlags::RW,
+    )
+    .unwrap();
+    assert_eq!(
+        Ubi::invoke::<2, 1>(a_slot, 14, [0, 0x11]).unwrap(),
+        [0xaaaa_0000]
+    );
+    assert_eq!(
+        Ubi::invoke::<2, 1>(b_slot, 14, [0, 0x22]).unwrap(),
+        [0xbbbb_0000]
+    );
+    assert_eq!(
+        Ubi::invoke::<2, 1>(a_slot, 14, [0, 0]).unwrap(),
+        [0xaaaa_0011]
+    );
+    assert_eq!(
+        Ubi::invoke::<2, 1>(b_slot, 14, [0, 0]).unwrap(),
+        [0xbbbb_0022]
+    );
+    unsafe {
+        assert_eq!((STAGE_A as *const usize).read_volatile(), 0xaaaa_0011);
+        assert_eq!((STAGE_B as *const usize).read_volatile(), 0xbbbb_0022);
+    }
+    Ubi::unmap_binding(ModuleHandle::ROOT, a_slot, tau::BINDING_BASE, 1).unwrap();
+    Ubi::unmap_binding(ModuleHandle::ROOT, b_slot, tau::BINDING_BASE, 1).unwrap();
+    Ubi::unmap_binding(a, a_service, tau::BINDING_BASE, 1).unwrap();
+    Ubi::unmap_binding(b, b_service, tau::BINDING_BASE, 1).unwrap();
+    Ubi::unmap(STAGE_A, 1).unwrap();
+    Ubi::unmap(STAGE_B, 1).unwrap();
+    Ubi::free_physical(a_bind_phys, 0, tau::MemoryZone::Normal).unwrap();
+    Ubi::free_physical(b_bind_phys, 0, tau::MemoryZone::Normal).unwrap();
+
     // Appending bindings after contexts exist preserves their cached roots.
     // Binding itself allocates no pages; failing creation must not retain pages.
     for slot in 2..0x800 {

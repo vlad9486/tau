@@ -55,24 +55,44 @@ pub fn validate_module_handle(context: &Context, handle: usize) -> Result<usize,
     Ok(page)
 }
 
-/// Validate memory request from privileged module that maps/unmaps at `target` module.
+/// Validate memory request from privileged module that maps/unmaps at `target` module
+/// or at one of `target` module's bound dependency stems (`slot != 0`).
 fn validate_target(
     window: &mut WindowAccess,
     context: &Context,
+    module: &Module,
     addr_virtual: usize,
     virtual_pages: usize,
-    target: NonZero<usize>,
+    target: Option<NonZero<usize>>,
+    slot: u16,
 ) -> Result<usize, ()> {
-    let physical = validate_module_handle(context, target.get()).map_err(|_| ())?;
-    let dep = window.read_module_descriptor(physical);
     let last = addr_virtual + (virtual_pages * vmem::PAGE - 1);
-    if vmem::addr_to_index(addr_virtual) != dep.root_index
-        || vmem::addr_to_index(last) != dep.root_index
-    {
-        return Err(());
+    if slot == 0 {
+        let target = target.ok_or(())?;
+        let physical = validate_module_handle(context, target.get()).map_err(|_| ())?;
+        let dep = window.read_module_descriptor(physical);
+        if vmem::addr_to_index(addr_virtual) != vmem::ROOT_INDEX
+            || vmem::addr_to_index(last) != vmem::ROOT_INDEX
+        {
+            return Err(());
+        }
+        Ok(dep.stem_phys)
+    } else {
+        if vmem::addr_to_index(addr_virtual) != vmem::BINDING_INDEX
+            || vmem::addr_to_index(last) != vmem::BINDING_INDEX
+        {
+            return Err(());
+        }
+        let target_module = match target {
+            None => module,
+            Some(target) => {
+                let physical = validate_module_handle(context, target.get()).map_err(|_| ())?;
+                &*window.map_module(physical)
+            }
+        };
+        let (_, binding_stem) = target_module.get_dependency(slot).ok_or(())?;
+        Ok(binding_stem)
     }
-
-    Ok(dep.stem_phys)
 }
 
 /// Validate memory mapping request.
@@ -110,14 +130,24 @@ pub fn map_pages(
     window: &mut WindowAccess,
     hart_id: usize,
     context: &Context,
+    module: &Module,
     mapping: Mapping,
     target: Option<NonZero<usize>>,
+    slot: u16,
 ) -> Result<(), tau::AllocError> {
     let addr_virtual = mapping.addr_virtual;
     let virtual_pages = mapping.virtual_pages;
-    if let Some(target) = target {
-        let stem = validate_target(window, context, addr_virtual, virtual_pages, target)
-            .map_err(|()| tau::AllocError::InvalidAddress)?;
+    if target.is_some() || slot != 0 {
+        let stem = validate_target(
+            window,
+            context,
+            module,
+            addr_virtual,
+            virtual_pages,
+            target,
+            slot,
+        )
+        .map_err(|()| tau::AllocError::InvalidAddress)?;
         if let Err(error) = window.map_stem(stem, mapping, || context.page(hart_id)) {
             if !matches!(
                 error,
@@ -154,13 +184,23 @@ pub fn unmap_pages(
     window: &mut WindowAccess,
     hart_id: usize,
     context: &Context,
+    module: &Module,
     addr_virtual: usize,
     virtual_pages: usize,
     target: Option<NonZero<usize>>,
+    slot: u16,
 ) -> Result<(), tau::FreeError> {
-    if let Some(target) = target {
-        let stem = validate_target(window, context, addr_virtual, virtual_pages, target)
-            .map_err(|()| tau::FreeError::InvalidAddress)?;
+    if target.is_some() || slot != 0 {
+        let stem = validate_target(
+            window,
+            context,
+            module,
+            addr_virtual,
+            virtual_pages,
+            target,
+            slot,
+        )
+        .map_err(|()| tau::FreeError::InvalidAddress)?;
         for i in 0..virtual_pages {
             let _ = window.unmap_stem(stem, None, addr_virtual + i * vmem::PAGE, |page| {
                 context.free(hart_id, page)

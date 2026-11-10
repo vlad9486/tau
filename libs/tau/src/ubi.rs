@@ -202,9 +202,27 @@ impl Ubi {
         number_of_pages: usize,
         flags: PageFlags,
     ) -> Result<(), AllocError> {
+        Self::map_binding(
+            target,
+            0,
+            physical_addr,
+            virtual_addr,
+            number_of_pages,
+            flags,
+        )
+    }
+
+    pub fn map_binding(
+        target: ModuleHandle,
+        slot: u16,
+        physical_addr: Option<NonZero<usize>>,
+        virtual_addr: usize,
+        number_of_pages: usize,
+        flags: PageFlags,
+    ) -> Result<(), AllocError> {
         let physical_addr = physical_addr.map(NonZero::get).unwrap_or_default();
         let (r0, []) = ubi(
-            Call::Map,
+            Call::Map { slot },
             [
                 target.as_raw(),
                 physical_addr,
@@ -229,8 +247,17 @@ impl Ubi {
         virtual_addr: usize,
         number_of_pages: usize,
     ) -> Result<(), FreeError> {
+        Self::unmap_binding(target, 0, virtual_addr, number_of_pages)
+    }
+
+    pub fn unmap_binding(
+        target: ModuleHandle,
+        slot: u16,
+        virtual_addr: usize,
+        number_of_pages: usize,
+    ) -> Result<(), FreeError> {
         let (r0, []) = ubi(
-            Call::Unmap,
+            Call::Unmap { slot },
             [target.as_raw(), virtual_addr, number_of_pages],
         );
         if let Some(code) = NonZero::new(r0) {

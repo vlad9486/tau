@@ -11,6 +11,9 @@ use core::{
 
 use super::error::WaitError;
 
+/// Base virtual address of the 1 GiB incoming dependency binding branch (`L0[1]`).
+pub const BINDING_BASE: usize = 1 << 30;
+
 #[repr(C)]
 pub struct Manifest {
     pub this: ModuleId,
@@ -282,12 +285,14 @@ pub enum Call {
     /// Loader-only: release 2^order contiguous physical frames at a1 back to `zone`.
     FreePhysical { order: u8, zone: MemoryZone },
     /// Map physical or anonymous memory into a target module's virtual address space:
+    /// `slot` selects the module stem (`0`) or a bound dependency's binding stem (`1..`),
     /// a1 = target handle (0 for self), a2 = physical address (0 for anonymous),
     /// a3 = virtual address, a4 = pages, a5 = PageFlags.
-    Map,
+    Map { slot: u16 },
     /// Unmap virtual memory from a target module's virtual address space:
+    /// `slot` selects the module stem (`0`) or a bound dependency's binding stem (`1..`),
     /// a1 = target handle (0 for self), a2 = virtual address, a3 = pages.
-    Unmap,
+    Unmap { slot: u16 },
     /// Loader-only: create an empty module template with a1 = entry,
     /// a2 = stack_pages, a3 = wait_slots_addr, a4 = wait_slots_count,
     /// a5 = capabilities. Return status in a0 and the new ModuleHandle in a1.
@@ -324,8 +329,8 @@ impl Call {
             Self::AllocPhysical { order, zone } => {
                 (((order as usize) | ((zone as usize) << 8)) << 16) + (1 << 4) + 0b1001
             }
-            Self::Map => (2 << 4) + 0b1001,
-            Self::Unmap => (3 << 4) + 0b1001,
+            Self::Map { slot } => ((slot as usize) << 16) + (2 << 4) + 0b1001,
+            Self::Unmap { slot } => ((slot as usize) << 16) + (3 << 4) + 0b1001,
             Self::FreePhysical { order, zone } => {
                 (((order as usize) | ((zone as usize) << 8)) << 16) + (4 << 4) + 0b1001
             }
@@ -365,8 +370,8 @@ impl Call {
                         };
                         Ok(Self::AllocPhysical { order, zone })
                     }
-                    2 => Ok(Self::Map),
-                    3 => Ok(Self::Unmap),
+                    2 => Ok(Self::Map { slot: arg }),
+                    3 => Ok(Self::Unmap { slot: arg }),
                     4 => {
                         let order = (arg & 0xff) as u8;
                         let zone = match arg >> 8 {

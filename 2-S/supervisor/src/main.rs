@@ -612,37 +612,38 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 };
             }
         }
-        Ok(tau::Call::Map) => {
+        Ok(tau::Call::Map { slot }) => {
             let res = (|| {
                 let mapping = space::validate_map(NonZero::new(msg[2]), msg[3], msg[4], msg[5])?;
                 let target = NonZero::new(msg[1]);
-                if !local.module.header.caps.loader {
-                    if target.is_some() {
+                let module = local.module;
+                if !module.header.caps.loader {
+                    if target.is_some() || slot != 0 {
                         return Err(tau::AllocError::AccessDenied);
                     }
-                    if !local.module.header.caps.frame_alloc && mapping.addr_physical.is_some() {
+                    if !module.header.caps.frame_alloc && mapping.addr_physical.is_some() {
                         return Err(tau::AllocError::AccessDenied);
                     }
                     if mapping.flags[2] != b'-' {
                         return Err(tau::AllocError::AccessDenied);
                     }
                 }
-                if target.is_none() && local.module.overlaps_stem(msg[3], msg[4]) {
+                if target.is_none() && slot == 0 && module.overlaps_stem(msg[3], msg[4]) {
                     return Err(tau::AllocError::AccessDenied);
                 };
-                space::map_pages(window, hart_id, context, mapping, target)
+                space::map_pages(window, hart_id, context, module, mapping, target, slot)
             })();
             msg[0] = match res {
                 Ok(()) => 0,
                 Err(error) => error as usize,
             };
         }
-        Ok(tau::Call::Unmap) => {
+        Ok(tau::Call::Unmap { slot }) => {
             let res = (|| {
                 space::validate_unmap(msg[2], msg[3])?;
                 let target = NonZero::new(msg[1]);
                 if !local.module.header.caps.loader {
-                    if target.is_some() {
+                    if target.is_some() || slot != 0 {
                         return Err(tau::FreeError::AccessDenied);
                     }
                     let root = space::Window::current_root();
@@ -652,10 +653,19 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                         return Err(tau::FreeError::AccessDenied);
                     }
                 }
-                if target.is_none() && local.module.overlaps_stem(msg[2], msg[3]) {
+                if target.is_none() && slot == 0 && local.module.overlaps_stem(msg[2], msg[3]) {
                     return Err(tau::FreeError::AccessDenied);
                 };
-                space::unmap_pages(window, hart_id, context, msg[2], msg[3], target)
+                space::unmap_pages(
+                    window,
+                    hart_id,
+                    context,
+                    local.module,
+                    msg[2],
+                    msg[3],
+                    target,
+                    slot,
+                )
             })();
 
             msg[0] = match res {

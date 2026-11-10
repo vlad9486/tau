@@ -93,11 +93,11 @@ pub fn invoke(
     module: &Module,
     slot: u16,
 ) -> Result<(space::Root, usize), tau::ModuleError> {
-    let descriptor = module
+    let (descriptor, binding_stem_phys) = module
         .get_dependency(slot)
         .ok_or(tau::ModuleError::InvalidDependency)?;
     let desc = window.read_module_descriptor(descriptor);
-    let root = spawn(window, context, desc)?;
+    let root = spawn(window, context, desc, Some(binding_stem_phys))?;
     module_context.retain_dependency(slot, root);
     Ok((root, desc.entry))
 }
@@ -108,17 +108,20 @@ pub fn spawn(
     window: &mut WindowAccess,
     context: &Context,
     desc: ModuleDescriptor,
+    binding_stem_phys: Option<usize>,
 ) -> Result<space::Root, tau::SpawnError> {
     let caller = Window::current_root();
     let hart = window.hart().hart_id;
-    let index = desc.root_index;
     let tag = window.allocate_tag().ok_or(tau::SpawnError::OutOfMemory)?;
     let Ok(root) = window.create(tag, || context.page(hart)) else {
         window.release_tag(tag);
         return Err(tau::SpawnError::OutOfMemory);
     };
     let result = (|| {
-        window.attach(root, index, desc.stem_phys);
+        window.attach(root, space::ROOT_INDEX, desc.stem_phys);
+        if let Some(binding_stem_phys) = binding_stem_phys {
+            window.attach(root, space::BINDING_INDEX, binding_stem_phys);
+        }
         window
             .supervisor_mappings(caller, root, || context.page(hart))
             .map_err(|_| tau::SpawnError::OutOfMemory)?;
@@ -165,7 +168,6 @@ pub fn spawn_hart(
 ) -> Result<space::Root, tau::SpawnError> {
     let caller = Window::current_root();
     let hart = window.hart().hart_id;
-    let index = desc.root_index;
     let loader_index = space::addr_to_index(context.base_addr);
     let loader_stem = window
         .root_branch(context.bootstrap_root, loader_index)
@@ -174,8 +176,8 @@ pub fn spawn_hart(
         .create(0, || context.page(hart))
         .map_err(|_| tau::SpawnError::OutOfMemory)?;
     let result = (|| {
-        window.attach(root, index, desc.stem_phys);
-        if loader_index != index {
+        window.attach(root, space::ROOT_INDEX, desc.stem_phys);
+        if loader_index != space::ROOT_INDEX {
             window.attach(root, loader_index, loader_stem);
         }
         window

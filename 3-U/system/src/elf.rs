@@ -171,7 +171,7 @@ pub fn prepare_module(
     }
 
     let segments = elf.segments().ok_or(tau::ModuleError::InvalidImage)?;
-    let mut root_index = None;
+    let mut has_load = false;
     let mut executable_entry = false;
     let mut total = 0usize;
     for (seg_idx, ph) in segments.iter().enumerate() {
@@ -189,10 +189,8 @@ pub fn prepare_module(
         if total > 64 * 1024 * 1024
             || ph.p_filesz > ph.p_memsz
             || !user_range(address, ph.p_memsz as usize)
-            || index == 511
-            || index == 256
-            || ((end - 1) >> 30) & 511 != index
-            || root_index.is_some_and(|old| old != index)
+            || index != 0
+            || ((end - 1) >> 30) & 511 != 0
             || ph.p_flags & PF_R == 0
             || ph.p_flags & (PF_W | PF_X) == PF_W | PF_X
             || (ph.p_align > 1
@@ -215,19 +213,18 @@ pub fn prepare_module(
                 return Err(tau::ModuleError::InvalidImage);
             }
         }
-        root_index = Some(index);
+        has_load = true;
         executable_entry |=
             entry >= address && entry < end && ph.p_flags & PF_X != 0 && entry & 1 == 0;
         elf.segment_data(&ph)
             .map_err(|_| tau::ModuleError::InvalidImage)?;
     }
-    if !executable_entry {
+    if !has_load || !executable_entry {
         return Err(tau::ModuleError::InvalidImage);
     }
-    let root_index = root_index.ok_or(tau::ModuleError::InvalidImage)?;
     for &(virt, _, pages) in resolved_mmio[..resolved_count].iter().flatten() {
         let end = virt + pages * PAGE;
-        if (virt >> 30) & 511 != root_index || ((end - 1) >> 30) & 511 != root_index {
+        if (virt >> 30) & 511 != 0 || ((end - 1) >> 30) & 511 != 0 {
             return Err(tau::ModuleError::InvalidImage);
         }
     }
@@ -257,8 +254,8 @@ pub fn prepare_module(
         if wait_base == 0
             || wait_base & 63 != 0
             || !user_range(wait_base, wait_bytes)
-            || (wait_base >> 30) & 511 != root_index
-            || ((wait_end - 1) >> 30) & 511 != root_index
+            || (wait_base >> 30) & 511 != 0
+            || ((wait_end - 1) >> 30) & 511 != 0
         {
             return Err(tau::ModuleError::InvalidImage);
         }

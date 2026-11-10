@@ -25,7 +25,7 @@ pub fn spawn(
     let hart = window.hart().hart_id;
     let mut desc = module.header.descriptor;
     if entry & 1 != 0
-        || space::addr_to_index(entry) != desc.root_index
+        || space::addr_to_index(entry) != space::ROOT_INDEX
         || !window
             .resolve_stem(desc.stem_phys, entry)
             .is_some_and(|(_, flags)| flags & 26 == 26)
@@ -33,7 +33,9 @@ pub fn spawn(
         return Err(SpawnError::InvalidEntry);
     }
     desc.entry = entry;
-    let root = matter::spawn(window, context, desc)?;
+    let current = Window::current_root();
+    let binding_stem_phys = window.root_branch(current, space::BINDING_INDEX);
+    let root = matter::spawn(window, context, desc, binding_stem_phys)?;
     let mut message = message;
     message[0] = 0;
     let thread = ThreadState::runnable(hart, root, message, Resume::Entry(entry));

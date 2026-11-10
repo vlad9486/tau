@@ -15,8 +15,8 @@ pub use self::alloc::{map_pages, unmap_pages, validate_map, validate_unmap, vali
 
 mod vmem;
 pub use self::vmem::{
-    Root, Mapping, Window, WindowAccess, PAGE, MODULE, MODULE_CONTEXT, user_range, addr_to_index,
-    SCHEDULER,
+    Root, Mapping, Window, WindowAccess, PAGE, MODULE, MODULE_CONTEXT, ROOT_INDEX, BINDING_INDEX,
+    user_range, addr_to_index, SCHEDULER,
 };
 
 // TODO: this is needed only for `loader`;

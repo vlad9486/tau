@@ -209,6 +209,22 @@ extern "C" fn dummy_main(
             acc += next;
             tau::Ubi::respond(0, [acc])
         }
+        14 => {
+            let denied = matches!(
+                tau::Ubi::map(None, tau::BINDING_BASE, 1),
+                Err(tau::AllocError::AccessDenied)
+            ) && matches!(
+                tau::Ubi::unmap(tau::BINDING_BASE, 1),
+                Err(tau::FreeError::AccessDenied)
+            );
+            if !denied {
+                tau::Ubi::respond(3, []);
+            }
+            let ptr = (tau::BINDING_BASE + value) as *mut usize;
+            let old = unsafe { ptr.read_volatile() };
+            unsafe { ptr.write_volatile(old.wrapping_add(second)) };
+            tau::Ubi::respond(0, [old])
+        }
         _ => tau::Ubi::respond(7, []),
     }
 }

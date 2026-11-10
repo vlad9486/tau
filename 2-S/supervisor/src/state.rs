@@ -7,7 +7,7 @@ use core::num::NonZero;
 use super::{
     llfree,
     matter::{ModuleDescriptor, ModuleContext, Module, ModuleSpec, Capabilities},
-    space::{Root, Mapping, Window, WindowAccess, PAGE},
+    space::{Root, Mapping, Window, WindowAccess, PAGE, ROOT_INDEX},
 };
 
 pub struct Context {
@@ -102,7 +102,7 @@ pub unsafe fn init(
     module: *mut Module,
     context: &Context,
 ) -> Result<(Root, usize), InitError> {
-    let (boot, root_index) = context.boot.validate().map_err(|_| InitError::Manifest)?;
+    let boot = context.boot.validate().map_err(|_| InitError::Manifest)?;
     let root = Window::current_root();
 
     let mapping = Mapping {
@@ -137,10 +137,9 @@ pub unsafe fn init(
         .map_err(InitError::Alloc)?;
 
     // The boot ELF uses the same protected shared-stem rule as prepared ELFs.
-    let stem_phys = window.root_branch(root, root_index).unwrap_or(0);
+    let stem_phys = window.root_branch(root, ROOT_INDEX).unwrap_or(0);
     let descriptor = ModuleDescriptor {
         stem_phys,
-        root_index,
         entry: boot.entry,
         stack_pages: boot.stack_pages,
         physical: module_physical,

@@ -21,10 +21,15 @@ use super::{
 #[derive(Clone, Copy)]
 pub struct ModuleDescriptor {
     pub stem_phys: usize,
-    pub root_index: u16,
     pub entry: usize,
     pub stack_pages: usize,
     pub physical: usize,
+}
+
+#[repr(C)]
+pub struct DependencyEntry {
+    descriptor: AtomicUsize,
+    binding_stem_phys: AtomicUsize,
 }
 
 #[repr(C)]
@@ -80,8 +85,8 @@ pub struct WaitRecord {
 pub struct Module {
     pub header: ModuleHeader,
     // Slot zero is the free-list head. Free entries contain the next slot;
-    // occupied entries contain a tagged physical descriptor address.
-    dependencies: [AtomicUsize; Self::MAX_DEPS],
+    // occupied entries contain a tagged physical descriptor address and its binding stem.
+    dependencies: [DependencyEntry; Self::MAX_DEPS],
     wait_records: [UnsafeCell<WaitRecord>; Self::WAIT_SIZE],
     // TODO:
     // wait_slots: [[u64; 8]; Self::WAIT_SIZE],
@@ -115,9 +120,15 @@ impl Module {
         unsafe { ptr::addr_of_mut!((*this).header.poisoned).write(AtomicBool::new(false)) };
         unsafe { ptr::addr_of_mut!((*this).header.dependency_lock).write(AtomicBool::new(false)) };
         unsafe { ptr::addr_of_mut!((*this).header.irqs).write([None; Self::MAX_IRQS]) };
-        let dependencies = unsafe { ptr::addr_of_mut!((*this).dependencies).cast::<AtomicUsize>() };
+        let dependencies =
+            unsafe { ptr::addr_of_mut!((*this).dependencies).cast::<DependencyEntry>() };
         for index in 0..Self::MAX_DEPS {
-            unsafe { dependencies.add(index).write(AtomicUsize::new(index + 1)) };
+            unsafe {
+                dependencies.add(index).write(DependencyEntry {
+                    descriptor: AtomicUsize::new(index + 1),
+                    binding_stem_phys: AtomicUsize::new(0),
+                });
+            }
         }
         let wait_table = unsafe { ptr::addr_of_mut!((*this).wait_records).cast::<WaitRecord>() };
         for index in 0..Self::WAIT_SIZE {
@@ -139,44 +150,56 @@ impl Module {
         DependencyGuard(&self.header.dependency_lock)
     }
 
-    pub fn insert_dependency(&self, descriptor: usize) -> Option<u16> {
+    pub fn insert_dependency(&self, descriptor: usize, binding_stem_phys: usize) -> Option<u16> {
         // Physical addresses must leave the tag bit unused.
-        if descriptor == 0 || descriptor & (Self::OCCUPIED | 0xfff) != 0 {
+        if descriptor == 0
+            || descriptor & (Self::OCCUPIED | 0xfff) != 0
+            || binding_stem_phys == 0
+            || binding_stem_phys & 0xfff != 0
+        {
             return None;
         }
         let _guard = self.lock_dependencies();
-        let slot = self.dependencies[0].load(Ordering::Relaxed);
+        let slot = self.dependencies[0].descriptor.load(Ordering::Relaxed);
         if slot == Self::MAX_DEPS {
             return None;
         }
         let cell = self.dependencies.get(slot)?;
-        self.dependencies[0].store(cell.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.dependencies[0]
+            .descriptor
+            .store(cell.descriptor.load(Ordering::Relaxed), Ordering::Relaxed);
+        cell.binding_stem_phys
+            .store(binding_stem_phys, Ordering::Relaxed);
         // Publish the initialized descriptor to readers without taking the
         // free-list lock. Published slots remain occupied until shutdown.
-        cell.store(descriptor | Self::OCCUPIED, Ordering::Release);
+        cell.descriptor
+            .store(descriptor | Self::OCCUPIED, Ordering::Release);
         Some(slot as u16)
     }
 
-    pub fn get_dependency(&self, slot: u16) -> Option<usize> {
-        let value = self
-            .dependencies
-            .get(usize::from(slot))?
-            .load(Ordering::Acquire);
-        (slot != 0 && value & Self::OCCUPIED != 0).then_some(value & !Self::OCCUPIED)
+    pub fn get_dependency(&self, slot: u16) -> Option<(usize, usize)> {
+        let entry = self.dependencies.get(usize::from(slot))?;
+        let value = entry.descriptor.load(Ordering::Acquire);
+        if slot != 0 && value & Self::OCCUPIED != 0 {
+            Some((
+                value & !Self::OCCUPIED,
+                entry.binding_stem_phys.load(Ordering::Relaxed),
+            ))
+        } else {
+            None
+        }
     }
 
-    pub fn overlaps_stem(&self, address: usize, pages: usize) -> bool {
-        let index = self.header.descriptor.root_index;
-        let Some(last) = pages
-            .checked_mul(space::PAGE)
-            .and_then(|bytes| bytes.checked_sub(1))
-            .and_then(|n| address.checked_add(n))
-        else {
-            return false;
-        };
+    /// Chek if the `address` range overlaps protected regions.
+    /// If it does, the memory operation is invalid at certain condition.
+    pub fn overlaps_stem(&self, address: usize, _pages: usize) -> bool {
+        // keep `_pages` parameter, we might need it in future
         let first_index = space::addr_to_index(address);
-        let last_index = space::addr_to_index(last);
-        first_index <= index && index <= last_index
+        const _: () = {
+            assert!(space::ROOT_INDEX == 0);
+            assert!(space::BINDING_INDEX == 1);
+        };
+        first_index <= space::BINDING_INDEX
     }
 
     /// Read one record through a temporary physical alias.
@@ -292,17 +315,17 @@ pub struct ModuleSpec {
 }
 
 impl ModuleSpec {
-    pub fn validate(mut self) -> Result<(Self, u16), tau::ModuleError> {
+    pub fn validate(mut self) -> Result<Self, tau::ModuleError> {
         let root_index = space::addr_to_index(self.entry);
         if self.entry & 1 != 0
             || !space::user_range(self.entry, 2)
-            || root_index == 511
+            || root_index != space::ROOT_INDEX
             || !(1..=256).contains(&self.stack_pages)
         {
             return Err(tau::ModuleError::InvalidImage);
         }
-        self.wait_table = self.wait_table.validate(root_index)?;
-        Ok((self, root_index))
+        self.wait_table = self.wait_table.validate(space::ROOT_INDEX)?;
+        Ok(self)
     }
 }
 
@@ -313,7 +336,7 @@ pub fn create_module(
     spec: ModuleSpec,
     caps: tau::ModuleCapabilities,
 ) -> Result<usize, tau::ModuleError> {
-    let (spec, root_index) = spec.validate()?;
+    let spec = spec.validate()?;
     let stem_phys = window
         .new_page(|| context.page(hart_id))
         .map_err(|_| tau::ModuleError::OutOfMemory)?;
@@ -328,7 +351,6 @@ pub fn create_module(
     let module = window.map_module(physical);
     let descriptor = ModuleDescriptor {
         stem_phys,
-        root_index,
         entry: spec.entry,
         stack_pages: spec.stack_pages,
         physical,
@@ -355,20 +377,32 @@ pub fn bind_dependency(
     if parent == dependency {
         return Err(tau::ModuleError::InvalidDependency);
     }
+    let hart_id = window.hart().hart_id;
+    let dependency_phys = space::validate_module_handle(context, dependency)?;
+    let parent_phys = if parent == 0 {
+        None
+    } else {
+        Some(space::validate_module_handle(context, parent)?)
+    };
+    let binding_stem_phys = window
+        .new_page(|| context.page(hart_id))
+        .map_err(|_| tau::ModuleError::OutOfMemory)?;
     // Longer cycles are the loader's responsibility. Slots and descriptors
     // remain installed until shutdown; existing context caches stay valid.
-    let module = if parent == 0 {
-        module
-    } else {
-        // Alias only at publication, after snapshot/construction aliases
-        // have expired. No window remapping may occur while borrowed.
-        let physical = space::validate_module_handle(context, parent)?;
-        &*window.map_module(physical)
+    let module = match parent_phys {
+        None => module,
+        Some(physical) => {
+            // Alias only at publication, after snapshot/construction aliases
+            // have expired. No window remapping may occur while borrowed.
+            &*window.map_module(physical)
+        }
     };
-    let physical = space::validate_module_handle(context, dependency)?;
-    module
-        .insert_dependency(physical)
-        .ok_or(tau::ModuleError::NoSlots)
+    if let Some(slot) = module.insert_dependency(dependency_phys, binding_stem_phys) {
+        Ok(slot)
+    } else {
+        let _ = context.free(hart_id, binding_stem_phys);
+        Err(tau::ModuleError::NoSlots)
+    }
 }
 
 pub fn bind_irq(

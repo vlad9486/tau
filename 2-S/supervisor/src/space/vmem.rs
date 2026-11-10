@@ -26,6 +26,8 @@ pub const MAX_RAM_FRAMES: usize = 1 << 26;
 pub const MAX_DMA_FRAMES: usize = 1 << 19;
 pub const MODULE_CONTEXT: usize = 0xffff_ffc0_0021_0000;
 pub const MODULE: usize = 0xffff_ffc0_0022_0000;
+pub const ROOT_INDEX: u16 = 0;
+pub const BINDING_INDEX: u16 = 1;
 const SUPERVISOR_INDEX: u16 = 256;
 // Sv39 RSW: this entry owns an allocator page (data or a child table).
 // Borrowed entries stop reclamation, including whole shared branches.
@@ -151,8 +153,8 @@ pub struct Window {
     descriptor: UnsafeCell<MaybeUninit<Padded<ModuleDescriptor>>>,  // 1 page  (slot 5: foreign module tables page 0 / descriptor)
     wait: MaybeUninit<[tau::WaitSlot; 64]>,                         // 1 page  (slot 6: wait slots)
     hart: UnsafeCell<MaybeUninit<Padded<Hart>>>,                    // 1 page  (slot 7: permanent per-hart MMU)
-    module: UnsafeCell<MaybeUninit<Module>>,                        // 6 pages (slots 8..14: foreign Module)
-    _reserved: UnsafeCell<MaybeUninit<[Page; 497]>>,                // unused window slots
+    module: UnsafeCell<MaybeUninit<Module>>,                        // 10 pages (slots 8..18: foreign Module)
+    _reserved: UnsafeCell<MaybeUninit<[Page; 493]>>,                // unused window slots
     stack: UnsafeCell<MaybeUninit<Page>>,                           // 1 page  (slot 511: supervisor stack)
 }
 
