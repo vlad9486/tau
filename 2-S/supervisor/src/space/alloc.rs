@@ -61,24 +61,24 @@ fn validate_target(
     window: &mut WindowAccess,
     context: &Context,
     module: &Module,
-    addr_virtual: usize,
+    virtual_addr: usize,
     virtual_pages: usize,
     target: Option<NonZero<usize>>,
     slot: u16,
 ) -> Result<usize, ()> {
-    let last = addr_virtual + (virtual_pages * vmem::PAGE - 1);
+    let last = virtual_addr + (virtual_pages * vmem::PAGE - 1);
     if slot == 0 {
         let target = target.ok_or(())?;
         let physical = validate_module_handle(context, target.get()).map_err(|_| ())?;
         let dep = window.read_module_descriptor(physical);
-        if vmem::addr_to_index(addr_virtual) != vmem::ROOT_INDEX
+        if vmem::addr_to_index(virtual_addr) != vmem::ROOT_INDEX
             || vmem::addr_to_index(last) != vmem::ROOT_INDEX
         {
             return Err(());
         }
         Ok(dep.stem_phys)
     } else {
-        if vmem::addr_to_index(addr_virtual) != vmem::BINDING_INDEX
+        if vmem::addr_to_index(virtual_addr) != vmem::BINDING_INDEX
             || vmem::addr_to_index(last) != vmem::BINDING_INDEX
         {
             return Err(());
@@ -97,14 +97,14 @@ fn validate_target(
 
 /// Validate memory mapping request.
 pub fn validate_map(
-    addr_physical: Option<NonZero<usize>>,
-    addr_virtual: usize,
+    physical_addr: Option<NonZero<usize>>,
+    virtual_addr: usize,
     virtual_pages: usize,
     raw_flags: usize,
 ) -> Result<Mapping, tau::AllocError> {
     let flags = decode_flags(raw_flags).ok_or(tau::AllocError::AccessDenied)?;
-    if !valid_pages(addr_virtual, virtual_pages)
-        || addr_physical.is_some_and(|p| {
+    if !valid_pages(virtual_addr, virtual_pages)
+        || physical_addr.is_some_and(|p| {
             p.get() & 0xfff != 0
                 || virtual_pages
                     .checked_mul(vmem::PAGE)
@@ -116,10 +116,9 @@ pub fn validate_map(
     }
 
     let mapping = Mapping {
-        addr_virtual,
+        virtual_addr,
         virtual_pages,
-        addr_physical,
-        physical_pages: usize::from(addr_physical.is_some()) * virtual_pages,
+        physical_addr,
         flags,
     };
 
@@ -135,14 +134,14 @@ pub fn map_pages(
     target: Option<NonZero<usize>>,
     slot: u16,
 ) -> Result<(), tau::AllocError> {
-    let addr_virtual = mapping.addr_virtual;
+    let virtual_addr = mapping.virtual_addr;
     let virtual_pages = mapping.virtual_pages;
     if target.is_some() || slot != 0 {
         let stem = validate_target(
             window,
             context,
             module,
-            addr_virtual,
+            virtual_addr,
             virtual_pages,
             target,
             slot,
@@ -154,7 +153,7 @@ pub fn map_pages(
                 llfree::Error::Address | llfree::Error::InvalidArgument
             ) {
                 for i in 0..virtual_pages {
-                    let virt = addr_virtual + i * vmem::PAGE;
+                    let virt = virtual_addr + i * vmem::PAGE;
                     let _ = window.unmap_stem(stem, None, virt, |page| context.free(hart_id, page));
                 }
             }
@@ -185,7 +184,7 @@ pub fn unmap_pages(
     hart_id: usize,
     context: &Context,
     module: &Module,
-    addr_virtual: usize,
+    virtual_addr: usize,
     virtual_pages: usize,
     target: Option<NonZero<usize>>,
     slot: u16,
@@ -195,21 +194,21 @@ pub fn unmap_pages(
             window,
             context,
             module,
-            addr_virtual,
+            virtual_addr,
             virtual_pages,
             target,
             slot,
         )
         .map_err(|()| tau::FreeError::InvalidAddress)?;
         for i in 0..virtual_pages {
-            let _ = window.unmap_stem(stem, None, addr_virtual + i * vmem::PAGE, |page| {
+            let _ = window.unmap_stem(stem, None, virtual_addr + i * vmem::PAGE, |page| {
                 context.free(hart_id, page)
             });
         }
     } else {
         let root = Window::current_root();
         for i in 0..virtual_pages {
-            let _ = window.unmap(root, addr_virtual + i * vmem::PAGE, |page| {
+            let _ = window.unmap(root, virtual_addr + i * vmem::PAGE, |page| {
                 context.free(hart_id, page)
             });
         }
@@ -233,7 +232,7 @@ fn alloc_pages(
             llfree::Error::Address | llfree::Error::InvalidArgument
         ) {
             for i in 0..mapping.virtual_pages {
-                let _ = window.unmap(root, mapping.addr_virtual + i * vmem::PAGE, |page| {
+                let _ = window.unmap(root, mapping.virtual_addr + i * vmem::PAGE, |page| {
                     context.free(hart_id, page)
                 });
             }

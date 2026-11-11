@@ -127,22 +127,21 @@ pub fn spawn(
             .map_err(|_| tau::SpawnError::OutOfMemory)?;
         for mapping in [
             Mapping {
-                addr_virtual: (desc.stack_pages * space::PAGE).wrapping_neg(),
+                virtual_addr: (desc.stack_pages * space::PAGE).wrapping_neg(),
                 virtual_pages: desc.stack_pages,
+                physical_addr: None,
                 flags: *b"rw-u-",
-                ..Mapping::default()
             },
             Mapping {
-                addr_virtual: space::MODULE_CONTEXT,
+                virtual_addr: space::MODULE_CONTEXT,
                 virtual_pages: size_of::<ModuleContext>().div_ceil(space::PAGE),
+                physical_addr: None,
                 flags: *b"rw---",
-                ..Mapping::default()
             },
             Mapping {
-                addr_virtual: space::MODULE,
+                virtual_addr: space::MODULE,
                 virtual_pages: size_of::<Module>().div_ceil(space::PAGE),
-                addr_physical: NonZero::new(desc.physical),
-                physical_pages: size_of::<Module>().div_ceil(space::PAGE),
+                physical_addr: NonZero::new(desc.physical),
                 flags: *b"rw---",
             },
         ] {
@@ -187,10 +186,9 @@ pub fn spawn_hart(
             .map(
                 root,
                 Mapping {
-                    addr_virtual: space::MODULE,
+                    virtual_addr: space::MODULE,
                     virtual_pages: size_of::<Module>().div_ceil(space::PAGE),
-                    addr_physical: NonZero::new(desc.physical),
-                    physical_pages: size_of::<Module>().div_ceil(space::PAGE),
+                    physical_addr: NonZero::new(desc.physical),
                     flags: *b"rw---",
                 },
                 || context.page(hart),

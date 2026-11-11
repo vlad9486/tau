@@ -106,10 +106,9 @@ pub unsafe fn init(
     let root = Window::current_root();
 
     let mapping = Mapping {
-        addr_virtual: module_context.addr(),
+        virtual_addr: module_context.addr(),
         virtual_pages: size_of::<ModuleContext>().div_ceil(PAGE),
-        addr_physical: None,
-        physical_pages: 0,
+        physical_addr: None,
         flags: *b"rw---",
     };
 
@@ -125,10 +124,9 @@ pub unsafe fn init(
         .block(hart_id, pages.next_power_of_two().ilog2())
         .map_err(InitError::Allocator)?;
     let mapping = Mapping {
-        addr_virtual: module.addr(),
+        virtual_addr: module.addr(),
         virtual_pages: pages,
-        addr_physical: NonZero::new(module_physical),
-        physical_pages: pages,
+        physical_addr: NonZero::new(module_physical),
         flags: *b"rw---",
     };
     window
@@ -166,16 +164,16 @@ pub unsafe fn init_hart(
     let desc = module.header.descriptor;
     for mapping in [
         Mapping {
-            addr_virtual: (desc.stack_pages * PAGE).wrapping_neg(),
+            virtual_addr: (desc.stack_pages * PAGE).wrapping_neg(),
             virtual_pages: desc.stack_pages,
+            physical_addr: None,
             flags: *b"rw-u-",
-            ..Mapping::default()
         },
         Mapping {
-            addr_virtual: module_context.addr(),
+            virtual_addr: module_context.addr(),
             virtual_pages: size_of::<ModuleContext>().div_ceil(PAGE),
+            physical_addr: None,
             flags: *b"rw---",
-            ..Mapping::default()
         },
     ] {
         window

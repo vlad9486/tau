@@ -83,10 +83,9 @@ impl Root {
 
 #[derive(Default, Clone, Copy)]
 pub struct Mapping {
-    pub addr_virtual: usize,
+    pub virtual_addr: usize,
     pub virtual_pages: usize,
-    pub addr_physical: Option<NonZeroUsize>,
-    pub physical_pages: usize,
+    pub physical_addr: Option<NonZeroUsize>,
     pub flags: [u8; 5],
 }
 
@@ -537,10 +536,9 @@ impl WindowAccess {
             .checked_mul(PAGE)
             .ok_or(llfree::Error::Address)?;
         if bytes == 0
-            || mapping.addr_virtual & 0xfff != 0
-            || mapping.addr_virtual.checked_add(bytes - 1).is_none()
-            || mapping.physical_pages > mapping.virtual_pages
-            || mapping.addr_physical.is_some_and(|p| {
+            || mapping.virtual_addr & 0xfff != 0
+            || mapping.virtual_addr.checked_add(bytes - 1).is_none()
+            || mapping.physical_addr.is_some_and(|p| {
                 p.get() & 0xfff != 0
                     || p.get()
                         .checked_add(bytes)
@@ -549,17 +547,17 @@ impl WindowAccess {
         {
             return Err(llfree::Error::Address);
         }
-        self.check_free_stem(stem, mapping.addr_virtual, mapping.virtual_pages)?;
+        self.check_free_stem(stem, mapping.virtual_addr, mapping.virtual_pages)?;
         let mut table = 0;
         for i in 0..mapping.virtual_pages {
-            let address = mapping.addr_virtual + i * PAGE;
+            let address = mapping.virtual_addr + i * PAGE;
             let index = (address >> 12) & 511;
             if i == 0 || index == 0 {
                 (table, _) = self.leaf_stem(stem, address, &page)?;
             }
-            let (physical, owned) = match mapping.addr_physical {
-                Some(p) if i < mapping.physical_pages => (p.get() + i * PAGE, 0),
-                _ => (self.new_page(&page)?, OWNED),
+            let (physical, owned) = match mapping.physical_addr {
+                Some(p) => (p.get() + i * PAGE, 0),
+                None => (self.new_page(&page)?, OWNED),
             };
             self.write_pte(
                 PTE_L2_SLOT,
@@ -583,10 +581,9 @@ impl WindowAccess {
             .checked_mul(PAGE)
             .ok_or(llfree::Error::Address)?;
         if bytes == 0
-            || mapping.addr_virtual & 0xfff != 0
-            || mapping.addr_virtual.checked_add(bytes - 1).is_none()
-            || mapping.physical_pages > mapping.virtual_pages
-            || mapping.addr_physical.is_some_and(|p| {
+            || mapping.virtual_addr & 0xfff != 0
+            || mapping.virtual_addr.checked_add(bytes - 1).is_none()
+            || mapping.physical_addr.is_some_and(|p| {
                 p.get() & 0xfff != 0
                     || p.get()
                         .checked_add(bytes)
@@ -595,17 +592,17 @@ impl WindowAccess {
         {
             return Err(llfree::Error::Address);
         }
-        self.check_free(root, mapping.addr_virtual, mapping.virtual_pages)?;
+        self.check_free(root, mapping.virtual_addr, mapping.virtual_pages)?;
         let mut table = 0;
         for i in 0..mapping.virtual_pages {
-            let address = mapping.addr_virtual + i * PAGE;
+            let address = mapping.virtual_addr + i * PAGE;
             let index = (address >> 12) & 511;
             if i == 0 || index == 0 {
                 (table, _) = self.leaf(root, address, &page)?;
             }
-            let (physical, owned) = match mapping.addr_physical {
-                Some(p) if i < mapping.physical_pages => (p.get() + i * PAGE, 0),
-                _ => (self.new_page(&page)?, OWNED),
+            let (physical, owned) = match mapping.physical_addr {
+                Some(p) => (p.get() + i * PAGE, 0),
+                None => (self.new_page(&page)?, OWNED),
             };
             self.write_pte(
                 PTE_L2_SLOT,

@@ -340,10 +340,10 @@ impl Scheduler {
             .map(
                 Window::current_root(),
                 Mapping {
-                    addr_virtual: space::SCHEDULER,
+                    virtual_addr: space::SCHEDULER,
                     virtual_pages: size_of::<Scheduler>().div_ceil(space::PAGE),
+                    physical_addr: None,
                     flags: *b"rw--g",
-                    ..Mapping::default()
                 },
                 || context.page(0), // scheduler is equaly used from all harts
             )

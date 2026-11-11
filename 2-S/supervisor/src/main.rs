@@ -621,7 +621,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                     if target.is_some() || slot != 0 {
                         return Err(tau::AllocError::AccessDenied);
                     }
-                    if !module.header.caps.frame_alloc && mapping.addr_physical.is_some() {
+                    if !module.header.caps.frame_alloc && mapping.physical_addr.is_some() {
                         return Err(tau::AllocError::AccessDenied);
                     }
                     if mapping.flags[2] != b'-' {
