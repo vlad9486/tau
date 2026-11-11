@@ -81,12 +81,23 @@ impl Root {
     }
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Mapping {
-    pub virtual_addr: usize,
-    pub virtual_pages: usize,
+    pub range: MappingRange,
     pub physical_addr: Option<NonZeroUsize>,
     pub flags: [u8; 5],
+}
+
+#[derive(Clone, Copy)]
+pub struct MappingRange {
+    pub addr: usize,
+    pub pages: usize,
+}
+
+impl MappingRange {
+    pub fn pages(&self) -> impl Iterator<Item = usize> {
+        (0..self.pages).map(|i| self.addr + i * PAGE)
+    }
 }
 
 pub fn user_range(address: usize, bytes: usize) -> bool {
@@ -493,14 +504,18 @@ impl WindowAccess {
         Ok(())
     }
 
-    pub fn range_owned(&mut self, root: Root, mut address: usize, mut pages: usize) -> bool {
+    pub fn range_owned(&mut self, root: Root, range: MappingRange) -> bool {
+        let MappingRange {
+            mut addr,
+            mut pages,
+        } = range;
         while pages != 0 {
-            let ri = addr_to_index(address);
-            let stem_offset = (address >> 12) & ((1 << 18) - 1);
+            let ri = addr_to_index(addr);
+            let stem_offset = (addr >> 12) & ((1 << 18) - 1);
             let stem_chunk = pages.min((1 << 18) - stem_offset);
             if let Some(stem) = self.root_branch(root, ri) {
                 let mut rem = stem_chunk;
-                let mut addr = address;
+                let mut addr = addr;
                 while rem != 0 {
                     let si = (addr >> 21) & 511;
                     let index = (addr >> 12) & 511;
@@ -519,7 +534,7 @@ impl WindowAccess {
                     rem -= chunk;
                 }
             }
-            address = address.wrapping_add(stem_chunk * PAGE);
+            addr = addr.wrapping_add(stem_chunk * PAGE);
             pages -= stem_chunk;
         }
         true
@@ -532,12 +547,13 @@ impl WindowAccess {
         page: impl Fn() -> Result<usize, llfree::Error>,
     ) -> Result<(), llfree::Error> {
         let bytes = mapping
-            .virtual_pages
+            .range
+            .pages
             .checked_mul(PAGE)
             .ok_or(llfree::Error::Address)?;
         if bytes == 0
-            || mapping.virtual_addr & 0xfff != 0
-            || mapping.virtual_addr.checked_add(bytes - 1).is_none()
+            || mapping.range.addr & 0xfff != 0
+            || mapping.range.addr.checked_add(bytes - 1).is_none()
             || mapping.physical_addr.is_some_and(|p| {
                 p.get() & 0xfff != 0
                     || p.get()
@@ -547,10 +563,10 @@ impl WindowAccess {
         {
             return Err(llfree::Error::Address);
         }
-        self.check_free_stem(stem, mapping.virtual_addr, mapping.virtual_pages)?;
+        self.check_free_stem(stem, mapping.range.addr, mapping.range.pages)?;
         let mut table = 0;
-        for i in 0..mapping.virtual_pages {
-            let address = mapping.virtual_addr + i * PAGE;
+        for i in 0..mapping.range.pages {
+            let address = mapping.range.addr + i * PAGE;
             let index = (address >> 12) & 511;
             if i == 0 || index == 0 {
                 (table, _) = self.leaf_stem(stem, address, &page)?;
@@ -577,12 +593,13 @@ impl WindowAccess {
         page: impl Fn() -> Result<usize, llfree::Error>,
     ) -> Result<(), llfree::Error> {
         let bytes = mapping
-            .virtual_pages
+            .range
+            .pages
             .checked_mul(PAGE)
             .ok_or(llfree::Error::Address)?;
         if bytes == 0
-            || mapping.virtual_addr & 0xfff != 0
-            || mapping.virtual_addr.checked_add(bytes - 1).is_none()
+            || mapping.range.addr & 0xfff != 0
+            || mapping.range.addr.checked_add(bytes - 1).is_none()
             || mapping.physical_addr.is_some_and(|p| {
                 p.get() & 0xfff != 0
                     || p.get()
@@ -592,10 +609,10 @@ impl WindowAccess {
         {
             return Err(llfree::Error::Address);
         }
-        self.check_free(root, mapping.virtual_addr, mapping.virtual_pages)?;
+        self.check_free(root, mapping.range.addr, mapping.range.pages)?;
         let mut table = 0;
-        for i in 0..mapping.virtual_pages {
-            let address = mapping.virtual_addr + i * PAGE;
+        for i in 0..mapping.range.pages {
+            let address = mapping.range.addr + i * PAGE;
             let index = (address >> 12) & 511;
             if i == 0 || index == 0 {
                 (table, _) = self.leaf(root, address, &page)?;

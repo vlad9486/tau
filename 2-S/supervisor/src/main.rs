@@ -628,7 +628,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                         return Err(tau::AllocError::AccessDenied);
                     }
                 }
-                if target.is_none() && slot == 0 && module.overlaps_stem(msg[3], msg[4]) {
+                if target.is_none() && slot == 0 && module.overlaps_stem(mapping.range) {
                     return Err(tau::AllocError::AccessDenied);
                 };
                 space::map_pages(window, hart_id, context, module, mapping, target, slot)
@@ -640,32 +640,22 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
         }
         Ok(tau::Call::Unmap { slot }) => {
             let res = (|| {
-                space::validate_unmap(msg[2], msg[3])?;
+                let range = space::validate_unmap(msg[2], msg[3])?;
                 let target = NonZero::new(msg[1]);
-                if !local.module.header.caps.loader {
+                let module = local.module;
+                if !module.header.caps.loader {
                     if target.is_some() || slot != 0 {
                         return Err(tau::FreeError::AccessDenied);
                     }
                     let root = space::Window::current_root();
-                    if !local.module.header.caps.frame_alloc
-                        && !window.range_owned(root, msg[2], msg[3])
-                    {
+                    if !module.header.caps.frame_alloc && !window.range_owned(root, range) {
                         return Err(tau::FreeError::AccessDenied);
                     }
                 }
-                if target.is_none() && slot == 0 && local.module.overlaps_stem(msg[2], msg[3]) {
+                if target.is_none() && slot == 0 && module.overlaps_stem(range) {
                     return Err(tau::FreeError::AccessDenied);
                 };
-                space::unmap_pages(
-                    window,
-                    hart_id,
-                    context,
-                    local.module,
-                    msg[2],
-                    msg[3],
-                    target,
-                    slot,
-                )
+                space::unmap_pages(window, hart_id, context, module, range, target, slot)
             })();
 
             msg[0] = match res {

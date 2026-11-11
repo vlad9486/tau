@@ -11,7 +11,7 @@ use core::{
 };
 
 use super::{
-    space::{self, WindowAccess},
+    space::{self, WindowAccess, MappingRange},
     Context,
 };
 
@@ -192,9 +192,9 @@ impl Module {
 
     /// Chek if the `address` range overlaps protected regions.
     /// If it does, the memory operation is invalid at certain condition.
-    pub fn overlaps_stem(&self, address: usize, _pages: usize) -> bool {
+    pub fn overlaps_stem(&self, range: MappingRange) -> bool {
         // keep `_pages` parameter, we might need it in future
-        let first_index = space::addr_to_index(address);
+        let first_index = space::addr_to_index(range.addr);
         const _: () = {
             assert!(space::ROOT_INDEX == 0);
             assert!(space::BINDING_INDEX == 1);

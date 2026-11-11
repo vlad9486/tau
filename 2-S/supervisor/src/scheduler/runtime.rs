@@ -340,8 +340,10 @@ impl Scheduler {
             .map(
                 Window::current_root(),
                 Mapping {
-                    virtual_addr: space::SCHEDULER,
-                    virtual_pages: size_of::<Scheduler>().div_ceil(space::PAGE),
+                    range: space::MappingRange {
+                        addr: space::SCHEDULER,
+                        pages: size_of::<Scheduler>().div_ceil(space::PAGE),
+                    },
                     physical_addr: None,
                     flags: *b"rw--g",
                 },

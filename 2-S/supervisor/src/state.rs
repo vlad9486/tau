@@ -7,7 +7,7 @@ use core::num::NonZero;
 use super::{
     llfree,
     matter::{ModuleDescriptor, ModuleContext, Module, ModuleSpec, Capabilities},
-    space::{Root, Mapping, Window, WindowAccess, PAGE, ROOT_INDEX},
+    space::{Root, Mapping, MappingRange, Window, WindowAccess, PAGE, ROOT_INDEX},
 };
 
 pub struct Context {
@@ -106,8 +106,10 @@ pub unsafe fn init(
     let root = Window::current_root();
 
     let mapping = Mapping {
-        virtual_addr: module_context.addr(),
-        virtual_pages: size_of::<ModuleContext>().div_ceil(PAGE),
+        range: MappingRange {
+            addr: module_context.addr(),
+            pages: size_of::<ModuleContext>().div_ceil(PAGE),
+        },
         physical_addr: None,
         flags: *b"rw---",
     };
@@ -124,8 +126,10 @@ pub unsafe fn init(
         .block(hart_id, pages.next_power_of_two().ilog2())
         .map_err(InitError::Allocator)?;
     let mapping = Mapping {
-        virtual_addr: module.addr(),
-        virtual_pages: pages,
+        range: MappingRange {
+            addr: module.addr(),
+            pages,
+        },
         physical_addr: NonZero::new(module_physical),
         flags: *b"rw---",
     };
@@ -164,14 +168,18 @@ pub unsafe fn init_hart(
     let desc = module.header.descriptor;
     for mapping in [
         Mapping {
-            virtual_addr: (desc.stack_pages * PAGE).wrapping_neg(),
-            virtual_pages: desc.stack_pages,
+            range: MappingRange {
+                addr: (desc.stack_pages * PAGE).wrapping_neg(),
+                pages: desc.stack_pages,
+            },
             physical_addr: None,
             flags: *b"rw-u-",
         },
         Mapping {
-            virtual_addr: module_context.addr(),
-            virtual_pages: size_of::<ModuleContext>().div_ceil(PAGE),
+            range: MappingRange {
+                addr: module_context.addr(),
+                pages: size_of::<ModuleContext>().div_ceil(PAGE),
+            },
             physical_addr: None,
             flags: *b"rw---",
         },

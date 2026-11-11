@@ -5,7 +5,7 @@
 use core::{arch, mem, num::NonZero, ptr};
 
 use super::{
-    space::{self, Window, WindowAccess, Mapping},
+    space::{self, Window, WindowAccess, Mapping, MappingRange},
     module::{Module, ModuleDescriptor},
     Context,
 };
@@ -127,20 +127,26 @@ pub fn spawn(
             .map_err(|_| tau::SpawnError::OutOfMemory)?;
         for mapping in [
             Mapping {
-                virtual_addr: (desc.stack_pages * space::PAGE).wrapping_neg(),
-                virtual_pages: desc.stack_pages,
+                range: MappingRange {
+                    addr: (desc.stack_pages * space::PAGE).wrapping_neg(),
+                    pages: desc.stack_pages,
+                },
                 physical_addr: None,
                 flags: *b"rw-u-",
             },
             Mapping {
-                virtual_addr: space::MODULE_CONTEXT,
-                virtual_pages: size_of::<ModuleContext>().div_ceil(space::PAGE),
+                range: MappingRange {
+                    addr: space::MODULE_CONTEXT,
+                    pages: size_of::<ModuleContext>().div_ceil(space::PAGE),
+                },
                 physical_addr: None,
                 flags: *b"rw---",
             },
             Mapping {
-                virtual_addr: space::MODULE,
-                virtual_pages: size_of::<Module>().div_ceil(space::PAGE),
+                range: MappingRange {
+                    addr: space::MODULE,
+                    pages: size_of::<Module>().div_ceil(space::PAGE),
+                },
                 physical_addr: NonZero::new(desc.physical),
                 flags: *b"rw---",
             },
@@ -186,8 +192,10 @@ pub fn spawn_hart(
             .map(
                 root,
                 Mapping {
-                    virtual_addr: space::MODULE,
-                    virtual_pages: size_of::<Module>().div_ceil(space::PAGE),
+                    range: MappingRange {
+                        addr: space::MODULE,
+                        pages: size_of::<Module>().div_ceil(space::PAGE),
+                    },
                     physical_addr: NonZero::new(desc.physical),
                     flags: *b"rw---",
                 },

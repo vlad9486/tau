@@ -6,14 +6,14 @@ use core::{num::NonZero, arch};
 
 use super::{
     llfree, Context, Module,
-    vmem::{self, Mapping, Window, WindowAccess},
+    vmem::{self, Mapping, Window, WindowAccess, MappingRange},
 };
 
-fn valid_pages(address: usize, pages: usize) -> bool {
-    address & 0xfff == 0
+fn valid_pages(MappingRange { addr, pages }: MappingRange) -> bool {
+    addr & 0xfff == 0
         && pages
             .checked_mul(vmem::PAGE)
-            .is_some_and(|bytes| vmem::user_range(address, bytes))
+            .is_some_and(|bytes| vmem::user_range(addr, bytes))
 }
 
 fn decode_flags(flags: usize) -> Option<[u8; 5]> {
@@ -61,24 +61,23 @@ fn validate_target(
     window: &mut WindowAccess,
     context: &Context,
     module: &Module,
-    virtual_addr: usize,
-    virtual_pages: usize,
+    MappingRange { addr, pages }: MappingRange,
     target: Option<NonZero<usize>>,
     slot: u16,
 ) -> Result<usize, ()> {
-    let last = virtual_addr + (virtual_pages * vmem::PAGE - 1);
+    let last = addr + (pages * vmem::PAGE - 1);
     if slot == 0 {
         let target = target.ok_or(())?;
         let physical = validate_module_handle(context, target.get()).map_err(|_| ())?;
         let dep = window.read_module_descriptor(physical);
-        if vmem::addr_to_index(virtual_addr) != vmem::ROOT_INDEX
+        if vmem::addr_to_index(addr) != vmem::ROOT_INDEX
             || vmem::addr_to_index(last) != vmem::ROOT_INDEX
         {
             return Err(());
         }
         Ok(dep.stem_phys)
     } else {
-        if vmem::addr_to_index(virtual_addr) != vmem::BINDING_INDEX
+        if vmem::addr_to_index(addr) != vmem::BINDING_INDEX
             || vmem::addr_to_index(last) != vmem::BINDING_INDEX
         {
             return Err(());
@@ -98,15 +97,17 @@ fn validate_target(
 /// Validate memory mapping request.
 pub fn validate_map(
     physical_addr: Option<NonZero<usize>>,
-    virtual_addr: usize,
-    virtual_pages: usize,
+    addr: usize,
+    pages: usize,
     raw_flags: usize,
 ) -> Result<Mapping, tau::AllocError> {
+    let range = MappingRange { addr, pages };
     let flags = decode_flags(raw_flags).ok_or(tau::AllocError::AccessDenied)?;
-    if !valid_pages(virtual_addr, virtual_pages)
+    if !valid_pages(range)
         || physical_addr.is_some_and(|p| {
             p.get() & 0xfff != 0
-                || virtual_pages
+                || range
+                    .pages
                     .checked_mul(vmem::PAGE)
                     .and_then(|n| p.get().checked_add(n))
                     .is_none_or(|end| end > (1usize << 56))
@@ -116,8 +117,7 @@ pub fn validate_map(
     }
 
     let mapping = Mapping {
-        virtual_addr,
-        virtual_pages,
+        range,
         physical_addr,
         flags,
     };
@@ -134,26 +134,15 @@ pub fn map_pages(
     target: Option<NonZero<usize>>,
     slot: u16,
 ) -> Result<(), tau::AllocError> {
-    let virtual_addr = mapping.virtual_addr;
-    let virtual_pages = mapping.virtual_pages;
     if target.is_some() || slot != 0 {
-        let stem = validate_target(
-            window,
-            context,
-            module,
-            virtual_addr,
-            virtual_pages,
-            target,
-            slot,
-        )
-        .map_err(|()| tau::AllocError::InvalidAddress)?;
+        let stem = validate_target(window, context, module, mapping.range, target, slot)
+            .map_err(|()| tau::AllocError::InvalidAddress)?;
         if let Err(error) = window.map_stem(stem, mapping, || context.page(hart_id)) {
             if !matches!(
                 error,
                 llfree::Error::Address | llfree::Error::InvalidArgument
             ) {
-                for i in 0..virtual_pages {
-                    let virt = virtual_addr + i * vmem::PAGE;
+                for virt in mapping.range.pages() {
                     let _ = window.unmap_stem(stem, None, virt, |page| context.free(hart_id, page));
                 }
             }
@@ -171,12 +160,13 @@ pub fn map_pages(
 }
 
 /// Validate memory unmapping request.
-pub fn validate_unmap(virtual_addr: usize, number_of_pages: usize) -> Result<(), tau::FreeError> {
-    if !valid_pages(virtual_addr, number_of_pages) {
+pub fn validate_unmap(addr: usize, pages: usize) -> Result<MappingRange, tau::FreeError> {
+    let range = MappingRange { addr, pages };
+    if !valid_pages(range) {
         return Err(tau::FreeError::AlreadyFree);
     }
 
-    Ok(())
+    Ok(range)
 }
 
 pub fn unmap_pages(
@@ -184,33 +174,20 @@ pub fn unmap_pages(
     hart_id: usize,
     context: &Context,
     module: &Module,
-    virtual_addr: usize,
-    virtual_pages: usize,
+    range: MappingRange,
     target: Option<NonZero<usize>>,
     slot: u16,
 ) -> Result<(), tau::FreeError> {
     if target.is_some() || slot != 0 {
-        let stem = validate_target(
-            window,
-            context,
-            module,
-            virtual_addr,
-            virtual_pages,
-            target,
-            slot,
-        )
-        .map_err(|()| tau::FreeError::InvalidAddress)?;
-        for i in 0..virtual_pages {
-            let _ = window.unmap_stem(stem, None, virtual_addr + i * vmem::PAGE, |page| {
-                context.free(hart_id, page)
-            });
+        let stem = validate_target(window, context, module, range, target, slot)
+            .map_err(|()| tau::FreeError::InvalidAddress)?;
+        for virt in range.pages() {
+            let _ = window.unmap_stem(stem, None, virt, |page| context.free(hart_id, page));
         }
     } else {
         let root = Window::current_root();
-        for i in 0..virtual_pages {
-            let _ = window.unmap(root, virtual_addr + i * vmem::PAGE, |page| {
-                context.free(hart_id, page)
-            });
+        for virt in range.pages() {
+            let _ = window.unmap(root, virt, |page| context.free(hart_id, page));
         }
         return Ok(());
     }
@@ -231,10 +208,8 @@ fn alloc_pages(
             error,
             llfree::Error::Address | llfree::Error::InvalidArgument
         ) {
-            for i in 0..mapping.virtual_pages {
-                let _ = window.unmap(root, mapping.virtual_addr + i * vmem::PAGE, |page| {
-                    context.free(hart_id, page)
-                });
+            for virt in mapping.range.pages() {
+                let _ = window.unmap(root, virt, |page| context.free(hart_id, page));
             }
         }
         return Err(map_err(error));
