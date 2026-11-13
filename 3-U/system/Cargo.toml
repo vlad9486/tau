@@ -18,7 +18,6 @@ nightly = []
 
 [dependencies]
 elf = { version = "0.8.0", default-features = false }
-bitflags = { version = "2.13" }
 noop-waker = { version = "0.1.0" }
 smallvec = { version = "1.16.2" }
 

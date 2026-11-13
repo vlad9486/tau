@@ -4,5 +4,5 @@
 
 [toolchain]
 components = ["clippy", "rustfmt"]
-channel = "1.99.1"
+channel = "1.100.0"
 targets = ["riscv64imac-unknown-none-elf"]
