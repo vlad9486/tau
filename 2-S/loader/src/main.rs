@@ -564,10 +564,6 @@ fn load_system_elf(
     if manifest.stack_pages == 0 || manifest.stack_pages > 256 {
         return Err(Error::Address);
     }
-    let stack_start = (manifest.stack_pages << 12).wrapping_neg();
-    for page_idx in 0..manifest.stack_pages {
-        map_page(stack_start + (page_idx << 12), b"rw-u-")?;
-    }
 
     unsafe { arch::asm!("fence.i") };
     Ok(matter::ModuleSpec {

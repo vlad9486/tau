@@ -92,32 +92,17 @@ pub enum InitError {
 }
 
 /// # Safety
-/// Both pointers must denote aligned linker-provided bootstrap addresses which
-/// this function maps and initializes with exclusive access. Shared tables must
+/// The pointer must denote aligned linker-provided bootstrap address which
+/// this function maps and initializes with exclusive access. `module` must
 /// be initialized only once for this module.
 pub unsafe fn init(
     window: &mut WindowAccess,
     hart_id: usize,
-    module_context: *mut ModuleContext,
     module: *mut Module,
     context: &Context,
-) -> Result<(Root, usize), InitError> {
+) -> Result<(), InitError> {
     let boot = context.boot.validate().map_err(|_| InitError::Manifest)?;
     let root = Window::current_root();
-
-    let mapping = Mapping {
-        range: MappingRange {
-            addr: module_context.addr(),
-            pages: size_of::<ModuleContext>().div_ceil(PAGE),
-        },
-        physical_addr: None,
-        flags: *b"rw---",
-    };
-
-    window
-        .map(root, mapping, || context.page(hart_id))
-        .map_err(|_| tau::AllocError::OutOfMemory)
-        .map_err(InitError::Alloc)?;
 
     // Bootstrap constructs the initial module tables once. Future context
     // creation must reuse their backing pages, not allocate/reset these tables.
@@ -146,16 +131,14 @@ pub unsafe fn init(
         stack_pages: boot.stack_pages,
         physical: module_physical,
     };
-    unsafe {
-        Module::init_at(module, descriptor, boot.wait_table, Capabilities::LOADER);
-        ModuleContext::init_zeroed(module_context, root, boot.entry);
-    }
-    Ok((root, boot.entry))
+    unsafe { Module::init_at(module, descriptor, boot.wait_table, Capabilities::LOADER) };
+
+    Ok(())
 }
 
 /// # Safety
 /// `module_context` must denote the aligned linker-provided context address
-/// unmapped in the secondary hart's fresh root, and `module` must already map
+/// unmapped in the calling hart's fresh root, and `module` must already map
 /// the shared bootstrap module tables.
 pub unsafe fn init_hart(
     window: &mut WindowAccess,
@@ -163,7 +146,7 @@ pub unsafe fn init_hart(
     module_context: *mut ModuleContext,
     module: &Module,
     context: &Context,
-) -> Result<(Root, usize), InitError> {
+) -> Result<usize, InitError> {
     let root = Window::current_root();
     let desc = module.header.descriptor;
     for mapping in [
@@ -192,5 +175,5 @@ pub unsafe fn init_hart(
     unsafe {
         ModuleContext::init_zeroed(module_context, root, desc.entry);
     }
-    Ok((root, desc.entry))
+    Ok(desc.entry)
 }

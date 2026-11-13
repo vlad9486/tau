@@ -164,28 +164,27 @@ extern "C" fn _start() -> ! {
 
 extern "C" fn init(hart_id: usize, info: usize, info_pages: usize) -> ! {
     let mut window = unsafe { space::WindowAccess::new(&raw const __WINDOW) };
-    let module = UnsafeCell::raw_get(&raw const __MODULE_CONTEXT);
-    let tables = UnsafeCell::raw_get(&raw const __MODULE);
+    let module_context = UnsafeCell::raw_get(&raw const __MODULE_CONTEXT);
+    let module = UnsafeCell::raw_get(&raw const __MODULE);
     let scheduler = UnsafeCell::raw_get(&raw const __SCHEDULER);
     let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
 
     let root = window.init(hart_id);
     writeln!(sbi::Console, "SU: {}\r", window.hart()).unwrap_or_default();
 
-    let (satp, sepc) = if info == 0 && info_pages == 0 {
-        let tables = unsafe { &*tables };
-        let (satp, sepc) =
-            su_try(unsafe { state::init_hart(&mut window, hart_id, module, tables, context) });
-        let thread = ThreadState::runnable(hart_id, root, [0; 6], ReturnKind::Syscall);
+    let additional_hart = info == 0 && info_pages == 0;
+    if !additional_hart {
+        su_try(unsafe { state::init(&mut window, hart_id, module, context) });
+    }
+    let sepc = su_try(unsafe {
+        state::init_hart(&mut window, hart_id, module_context, &*module, context)
+    });
+    let thread = ThreadState::runnable(hart_id, root, [0; 6], ReturnKind::Syscall);
+    if additional_hart {
         su_try(unsafe { (&*scheduler).init_hart(thread) });
-        (satp, sepc)
     } else {
-        let (satp, sepc) =
-            su_try(unsafe { state::init(&mut window, hart_id, module, tables, context) });
-        let thread = ThreadState::runnable(hart_id, root, [0; 6], ReturnKind::Syscall);
-        unsafe { su_try(Scheduler::init(scheduler, &mut window, context, thread)) };
-        (satp, sepc)
-    };
+        su_try(unsafe { Scheduler::init(scheduler, &mut window, context, thread) });
+    }
     unsafe {
         arch::asm! {
             "li t0, 0x100",
@@ -204,7 +203,7 @@ extern "C" fn init(hart_id: usize, info: usize, info_pages: usize) -> ! {
             in("a1") hart_id,
             in("a2") info,
             in("a3") info_pages,
-            in("t2") satp.0.get(),
+            in("t2") root.0.get(),
             in("t3") sepc,
         }
     }
