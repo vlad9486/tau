@@ -374,12 +374,12 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
     let hart_id = window.hart().hart_id;
     if cause == INTERRUPT_BIT | SUPERVISOR_TIMER && scheduler.active(hart_id) {
         let selected = scheduler::preempt(&mut window, local.module, scheduler);
-        resume_scheduled(&window, local, selected)
+        resume_scheduled(local, selected)
     } else if cause == INTERRUPT_BIT | SUPERVISOR_EXTERNAL && scheduler.active(hart_id) {
         csr::rc!("sie", 1 << 9);
         scheduler::notify_hardware_interrupt(&mut window, local.module, scheduler, hart_id);
         let selected = scheduler::preempt(&mut window, local.module, scheduler);
-        resume_scheduled(&window, local, selected)
+        resume_scheduled(local, selected)
     } else if cause & INTERRUPT_BIT == 0 {
         if !local.module.header.caps.pure {
             local.module.header.poisoned.store(true, Ordering::Release);
@@ -424,7 +424,7 @@ fn respond_code(code: u16, keep: bool, a1: usize, a2: usize, a3: usize, a4: usiz
         }
         respond_exit();
     };
-    let flush = space::access().switch_flush(local.module_context.header.root, caller);
+    let flush = local.module_context.header.root.switch_flush(caller);
     let _local = unsafe { mmu::switch(local, caller, flush) };
     restore_syscall_hot(usize::from(code), a1, a2, a3, a4, a5)
 }
@@ -438,7 +438,7 @@ fn respond_exit() -> ! {
     let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
     scheduler::exit(&mut window, local.module, scheduler, hart_id);
     let selected = scheduler::dispatch(&mut window, local.module, scheduler, hart_id);
-    resume_scheduled(&window, local, selected)
+    resume_scheduled(local, selected)
 }
 
 #[unsafe(link_section = ".text.hot")]
@@ -452,7 +452,7 @@ extern "C" fn invoke(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: 
         invoke_slow(slot, a1, a2, a3, a4, a5, arg);
     };
     let caller = local.module_context.header.root;
-    let flush = space::access().switch_flush(caller, root);
+    let flush = caller.switch_flush(root);
     // The per-hart window/stack and global supervisor code retain the same
     // backing in both roots. Moving `local` ends all pre-switch borrows.
     let local = unsafe { mmu::switch(local, root, flush) };
@@ -471,7 +471,7 @@ extern "C" fn invoke(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: 
 #[inline(never)]
 fn invoke_poisoned(caller: space::Root) -> ! {
     let local = unsafe { local_access() };
-    let flush = space::access().switch_flush(local.module_context.header.root, caller);
+    let flush = local.module_context.header.root.switch_flush(caller);
     let _local = unsafe { mmu::switch(local, caller, flush) };
     restore_syscall(tau::ModuleError::Poisoned.encode(), 0, 0, 0, 0, 0)
 }
@@ -485,7 +485,7 @@ fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize,
         Err(error) => restore_syscall(error.encode(), 0, 0, 0, 0, 0),
     };
     let caller = local.module_context.header.root;
-    let flush = space::access().switch_flush(caller, root);
+    let flush = caller.switch_flush(root);
     let local = unsafe { mmu::switch(local, root, flush) };
     unsafe {
         matter::ModuleContext::init_zeroed(ptr::from_mut(local.module_context), root, entry);
@@ -523,7 +523,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 Ok(None) => {
                     let selected =
                         scheduler::dispatch(&mut window, local.module, scheduler, hart_id);
-                    resume_scheduled(&mut window, local, selected)
+                    resume_scheduled(local, selected)
                 }
                 Err(error) => {
                     msg = [0; 6];
@@ -732,10 +732,10 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
     restore_syscall(a0, a1, a2, a3, a4, a5)
 }
 
-fn resume_scheduled(window: &space::WindowAccess, local: mmu::Local<'_>, selected: Dispatch) -> ! {
+fn resume_scheduled(local: mmu::Local<'_>, selected: Dispatch) -> ! {
     let source = space::Window::current_root();
     let local = if source != selected.root {
-        let flush = window.switch_flush(source, selected.root);
+        let flush = source.switch_flush(selected.root);
         unsafe { mmu::switch(local, selected.root, flush) }
     } else {
         local

@@ -81,6 +81,17 @@ impl Root {
     pub fn page(self) -> usize {
         (self.0.get() & ((1 << 44) - 1)) << 12
     }
+
+    /// Two different roots sharing ASID zero always need a fence.
+    #[inline(always)]
+    pub fn switch_flush(self, destination: Self) -> bool {
+        if (self.asid() | destination.asid()) == 0 {
+            hint::cold_path();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -138,7 +149,6 @@ pub struct Padded<T> {
 #[repr(C, align(4096))]
 pub struct Hart {
     mask: u16,
-    flush: bool,
     next_asid: u16,
     pub hart_id: usize,
     pub allocator: llfree::Lower<'static>,
@@ -149,8 +159,8 @@ pub struct Hart {
 
 impl fmt::Display for Hart {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Hart { mask, flush, .. } = self;
-        writeln!(f, "ASID mask=0x{mask:04x} force_flush={flush}")
+        let Hart { mask, .. } = self;
+        writeln!(f, "ASID mask=0x{mask:04x}")
     }
 }
 
@@ -247,7 +257,6 @@ impl Hart {
     ) -> Self {
         Self {
             mask: 0,
-            flush: true,
             next_asid: 1,
             hart_id,
             allocator,
@@ -336,24 +345,9 @@ impl WindowAccess {
             arch::asm!("csrw satp, {0}", in(reg) original.0.get(), options(nostack));
         }
         sfence_vma(None, None);
-        let hart = self.hart_mut();
-        hart.mask = mask;
-        hart.flush = mask == 0;
+        self.hart_mut().mask = mask;
 
         original
-    }
-
-    /// Two different roots sharing ASID zero always need a fence. Check the roots
-    /// first so an untagged MMU need not translate/load the separate hart page on
-    /// every switch. Keep the hart policy for tagged switches and forced flushing.
-    #[inline(always)]
-    pub fn switch_flush(&self, source: Root, destination: Root) -> bool {
-        if (source.asid() | destination.asid()) == 0 || self.hart().flush {
-            hint::cold_path();
-            true
-        } else {
-            false
-        }
     }
 
     /// Allocate a hart-local ASID tag for a new context root.
