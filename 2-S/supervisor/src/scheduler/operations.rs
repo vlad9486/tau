@@ -15,13 +15,12 @@ use super::{
 };
 
 pub fn spawn(
-    window: &mut WindowAccess,
     module: &Module,
-    context: &Context,
     scheduler: &Scheduler,
     entry: usize,
     message: [usize; 6],
 ) -> Result<(), SpawnError> {
+    let mut window = space::access();
     let hart = window.hart().hart_id;
     let mut desc = module.header.descriptor;
     if entry & 1 != 0
@@ -35,14 +34,14 @@ pub fn spawn(
     desc.entry = entry;
     let current = Window::current_root();
     let binding_stem_phys = window.root_branch(current, space::BINDING_INDEX);
-    let root = matter::spawn(window, context, desc, binding_stem_phys)?;
+    let root = matter::spawn(desc, binding_stem_phys)?;
     let mut message = message;
     message[0] = 0;
     let thread = ThreadState::runnable(hart, root, message, Resume::Entry(entry));
     let mut scheduler = scheduler.lock();
     if scheduler.count == scheduler.threads.len() {
         drop(scheduler);
-        let _ = window.destroy(root, |page| context.free(hart, page));
+        let _ = window.destroy(root);
         window.release_tag(root.asid());
         return Err(SpawnError::NoSlots);
     }
@@ -81,10 +80,9 @@ pub fn start_hart(
             return Err(SpawnError::NoSlots);
         }
     }
-    let root = matter::spawn_hart(window, context, module.header.descriptor)?;
-    if sbi::hart_start(hart_id, context.base_addr, root.0.get()).is_err() {
-        let local_hart = window.hart().hart_id;
-        let _ = window.destroy(root, |page| context.free(local_hart, page));
+    let root = matter::spawn_hart(context, module.header.descriptor, hart_id)?;
+    if sbi::hart_start(hart_id, window.hart().base_addr, root.0.get()).is_err() {
+        let _ = window.destroy(root);
         return Err(SpawnError::InvalidHart);
     }
     Ok(())

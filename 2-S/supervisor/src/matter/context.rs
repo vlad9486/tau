@@ -5,7 +5,7 @@
 use core::{arch, mem, num::NonZero, ptr};
 
 use super::{
-    space::{self, Window, WindowAccess, Mapping, MappingRange},
+    space::{self, Window, Mapping, MappingRange},
     module::{Module, ModuleDescriptor},
     Context,
 };
@@ -87,8 +87,6 @@ impl ModuleContext {
 }
 
 pub fn invoke(
-    window: &mut WindowAccess,
-    context: &Context,
     module_context: &mut ModuleContext,
     module: &Module,
     slot: u16,
@@ -96,8 +94,9 @@ pub fn invoke(
     let (descriptor, binding_stem_phys) = module
         .get_dependency(slot)
         .ok_or(tau::ModuleError::InvalidDependency)?;
+    let mut window = space::access();
     let desc = window.read_module_descriptor(descriptor);
-    let root = spawn(window, context, desc, Some(binding_stem_phys))?;
+    let root = spawn(desc, Some(binding_stem_phys))?;
     module_context.retain_dependency(slot, root);
     Ok((root, desc.entry))
 }
@@ -105,15 +104,13 @@ pub fn invoke(
 /// Construct a fresh module context without publishing it. Successful storage is
 /// retained until reboot; all failed constructions reclaim their private pages.
 pub fn spawn(
-    window: &mut WindowAccess,
-    context: &Context,
     desc: ModuleDescriptor,
     binding_stem_phys: Option<usize>,
 ) -> Result<space::Root, tau::SpawnError> {
+    let mut window = space::access();
     let caller = Window::current_root();
-    let hart = window.hart().hart_id;
     let tag = window.allocate_tag().ok_or(tau::SpawnError::OutOfMemory)?;
-    let Ok(root) = window.create(tag, || context.page(hart)) else {
+    let Ok(root) = window.create(tag) else {
         window.release_tag(tag);
         return Err(tau::SpawnError::OutOfMemory);
     };
@@ -123,7 +120,7 @@ pub fn spawn(
             window.attach(root, space::BINDING_INDEX, binding_stem_phys);
         }
         window
-            .supervisor_mappings(caller, root, || context.page(hart))
+            .supervisor_mappings(caller, root)
             .map_err(|_| tau::SpawnError::OutOfMemory)?;
         for mapping in [
             Mapping {
@@ -152,14 +149,14 @@ pub fn spawn(
             },
         ] {
             window
-                .map(root, mapping, || context.page(hart))
+                .map(root, mapping)
                 .map_err(|_| tau::SpawnError::OutOfMemory)?;
         }
         unsafe { arch::asm!("fence.i", options(nostack)) };
         Ok(root)
     })();
     if result.is_err() {
-        let _ = window.destroy(root, |page| context.free(hart, page));
+        let _ = window.destroy(root);
         window.release_tag(tag);
     }
     result
@@ -167,26 +164,25 @@ pub fn spawn(
 
 /// Construct a fresh root and private per-hart window/stack for a secondary hart.
 pub fn spawn_hart(
-    window: &mut WindowAccess,
     context: &Context,
     desc: ModuleDescriptor,
+    hart_id: usize,
 ) -> Result<space::Root, tau::SpawnError> {
+    // TODO: allocate everything for the another `hart_id`, not this
+    let mut window = space::access();
     let caller = Window::current_root();
-    let hart = window.hart().hart_id;
-    let loader_index = space::addr_to_index(context.base_addr);
+    let loader_index = space::addr_to_index(window.hart().base_addr);
     let loader_stem = window
         .root_branch(context.bootstrap_root, loader_index)
         .ok_or(tau::SpawnError::InvalidEntry)?;
-    let root = window
-        .create(0, || context.page(hart))
-        .map_err(|_| tau::SpawnError::OutOfMemory)?;
+    let root = window.create(0).map_err(|_| tau::SpawnError::OutOfMemory)?;
     let result = (|| {
         window.attach(root, space::ROOT_INDEX, desc.stem_phys);
         if loader_index != space::ROOT_INDEX {
             window.attach(root, loader_index, loader_stem);
         }
         window
-            .hart_mappings(caller, root, || context.page(hart))
+            .hart_mappings(caller, root, hart_id)
             .map_err(|_| tau::SpawnError::OutOfMemory)?;
         window
             .map(
@@ -199,13 +195,12 @@ pub fn spawn_hart(
                     physical_addr: NonZero::new(desc.physical),
                     flags: *b"rw---",
                 },
-                || context.page(hart),
             )
             .map_err(|_| tau::SpawnError::OutOfMemory)?;
         Ok(root)
     })();
     if result.is_err() {
-        let _ = window.destroy(root, |page| context.free(hart, page));
+        let _ = window.destroy(root);
     }
     result
 }

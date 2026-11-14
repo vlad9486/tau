@@ -17,7 +17,6 @@ use super::{
     sbi, csr,
     thread::{Phase, Resume, ThreadState},
     matter::{WaitRecord, Module},
-    Context,
     space::{self, Mapping, Root, Window, WindowAccess},
 };
 
@@ -330,13 +329,8 @@ impl Scheduler {
     /// # Safety
     /// Interrupts must be disabled, no other hart may be executing this runtime.
     /// No reference to the scheduler storage may exist before this initialization.
-    pub unsafe fn init(
-        this: *mut Self,
-        window: &mut WindowAccess,
-        context: &Context,
-        mut thread: ThreadState,
-    ) -> Result<(), tau::AllocError> {
-        window
+    pub unsafe fn init(this: *mut Self, mut thread: ThreadState) -> Result<(), tau::AllocError> {
+        space::access()
             .map(
                 Window::current_root(),
                 Mapping {
@@ -347,7 +341,6 @@ impl Scheduler {
                     physical_addr: None,
                     flags: *b"rw--g",
                 },
-                || context.page(0), // scheduler is equaly used from all harts
             )
             .map_err(|_| tau::AllocError::OutOfMemory)?;
         let hart_id = thread.hart;

@@ -5,83 +5,15 @@
 use core::num::NonZero;
 
 use super::{
-    llfree,
+    space, llfree,
     matter::{ModuleDescriptor, ModuleContext, Module, ModuleSpec, Capabilities},
-    space::{Root, Mapping, MappingRange, Window, WindowAccess, PAGE, ROOT_INDEX},
+    space::{Root, Mapping, MappingRange, Window, PAGE, ROOT_INDEX},
 };
 
 pub struct Context {
-    pub allocator: llfree::Lower<'static>,
-    pub dma_allocator: Option<llfree::Lower<'static>>,
-    pub base_addr: usize,
-    pub dma_base_addr: usize,
     /// Kept independently of the active satp for later loader/hart startup.
     pub bootstrap_root: Root,
     pub boot: ModuleSpec,
-}
-
-impl Context {
-    pub fn block_zone(
-        &self,
-        hart_id: usize,
-        order: u32,
-        zone: tau::MemoryZone,
-    ) -> Result<usize, llfree::Error> {
-        let (allocator, base_addr) = match zone {
-            tau::MemoryZone::Normal => (&self.allocator, self.base_addr),
-            tau::MemoryZone::Dma => (
-                self.dma_allocator.as_ref().ok_or(llfree::Error::Memory)?,
-                self.dma_base_addr,
-            ),
-        };
-        let frame = allocator.alloc(hart_id, order)?.0;
-        Ok(base_addr + (frame << 12))
-    }
-
-    pub fn block(&self, hart_id: usize, order: u32) -> Result<usize, llfree::Error> {
-        self.block_zone(hart_id, order, tau::MemoryZone::Normal)
-    }
-
-    pub fn page(&self, hart_id: usize) -> Result<usize, llfree::Error> {
-        self.block(hart_id, 0)
-    }
-
-    pub fn free_block_zone(
-        &self,
-        hart_id: usize,
-        page: usize,
-        order: u32,
-        zone: tau::MemoryZone,
-    ) -> Result<(), llfree::Error> {
-        let (allocator, base_addr) = match zone {
-            tau::MemoryZone::Normal => (&self.allocator, self.base_addr),
-            tau::MemoryZone::Dma => (
-                self.dma_allocator.as_ref().ok_or(llfree::Error::Address)?,
-                self.dma_base_addr,
-            ),
-        };
-        let offset = page.checked_sub(base_addr).ok_or(llfree::Error::Address)?;
-        if order > llfree::MAX_ORDER || offset & ((1usize << (12 + order)) - 1) != 0 {
-            return Err(llfree::Error::Address);
-        }
-        let frame = offset >> 12;
-        let count = 1usize << order;
-        if frame
-            .checked_add(count)
-            .is_none_or(|end| end > allocator.frames())
-        {
-            return Err(llfree::Error::Address);
-        }
-        allocator.put(hart_id, llfree::FrameId(frame), order)
-    }
-
-    pub fn free_block(&self, hart_id: usize, page: usize, order: u32) -> Result<(), llfree::Error> {
-        self.free_block_zone(hart_id, page, order, tau::MemoryZone::Normal)
-    }
-
-    pub fn free(&self, hart_id: usize, page: usize) -> Result<(), llfree::Error> {
-        self.free_block(hart_id, page, 0)
-    }
 }
 
 #[derive(Debug)]
@@ -95,20 +27,17 @@ pub enum InitError {
 /// The pointer must denote aligned linker-provided bootstrap address which
 /// this function maps and initializes with exclusive access. `module` must
 /// be initialized only once for this module.
-pub unsafe fn init(
-    window: &mut WindowAccess,
-    hart_id: usize,
-    module: *mut Module,
-    context: &Context,
-) -> Result<(), InitError> {
+pub unsafe fn init(module: *mut Module, context: &Context) -> Result<(), InitError> {
     let boot = context.boot.validate().map_err(|_| InitError::Manifest)?;
     let root = Window::current_root();
+    let mut window = space::access();
 
     // Bootstrap constructs the initial module tables once. Future context
     // creation must reuse their backing pages, not allocate/reset these tables.
     let pages = size_of::<Module>().div_ceil(PAGE);
-    let module_physical = context
-        .block(hart_id, pages.next_power_of_two().ilog2())
+    let module_physical = window
+        .hart()
+        .block(pages.next_power_of_two().ilog2())
         .map_err(InitError::Allocator)?;
     let mapping = Mapping {
         range: MappingRange {
@@ -119,7 +48,7 @@ pub unsafe fn init(
         flags: *b"rw---",
     };
     window
-        .map(root, mapping, || context.page(hart_id))
+        .map(root, mapping)
         .map_err(|_| tau::AllocError::OutOfMemory)
         .map_err(InitError::Alloc)?;
 
@@ -141,14 +70,12 @@ pub unsafe fn init(
 /// unmapped in the calling hart's fresh root, and `module` must already map
 /// the shared bootstrap module tables.
 pub unsafe fn init_hart(
-    window: &mut WindowAccess,
-    hart_id: usize,
     module_context: *mut ModuleContext,
     module: &Module,
-    context: &Context,
 ) -> Result<usize, InitError> {
     let root = Window::current_root();
     let desc = module.header.descriptor;
+    let mut window = space::access();
     for mapping in [
         Mapping {
             range: MappingRange {
@@ -168,7 +95,7 @@ pub unsafe fn init_hart(
         },
     ] {
         window
-            .map(root, mapping, || context.page(hart_id))
+            .map(root, mapping)
             .map_err(|_| tau::AllocError::OutOfMemory)
             .map_err(InitError::Alloc)?;
     }

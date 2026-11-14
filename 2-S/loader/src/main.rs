@@ -438,14 +438,20 @@ fn init_memory(
     };
     let bootstrap_root = space::Root::sv39(root_table, 0);
     unsafe {
+        hart_mmu
+            .as_mut_ptr()
+            .cast::<space::Hart>()
+            .write(space::Hart::new(
+                hart_id,
+                allocator,
+                st.addr(),
+                dma_allocator,
+                dma_base_addr,
+            ));
         context_page
             .as_mut_ptr()
             .cast::<state::Context>()
             .write(state::Context {
-                allocator,
-                dma_allocator,
-                base_addr: st.addr(),
-                dma_base_addr,
                 bootstrap_root,
                 boot,
             });

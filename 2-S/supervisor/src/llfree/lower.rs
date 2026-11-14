@@ -174,7 +174,7 @@ unsafe impl Sync for Allocator {}
 ///
 /// Metadata is volatile and stored separately from the managed frames.
 /// There is no crash recovery or persistent-metadata support.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Lower<'a> {
     len: usize,
     bitfields: &'a [Align<Bitfield>],

@@ -10,10 +10,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use super::{
-    space::{self, WindowAccess, MappingRange},
-    Context,
-};
+use super::space::{self, WindowAccess, MappingRange};
 
 /// Immutable prepared module descriptor, held in an owned physical page.
 /// Shared module dependency slots contain its physical address.
@@ -330,21 +327,22 @@ impl ModuleSpec {
 }
 
 pub fn create_module(
-    window: &mut WindowAccess,
-    context: &Context,
-    hart_id: usize,
     spec: ModuleSpec,
     caps: tau::ModuleCapabilities,
 ) -> Result<usize, tau::ModuleError> {
+    let mut window = space::access();
     let spec = spec.validate()?;
     let stem_phys = window
-        .new_page(|| context.page(hart_id))
+        .new_page()
         .map_err(|_| tau::ModuleError::OutOfMemory)?;
     let tables_pages = size_of::<Module>().div_ceil(space::PAGE);
-    let physical = match context.block(hart_id, tables_pages.next_power_of_two().ilog2()) {
+    let physical = match window
+        .hart()
+        .block(tables_pages.next_power_of_two().ilog2())
+    {
         Ok(block) => block,
         Err(_e) => {
-            let _ = context.free(hart_id, stem_phys);
+            let _ = window.hart().free(stem_phys);
             return Err(tau::ModuleError::OutOfMemory);
         }
     };
@@ -368,24 +366,22 @@ pub fn create_module(
 }
 
 pub fn bind_dependency(
-    window: &mut WindowAccess,
-    context: &Context,
     module: &Module,
     parent: usize,
     dependency: usize,
 ) -> Result<u16, tau::ModuleError> {
+    let mut window = space::access();
     if parent == dependency {
         return Err(tau::ModuleError::InvalidDependency);
     }
-    let hart_id = window.hart().hart_id;
-    let dependency_phys = space::validate_module_handle(context, dependency)?;
+    let dependency_phys = space::validate_module_handle(dependency)?;
     let parent_phys = if parent == 0 {
         None
     } else {
-        Some(space::validate_module_handle(context, parent)?)
+        Some(space::validate_module_handle(parent)?)
     };
     let binding_stem_phys = window
-        .new_page(|| context.page(hart_id))
+        .new_page()
         .map_err(|_| tau::ModuleError::OutOfMemory)?;
     // Longer cycles are the loader's responsibility. Slots and descriptors
     // remain installed until shutdown; existing context caches stay valid.
@@ -400,14 +396,12 @@ pub fn bind_dependency(
     if let Some(slot) = module.insert_dependency(dependency_phys, binding_stem_phys) {
         Ok(slot)
     } else {
-        let _ = context.free(hart_id, binding_stem_phys);
+        let _ = window.hart().free(binding_stem_phys);
         Err(tau::ModuleError::NoSlots)
     }
 }
 
 pub fn bind_irq(
-    window: &mut WindowAccess,
-    context: &Context,
     target: usize,
     region_index: usize,
     hart_id: usize,
@@ -422,8 +416,9 @@ pub fn bind_irq(
     if region_index >= Module::MAX_IRQS || hart_id >= 64 || target == 0 {
         return Err(tau::ModuleError::InvalidDependency);
     }
+    let mut window = space::access();
     let target_module = {
-        let physical = space::validate_module_handle(context, target)?;
+        let physical = space::validate_module_handle(target)?;
         window.map_module(physical)
     };
     let target = IrqTarget {

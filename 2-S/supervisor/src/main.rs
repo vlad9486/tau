@@ -35,10 +35,6 @@ unsafe extern "C" {
     // Fixed virtual addresses supplied by build.rs. Their scope is determined by
     // the physical pages mapped there, not by these external static declarations.
 
-    // Per-hart sparse window and stack; pass its pointer without a whole borrow.
-    #[allow(improper_ctypes)]
-    static __WINDOW: space::Window;
-
     // Context-private root, dependency roots, and active invocation state.
     // Linker-provided Rust storage, not a foreign-language representation.
     #[allow(improper_ctypes)]
@@ -163,27 +159,25 @@ extern "C" fn _start() -> ! {
 }
 
 extern "C" fn init(hart_id: usize, info: usize, info_pages: usize) -> ! {
-    let mut window = unsafe { space::WindowAccess::new(&raw const __WINDOW) };
     let module_context = UnsafeCell::raw_get(&raw const __MODULE_CONTEXT);
     let module = UnsafeCell::raw_get(&raw const __MODULE);
     let scheduler = UnsafeCell::raw_get(&raw const __SCHEDULER);
     let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
 
-    let root = window.init(hart_id);
+    let mut window = space::access();
+    let root = window.init();
     writeln!(sbi::Console, "SU: {}\r", window.hart()).unwrap_or_default();
 
     let additional_hart = info == 0 && info_pages == 0;
     if !additional_hart {
-        su_try(unsafe { state::init(&mut window, hart_id, module, context) });
+        su_try(unsafe { state::init(module, context) });
     }
-    let sepc = su_try(unsafe {
-        state::init_hart(&mut window, hart_id, module_context, &*module, context)
-    });
+    let sepc = su_try(unsafe { state::init_hart(module_context, &*module) });
     let thread = ThreadState::runnable(hart_id, root, [0; 6], ReturnKind::Syscall);
     if additional_hart {
         su_try(unsafe { (&*scheduler).init_hart(thread) });
     } else {
-        su_try(unsafe { Scheduler::init(scheduler, &mut window, context, thread) });
+        su_try(unsafe { Scheduler::init(scheduler, thread) });
     }
     unsafe {
         arch::asm! {
@@ -376,7 +370,7 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
 
     let local = unsafe { local_access() };
     let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
-    let mut window = unsafe { space::WindowAccess::new(&raw const __WINDOW) };
+    let mut window = space::access();
     let hart_id = window.hart().hart_id;
     if cause == INTERRUPT_BIT | SUPERVISOR_TIMER && scheduler.active(hart_id) {
         let selected = scheduler::preempt(&mut window, local.module, scheduler);
@@ -422,7 +416,6 @@ extern "C" fn respond(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5:
 
 #[inline(always)]
 fn respond_code(code: u16, keep: bool, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) {
-    let window = unsafe { space::WindowAccess::new(&raw const __WINDOW) };
     let local = unsafe { local_access() };
     let Some(caller) = local.module_context.take_caller(keep) else {
         hint::cold_path();
@@ -431,7 +424,7 @@ fn respond_code(code: u16, keep: bool, a1: usize, a2: usize, a3: usize, a4: usiz
         }
         respond_exit();
     };
-    let flush = window.switch_flush(local.module_context.header.root, caller);
+    let flush = space::access().switch_flush(local.module_context.header.root, caller);
     let _local = unsafe { mmu::switch(local, caller, flush) };
     restore_syscall_hot(usize::from(code), a1, a2, a3, a4, a5)
 }
@@ -439,7 +432,7 @@ fn respond_code(code: u16, keep: bool, a1: usize, a2: usize, a3: usize, a4: usiz
 #[cold]
 #[inline(never)]
 fn respond_exit() -> ! {
-    let mut window = unsafe { space::WindowAccess::new(&raw const __WINDOW) };
+    let mut window = space::access();
     let hart_id = window.hart().hart_id;
     let local = unsafe { local_access() };
     let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
@@ -453,14 +446,13 @@ extern "C" fn invoke(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: 
     let Ok(tau::Call::Invoke { slot, arg }) = tau::Call::decode(a0) else {
         unsafe { hint::unreachable_unchecked() };
     };
-    let window = unsafe { space::WindowAccess::new(&raw const __WINDOW) };
     let local = unsafe { local_access() };
     let Some(root) = local.module_context.dependency(slot) else {
         hint::cold_path();
         invoke_slow(slot, a1, a2, a3, a4, a5, arg);
     };
     let caller = local.module_context.header.root;
-    let flush = window.switch_flush(caller, root);
+    let flush = space::access().switch_flush(caller, root);
     // The per-hart window/stack and global supervisor code retain the same
     // backing in both roots. Moving `local` ends all pre-switch borrows.
     let local = unsafe { mmu::switch(local, root, flush) };
@@ -478,9 +470,8 @@ extern "C" fn invoke(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: 
 #[cold]
 #[inline(never)]
 fn invoke_poisoned(caller: space::Root) -> ! {
-    let window = unsafe { space::WindowAccess::new(&raw const __WINDOW) };
     let local = unsafe { local_access() };
-    let flush = window.switch_flush(local.module_context.header.root, caller);
+    let flush = space::access().switch_flush(local.module_context.header.root, caller);
     let _local = unsafe { mmu::switch(local, caller, flush) };
     restore_syscall(tau::ModuleError::Poisoned.encode(), 0, 0, 0, 0, 0)
 }
@@ -488,21 +479,13 @@ fn invoke_poisoned(caller: space::Root) -> ! {
 #[cold]
 #[inline(never)]
 fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, arg: u16) -> ! {
-    let mut window = unsafe { space::WindowAccess::new(&raw const __WINDOW) };
     let local = unsafe { local_access() };
-    let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
-    let (root, entry) = match matter::invoke(
-        &mut window,
-        context,
-        local.module_context,
-        local.module,
-        slot,
-    ) {
+    let (root, entry) = match matter::invoke(local.module_context, local.module, slot) {
         Ok(target) => target,
         Err(error) => restore_syscall(error.encode(), 0, 0, 0, 0, 0),
     };
     let caller = local.module_context.header.root;
-    let flush = window.switch_flush(caller, root);
+    let flush = space::access().switch_flush(caller, root);
     let local = unsafe { mmu::switch(local, root, flush) };
     unsafe {
         matter::ModuleContext::init_zeroed(ptr::from_mut(local.module_context), root, entry);
@@ -520,8 +503,7 @@ fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize,
 extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
     use core::num::NonZero;
 
-    let mut window = unsafe { space::WindowAccess::new(&raw const __WINDOW) };
-    let window = &mut window;
+    let mut window = space::access();
     let hart_id = window.hart().hart_id;
     let local = unsafe { local_access() };
     let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
@@ -533,14 +515,15 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             hint::unreachable_unchecked()
         },
         Ok(tau::Call::Wait) => {
-            match scheduler::wait(window, local.module, scheduler, msg[1], msg[2]) {
+            match scheduler::wait(&mut window, local.module, scheduler, msg[1], msg[2]) {
                 Ok(Some(event)) => {
                     msg = [0; 6];
                     msg[1] = event.0 as usize;
                 }
                 Ok(None) => {
-                    let selected = scheduler::dispatch(window, local.module, scheduler, hart_id);
-                    resume_scheduled(window, local, selected)
+                    let selected =
+                        scheduler::dispatch(&mut window, local.module, scheduler, hart_id);
+                    resume_scheduled(&mut window, local, selected)
                 }
                 Err(error) => {
                     msg = [0; 6];
@@ -549,7 +532,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             }
         }
         Ok(tau::Call::Notify) => {
-            let res = scheduler::notify(window, local.module, scheduler, msg[1]);
+            let res = scheduler::notify(&mut window, local.module, scheduler, msg[1]);
             msg = [0; 6];
             if let Err(error) = res {
                 msg[0] = error as usize;
@@ -561,7 +544,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 msg[0] = tau::WaitError::AccessDenied as usize;
             } else if let Some(target) = local.module.get_irq_target(msg[1]) {
                 scheduler::notify_interrupt(
-                    window,
+                    &mut window,
                     local.module,
                     scheduler,
                     hart_id,
@@ -573,7 +556,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             }
         }
         Ok(tau::Call::Spawn { entry }) => {
-            match scheduler::spawn(window, local.module, context, scheduler, entry, msg) {
+            match scheduler::spawn(local.module, scheduler, entry, msg) {
                 Ok(()) => {
                     msg = [0; 6];
                 }
@@ -588,7 +571,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 msg[0] = tau::AllocError::AccessDenied as usize;
                 msg[1] = 0;
             } else {
-                match context.block_zone(hart_id, u32::from(order), zone) {
+                match window.hart().block_zone(u32::from(order), zone) {
                     Ok(phys) => {
                         msg[0] = 0;
                         msg[1] = phys;
@@ -604,7 +587,10 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             if !local.module.header.caps.frame_alloc {
                 msg[0] = tau::FreeError::AccessDenied as usize;
             } else {
-                msg[0] = match context.free_block_zone(hart_id, msg[1], u32::from(order), zone) {
+                msg[0] = match window
+                    .hart()
+                    .free_block_zone(msg[1], u32::from(order), zone)
+                {
                     Ok(()) => 0,
                     Err(llfree::Error::Address) => tau::FreeError::InvalidAddress as usize,
                     Err(_) => tau::FreeError::AlreadyFree as usize,
@@ -630,7 +616,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 if target.is_none() && slot == 0 && module.overlaps_stem(mapping.range) {
                     return Err(tau::AllocError::AccessDenied);
                 };
-                space::map_pages(window, hart_id, context, module, mapping, target, slot)
+                space::map_pages(module, mapping, target, slot)
             })();
             msg[0] = match res {
                 Ok(()) => 0,
@@ -654,7 +640,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 if target.is_none() && slot == 0 && module.overlaps_stem(range) {
                     return Err(tau::FreeError::AccessDenied);
                 };
-                space::unmap_pages(window, hart_id, context, module, range, target, slot)
+                space::unmap_pages(module, range, target, slot)
             })();
 
             msg[0] = match res {
@@ -677,7 +663,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 };
                 // don't need to validate, loader is trusted
                 let caps = tau::ModuleCapabilities::from_raw(msg[5] as u8);
-                matter::create_module(window, context, hart_id, spec, caps)
+                matter::create_module(spec, caps)
             })();
             match res {
                 Ok(handle) => {
@@ -696,7 +682,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 if !local.module.header.caps.loader {
                     return Err(tau::ModuleError::AccessDenied);
                 }
-                matter::bind_dependency(window, context, local.module, msg[1], msg[2])
+                matter::bind_dependency(local.module, msg[1], msg[2])
             })();
             match res {
                 Ok(slot) => {
@@ -714,7 +700,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 if !local.module.header.caps.loader {
                     return Err(tau::ModuleError::AccessDenied);
                 }
-                matter::bind_irq(window, context, msg[1], msg[2], msg[3], msg[4])
+                matter::bind_irq(msg[1], msg[2], msg[3], msg[4])
             })();
             msg = [0; 6];
             if let Err(error) = res {
@@ -722,7 +708,7 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             }
         }
         Ok(tau::Call::StartHart) => {
-            let res = scheduler::start_hart(window, local.module, context, scheduler, msg[1]);
+            let res = scheduler::start_hart(&mut window, local.module, context, scheduler, msg[1]);
             msg = [0; 6];
             if let Err(error) = res {
                 msg[0] = error as usize;

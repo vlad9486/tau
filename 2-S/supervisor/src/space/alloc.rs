@@ -5,8 +5,8 @@
 use core::{num::NonZero, arch};
 
 use super::{
-    llfree, Context, Module,
-    vmem::{self, Mapping, Window, WindowAccess, MappingRange},
+    llfree, Module,
+    vmem::{self, Mapping, Window, MappingRange},
 };
 
 fn valid_pages(MappingRange { addr, pages }: MappingRange) -> bool {
@@ -35,12 +35,13 @@ fn decode_flags(flags: usize) -> Option<[u8; 5]> {
 /// Handles are supplied by the trusted loader, not arbitrary module code.
 /// Bounds checks prevent overflow and aliases outside managed physical memory;
 /// they do not establish that the page contains a prepared descriptor.
-pub fn validate_module_handle(context: &Context, handle: usize) -> Result<usize, tau::ModuleError> {
+pub fn validate_module_handle(handle: usize) -> Result<usize, tau::ModuleError> {
     let page = handle
         .checked_mul(vmem::PAGE)
         .ok_or(tau::ModuleError::InvalidDependency)?;
+    let window = vmem::access();
     let frame = page
-        .checked_sub(context.base_addr)
+        .checked_sub(window.hart().base_addr)
         .ok_or(tau::ModuleError::InvalidDependency)?
         / vmem::PAGE;
     let module_pages = size_of::<Module>().div_ceil(vmem::PAGE);
@@ -48,7 +49,7 @@ pub fn validate_module_handle(context: &Context, handle: usize) -> Result<usize,
         || page & (1 << (usize::BITS - 1)) != 0
         || frame
             .checked_add(module_pages)
-            .is_none_or(|end| end > context.allocator.frames())
+            .is_none_or(|end| end > window.hart().allocator.frames())
     {
         return Err(tau::ModuleError::InvalidDependency);
     }
@@ -58,17 +59,16 @@ pub fn validate_module_handle(context: &Context, handle: usize) -> Result<usize,
 /// Validate memory request from privileged module that maps/unmaps at `target` module
 /// or at one of `target` module's bound dependency stems (`slot != 0`).
 fn validate_target(
-    window: &mut WindowAccess,
-    context: &Context,
     module: &Module,
     MappingRange { addr, pages }: MappingRange,
     target: Option<NonZero<usize>>,
     slot: u16,
 ) -> Result<usize, ()> {
+    let mut window = vmem::access();
     let last = addr + (pages * vmem::PAGE - 1);
     if slot == 0 {
         let target = target.ok_or(())?;
-        let physical = validate_module_handle(context, target.get()).map_err(|_| ())?;
+        let physical = validate_module_handle(target.get()).map_err(|_| ())?;
         let dep = window.read_module_descriptor(physical);
         if vmem::addr_to_index(addr) != vmem::ROOT_INDEX
             || vmem::addr_to_index(last) != vmem::ROOT_INDEX
@@ -85,7 +85,7 @@ fn validate_target(
         let target_module = match target {
             None => module,
             Some(target) => {
-                let physical = validate_module_handle(context, target.get()).map_err(|_| ())?;
+                let physical = validate_module_handle(target.get()).map_err(|_| ())?;
                 &*window.map_module(physical)
             }
         };
@@ -126,30 +126,28 @@ pub fn validate_map(
 }
 
 pub fn map_pages(
-    window: &mut WindowAccess,
-    hart_id: usize,
-    context: &Context,
     module: &Module,
     mapping: Mapping,
     target: Option<NonZero<usize>>,
     slot: u16,
 ) -> Result<(), tau::AllocError> {
+    let mut window = vmem::access();
     if target.is_some() || slot != 0 {
-        let stem = validate_target(window, context, module, mapping.range, target, slot)
+        let stem = validate_target(module, mapping.range, target, slot)
             .map_err(|()| tau::AllocError::InvalidAddress)?;
-        if let Err(error) = window.map_stem(stem, mapping, || context.page(hart_id)) {
+        if let Err(error) = window.map_stem(stem, mapping) {
             if !matches!(
                 error,
                 llfree::Error::Address | llfree::Error::InvalidArgument
             ) {
                 for virt in mapping.range.pages() {
-                    let _ = window.unmap_stem(stem, None, virt, |page| context.free(hart_id, page));
+                    let _ = window.unmap_stem(stem, None, virt);
                 }
             }
             return Err(map_err(error));
         }
     } else {
-        alloc_pages(window, hart_id, context, mapping)?;
+        alloc_pages(mapping)?;
     }
     if mapping.flags[2] != b'-' {
         unsafe {
@@ -170,38 +168,32 @@ pub fn validate_unmap(addr: usize, pages: usize) -> Result<MappingRange, tau::Fr
 }
 
 pub fn unmap_pages(
-    window: &mut WindowAccess,
-    hart_id: usize,
-    context: &Context,
     module: &Module,
     range: MappingRange,
     target: Option<NonZero<usize>>,
     slot: u16,
 ) -> Result<(), tau::FreeError> {
+    let mut window = vmem::access();
     if target.is_some() || slot != 0 {
-        let stem = validate_target(window, context, module, range, target, slot)
+        let stem = validate_target(module, range, target, slot)
             .map_err(|()| tau::FreeError::InvalidAddress)?;
         for virt in range.pages() {
-            let _ = window.unmap_stem(stem, None, virt, |page| context.free(hart_id, page));
+            let _ = window.unmap_stem(stem, None, virt);
         }
     } else {
         let root = Window::current_root();
         for virt in range.pages() {
-            let _ = window.unmap(root, virt, |page| context.free(hart_id, page));
+            let _ = window.unmap(root, virt);
         }
         return Ok(());
     }
     Ok(())
 }
 
-fn alloc_pages(
-    window: &mut WindowAccess,
-    hart_id: usize,
-    context: &Context,
-    mapping: Mapping,
-) -> Result<(), tau::AllocError> {
+fn alloc_pages(mapping: Mapping) -> Result<(), tau::AllocError> {
+    let mut window = vmem::access();
     let root = Window::current_root();
-    if let Err(error) = window.map(root, mapping, || context.page(hart_id)) {
+    if let Err(error) = window.map(root, mapping) {
         // Roll back pages allocated by this failed request; source physical
         // mappings are borrowed and are never returned to the allocator.
         if !matches!(
@@ -209,7 +201,7 @@ fn alloc_pages(
             llfree::Error::Address | llfree::Error::InvalidArgument
         ) {
             for virt in mapping.range.pages() {
-                let _ = window.unmap(root, virt, |page| context.free(hart_id, page));
+                let _ = window.unmap(root, virt);
             }
         }
         return Err(map_err(error));
