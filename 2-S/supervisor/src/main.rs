@@ -159,14 +159,14 @@ extern "C" fn _start() -> ! {
 }
 
 extern "C" fn init(hart_id: usize, info: usize, info_pages: usize) -> ! {
+    let mut window = space::access();
+    let root = window.init();
+    writeln!(sbi::Console, "SU: {}\r", window.hart()).unwrap_or_default();
+
     let module_context = UnsafeCell::raw_get(&raw const __MODULE_CONTEXT);
     let module = UnsafeCell::raw_get(&raw const __MODULE);
     let scheduler = UnsafeCell::raw_get(&raw const __SCHEDULER);
     let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
-
-    let mut window = space::access();
-    let root = window.init();
-    writeln!(sbi::Console, "SU: {}\r", window.hart()).unwrap_or_default();
 
     let additional_hart = info == 0 && info_pages == 0;
     if !additional_hart {

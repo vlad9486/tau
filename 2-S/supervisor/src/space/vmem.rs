@@ -341,13 +341,15 @@ impl WindowAccess {
             arch::asm!("csrw satp, {0}", in(reg) probe.0.get(), options(nostack));
         }
         let mask = Window::current_root().asid();
+        self.hart_mut().mask = mask;
+        let asid = self.allocate_tag().unwrap_or(0);
+        let root = Root::sv39(original.page(), asid);
         unsafe {
-            arch::asm!("csrw satp, {0}", in(reg) original.0.get(), options(nostack));
+            arch::asm!("csrw satp, {0}", in(reg) root.0.get(), options(nostack));
         }
         sfence_vma(None, None);
-        self.hart_mut().mask = mask;
 
-        original
+        root
     }
 
     /// Allocate a hart-local ASID tag for a new context root.
