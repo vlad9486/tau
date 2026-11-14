@@ -53,7 +53,7 @@ unsafe extern "C" {
     static __CONTEXT: UnsafeCell<state::Context>;
 }
 
-pub const WINDOW_END: usize = 0xffff_ffc0_0020_0000;
+const WINDOW_END: usize = 0xffff_ffc0_0020_0000;
 
 #[cold]
 fn su_try<T, E>(v: Result<T, E>) -> T
@@ -359,7 +359,7 @@ extern "C" fn handle_syscall() -> ! {
         stack = const { WINDOW_END },
         respond = sym respond,
         invoke = sym invoke,
-        syscall = sym syscall_slow,
+        syscall = sym syscall,
     }
 }
 
@@ -370,15 +370,13 @@ extern "C" fn handle_non_syscall_trap(cause: usize) -> ! {
 
     let local = unsafe { local_access() };
     let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
-    let mut window = space::access();
-    let hart_id = window.hart().hart_id;
-    if cause == INTERRUPT_BIT | SUPERVISOR_TIMER && scheduler.active(hart_id) {
-        let selected = scheduler::preempt(&mut window, local.module, scheduler);
+    if cause == INTERRUPT_BIT | SUPERVISOR_TIMER && scheduler.active() {
+        let selected = scheduler::preempt(local.module, scheduler);
         resume_scheduled(local, selected)
-    } else if cause == INTERRUPT_BIT | SUPERVISOR_EXTERNAL && scheduler.active(hart_id) {
+    } else if cause == INTERRUPT_BIT | SUPERVISOR_EXTERNAL && scheduler.active() {
         csr::rc!("sie", 1 << 9);
-        scheduler::notify_hardware_interrupt(&mut window, local.module, scheduler, hart_id);
-        let selected = scheduler::preempt(&mut window, local.module, scheduler);
+        scheduler::notify_hardware_interrupt(local.module, scheduler);
+        let selected = scheduler::preempt(local.module, scheduler);
         resume_scheduled(local, selected)
     } else if cause & INTERRUPT_BIT == 0 {
         if !local.module.header.caps.pure {
@@ -432,12 +430,10 @@ fn respond_code(code: u16, keep: bool, a1: usize, a2: usize, a3: usize, a4: usiz
 #[cold]
 #[inline(never)]
 fn respond_exit() -> ! {
-    let mut window = space::access();
-    let hart_id = window.hart().hart_id;
     let local = unsafe { local_access() };
     let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
-    scheduler::exit(&mut window, local.module, scheduler, hart_id);
-    let selected = scheduler::dispatch(&mut window, local.module, scheduler, hart_id);
+    scheduler::exit(local.module, scheduler);
+    let selected = scheduler::dispatch(local.module, scheduler);
     resume_scheduled(local, selected)
 }
 
@@ -500,11 +496,10 @@ fn invoke_slow(slot: u16, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize,
 
 #[cold]
 #[inline(never)]
-extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
+extern "C" fn syscall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> ! {
     use core::num::NonZero;
 
     let mut window = space::access();
-    let hart_id = window.hart().hart_id;
     let local = unsafe { local_access() };
     let context = unsafe { &*UnsafeCell::raw_get(&raw const __CONTEXT) };
     let scheduler = unsafe { &*UnsafeCell::raw_get(&raw const __SCHEDULER) };
@@ -514,25 +509,22 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
         Ok(tau::Call::Invoke { .. } | tau::Call::Respond { .. }) => unsafe {
             hint::unreachable_unchecked()
         },
-        Ok(tau::Call::Wait) => {
-            match scheduler::wait(&mut window, local.module, scheduler, msg[1], msg[2]) {
-                Ok(Some(event)) => {
-                    msg = [0; 6];
-                    msg[1] = event.0 as usize;
-                }
-                Ok(None) => {
-                    let selected =
-                        scheduler::dispatch(&mut window, local.module, scheduler, hart_id);
-                    resume_scheduled(local, selected)
-                }
-                Err(error) => {
-                    msg = [0; 6];
-                    msg[0] = error as usize;
-                }
+        Ok(tau::Call::Wait) => match scheduler::wait(local.module, scheduler, msg[1], msg[2]) {
+            Ok(Some(event)) => {
+                msg = [0; 6];
+                msg[1] = event.0 as usize;
             }
-        }
+            Ok(None) => {
+                let selected = scheduler::dispatch(local.module, scheduler);
+                resume_scheduled(local, selected)
+            }
+            Err(error) => {
+                msg = [0; 6];
+                msg[0] = error as usize;
+            }
+        },
         Ok(tau::Call::Notify) => {
-            let res = scheduler::notify(&mut window, local.module, scheduler, msg[1]);
+            let res = scheduler::notify(local.module, scheduler, msg[1]);
             msg = [0; 6];
             if let Err(error) = res {
                 msg[0] = error as usize;
@@ -544,10 +536,8 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
                 msg[0] = tau::WaitError::AccessDenied as usize;
             } else if let Some(target) = local.module.get_irq_target(msg[1]) {
                 scheduler::notify_interrupt(
-                    &mut window,
                     local.module,
                     scheduler,
-                    hart_id,
                     usize::from(target.hart),
                     target.bit.get(),
                 );
@@ -708,7 +698,17 @@ extern "C" fn syscall_slow(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize
             }
         }
         Ok(tau::Call::StartHart) => {
-            let res = scheduler::start_hart(&mut window, local.module, context, scheduler, msg[1]);
+            let new_hart_id = msg[1];
+            let res = (|| {
+                if !local.module.header.caps.loader {
+                    return Err(tau::SpawnError::AccessDenied);
+                }
+                if new_hart_id >= scheduler::MAX_HARTS {
+                    return Err(tau::SpawnError::InvalidHart);
+                }
+                scheduler::start_hart(local.module, context, scheduler, new_hart_id)
+            })();
+
             msg = [0; 6];
             if let Err(error) = res {
                 msg[0] = error as usize;

@@ -4,14 +4,12 @@
 
 //! Syscalls change protected wait/scheduling state without switching roots.
 
-use tau::{Event, SpawnError, WaitError};
-
 use super::{
     csr, sbi,
     thread::{ActiveWait, Phase, Resume, ThreadState},
     runtime, Context, Scheduler,
     matter::{self, Module},
-    space::{self, Window, WindowAccess},
+    space::{self, Window},
 };
 
 pub fn spawn(
@@ -19,7 +17,7 @@ pub fn spawn(
     scheduler: &Scheduler,
     entry: usize,
     message: [usize; 6],
-) -> Result<(), SpawnError> {
+) -> Result<(), tau::SpawnError> {
     let mut window = space::access();
     let hart = window.hart().hart_id;
     let mut desc = module.header.descriptor;
@@ -29,7 +27,7 @@ pub fn spawn(
             .resolve_stem(desc.stem_phys, entry)
             .is_some_and(|(_, flags)| flags & 26 == 26)
     {
-        return Err(SpawnError::InvalidEntry);
+        return Err(tau::SpawnError::InvalidEntry);
     }
     desc.entry = entry;
     let current = Window::current_root();
@@ -43,7 +41,7 @@ pub fn spawn(
         drop(scheduler);
         let _ = window.destroy(root);
         window.release_tag(root.asid());
-        return Err(SpawnError::NoSlots);
+        return Err(tau::SpawnError::NoSlots);
     }
     let id = scheduler.count + 1;
     *scheduler
@@ -59,61 +57,55 @@ pub fn spawn(
 }
 
 pub fn start_hart(
-    window: &mut WindowAccess,
     module: &Module,
     context: &Context,
     scheduler: &Scheduler,
     hart_id: usize,
-) -> Result<(), SpawnError> {
-    if !module.header.caps.loader {
-        return Err(SpawnError::AccessDenied);
-    }
-    if hart_id >= runtime::MAX_HARTS {
-        return Err(SpawnError::InvalidHart);
-    }
+) -> Result<(), tau::SpawnError> {
     {
         let scheduler = scheduler.lock();
         if scheduler.hart(hart_id).running != 0 {
-            return Err(SpawnError::InvalidHart);
+            return Err(tau::SpawnError::InvalidHart);
         }
         if scheduler.count == scheduler.threads.len() {
-            return Err(SpawnError::NoSlots);
+            return Err(tau::SpawnError::NoSlots);
         }
     }
+    let mut window = space::access();
     let root = matter::spawn_hart(context, module.header.descriptor, hart_id)?;
     if sbi::hart_start(hart_id, window.hart().base_addr, root.0.get()).is_err() {
         let _ = window.destroy(root);
-        return Err(SpawnError::InvalidHart);
+        return Err(tau::SpawnError::InvalidHart);
     }
     Ok(())
 }
 
 pub fn wait(
-    window: &mut WindowAccess,
     module: &Module,
     scheduler: &Scheduler,
     pointer: usize,
     deadline: usize,
-) -> Result<Option<Event>, WaitError> {
+) -> Result<Option<tau::Event>, tau::WaitError> {
+    let mut window = space::access();
     let mut scheduler = scheduler.lock();
     let root = Window::current_root();
     let table = &module.header.wait_table;
     let index = table.index(pointer)?;
-    if !table.occupied(window, root, index)? {
-        return Err(WaitError::InvalidWaiter);
+    if !table.occupied(&mut window, root, index)? {
+        return Err(tau::WaitError::InvalidWaiter);
     }
     let mut wait_slot = unsafe { module.read_wait(index) };
     if wait_slot.thread_id != 0 {
-        return Err(WaitError::Busy);
+        return Err(tau::WaitError::Busy);
     }
     if wait_slot.pending != 0 {
         let pending = wait_slot.pending;
         wait_slot.pending = 0;
         unsafe { module.write_wait(index, wait_slot) };
-        return Ok(Some(Event(pending)));
+        return Ok(Some(tau::Event(pending)));
     }
     if deadline != 0 && deadline <= runtime::now() {
-        return Ok(Some(Event::TIMEOUT));
+        return Ok(Some(tau::Event::TIMEOUT));
     }
     let module_addr = module.header.descriptor.physical;
     let hart = window.hart().hart_id;
@@ -146,17 +138,17 @@ pub fn wait(
 }
 
 pub fn notify(
-    window: &mut WindowAccess,
     module: &Module,
     scheduler: &Scheduler,
     pointer: usize,
-) -> Result<(), WaitError> {
+) -> Result<(), tau::WaitError> {
+    let mut window = space::access();
     let mut scheduler = scheduler.lock();
     let hart = window.hart().hart_id;
     let root = Window::current_root();
     let table = &module.header.wait_table;
     let index = table.index(pointer)?;
-    if !table.occupied(window, root, index)? {
+    if !table.occupied(&mut window, root, index)? {
         return Ok(());
     }
     let mut slot = unsafe { module.read_wait(index) };
@@ -172,7 +164,8 @@ pub fn notify(
             && wait.slot == index
             && wait.sequence == slot.sequence
         {
-            target_hart = scheduler.complete(module, slot.thread_id, slot, Event::NOTIFIED, false);
+            target_hart =
+                scheduler.complete(module, slot.thread_id, slot, tau::Event::NOTIFIED, false);
         }
     }
     if target_hart == hart {
@@ -185,7 +178,9 @@ pub fn notify(
     Ok(())
 }
 
-pub fn exit(window: &mut WindowAccess, module: &Module, scheduler: &Scheduler, hart_id: usize) {
+pub fn exit(module: &Module, scheduler: &Scheduler) {
+    let mut window = space::access();
+    let hart_id = window.hart().hart_id;
     let mut scheduler = scheduler.lock();
     let running = scheduler.running(hart_id);
     unsafe { scheduler.set_deadline(running - 1, 0) };

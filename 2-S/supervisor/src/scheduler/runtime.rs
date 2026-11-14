@@ -21,7 +21,7 @@ use super::{
 };
 
 const CAPACITY: usize = Module::WAIT_SIZE;
-pub(super) const MAX_HARTS: usize = 64;
+pub const MAX_HARTS: usize = 64;
 // Raw time-counter ticks, deliberately independent of wall-clock time.
 const QUANTUM: usize = 100_000;
 
@@ -385,7 +385,8 @@ impl Scheduler {
         Ok(())
     }
 
-    pub fn active(&self, hart_id: usize) -> bool {
+    pub fn active(&self) -> bool {
+        let hart_id = space::access().hart().hart_id;
         self.lock().hart(hart_id).active
     }
 }
@@ -396,14 +397,8 @@ pub struct Dispatch {
     pub message: [usize; 6],
 }
 
-pub fn notify_interrupt(
-    window: &mut WindowAccess,
-    module: &Module,
-    scheduler: &Scheduler,
-    current_hart: usize,
-    target_hart: usize,
-    bit: u8,
-) {
+pub fn notify_interrupt(module: &Module, scheduler: &Scheduler, target_hart: usize, bit: u8) {
+    let mut window = space::access();
     let mut scheduler = scheduler.lock();
     let Some(target) = &scheduler.hart(target_hart).interrupt_target else {
         return;
@@ -414,7 +409,7 @@ pub fn notify_interrupt(
 
     let mask = 1u64 << bit;
     let event = Event(mask);
-    if !scheduler.complete_wait(window, module, thread_id, event, true) {
+    if !scheduler.complete_wait(&mut window, module, thread_id, event, true) {
         let target_module = if target_module_addr == module.header.descriptor.physical {
             module
         } else {
@@ -424,6 +419,7 @@ pub fn notify_interrupt(
         slot.pending |= mask;
         unsafe { target_module.write_wait(target_slot, slot) };
     }
+    let current_hart = window.hart().hart_id;
     if target_hart == current_hart {
         if scheduler.hart(current_hart).active {
             scheduler.program(current_hart);
@@ -433,19 +429,16 @@ pub fn notify_interrupt(
     }
 }
 
-pub fn notify_hardware_interrupt(
-    window: &mut WindowAccess,
-    module: &Module,
-    scheduler: &Scheduler,
-    hart_id: usize,
-) {
-    notify_interrupt(window, module, scheduler, hart_id, hart_id, 0);
+pub fn notify_hardware_interrupt(module: &Module, scheduler: &Scheduler) {
+    let hart_id = space::access().hart().hart_id;
+    notify_interrupt(module, scheduler, hart_id, 0);
 }
 
-pub fn preempt(window: &mut WindowAccess, module: &Module, scheduler: &Scheduler) -> Dispatch {
+pub fn preempt(module: &Module, scheduler: &Scheduler) -> Dispatch {
+    let mut window = space::access();
     let mut scheduler = scheduler.lock();
     let hart_id = window.hart().hart_id;
-    scheduler.expire(window, module, hart_id);
+    scheduler.expire(&mut window, module, hart_id);
     let length = scheduler.hart(hart_id).length;
     let id = scheduler.running(hart_id);
     let thread = scheduler.thread_state_mut(id);
@@ -473,16 +466,13 @@ pub fn preempt(window: &mut WindowAccess, module: &Module, scheduler: &Scheduler
 /// Interrupts remain disabled between committing departure and installing the
 /// selected root. An idle hart waits with SIE clear and STIE enabled: WFI may
 /// wake for a pending timer without entering the user trap entry from S-mode.
-pub fn dispatch(
-    window: &mut WindowAccess,
-    module: &Module,
-    scheduler: &Scheduler,
-    hart_id: usize,
-) -> Dispatch {
+pub fn dispatch(module: &Module, scheduler: &Scheduler) -> Dispatch {
+    let mut window = space::access();
+    let hart_id = window.hart().hart_id;
     loop {
         {
             let mut scheduler = scheduler.lock();
-            scheduler.expire(window, module, hart_id);
+            scheduler.expire(&mut window, module, hart_id);
             let running = scheduler.running(hart_id);
             if running != 0 {
                 let thread = scheduler.thread_state_mut(running);
@@ -532,7 +522,7 @@ pub fn dispatch(
         unsafe { arch::asm!("wfi", options(nostack)) };
         if csr::r!("sip") & (1 << 9) != 0 {
             csr::rc!("sie", 1 << 9);
-            notify_hardware_interrupt(window, module, scheduler, hart_id);
+            notify_hardware_interrupt(module, scheduler);
         }
     }
 }
